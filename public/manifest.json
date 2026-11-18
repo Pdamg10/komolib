@@ -1,0 +1,17 @@
+{
+  "name": "KomoLib — Librería Universal",
+  "short_name": "KomoLib",
+  "description": "Librería personalizable para libros, mangas, manhwas, cómics y audiolibros.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#d8cbc1",
+  "theme_color": "#f3ede4",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,123 @@
+import JSZip from 'jszip';
+import { blobToDataUrl, naturalSortStrings } from './coverGenerator';
+
+const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|avif|bmp|svg)$/i;
+
+function mimeFromName(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.avif')) return 'image/avif';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  if (lower.endsWith('.bmp')) return 'image/bmp';
+  return 'image/jpeg';
+}
+
+export interface ComicPage {
+  name: string;
+  url: string;
+}
+
+export async function extractCbzPages(blob: Blob): Promise<ComicPage[]> {
+  const zip = await JSZip.loadAsync(blob);
+  const imageFiles = Object.values(zip.files)
+    .filter((f) => !f.dir && !f.name.startsWith('__MACOSX') && IMAGE_EXT_RE.test(f.name))
+    .sort((a, b) => naturalSortStrings(a.name, b.name));
+
+  const pages: ComicPage[] = [];
+  for (const file of imageFiles) {
+    const ab = await file.async('arraybuffer');
+    const imgBlob = new Blob([ab], { type: mimeFromName(file.name) });
+    pages.push({
+      name: file.name,
+      url: URL.createObjectURL(imgBlob),
+    });
+  }
+  return pages;
+}
+
+export async function extractCbzCoverAndCount(
+  blob: Blob
+): Promise<{ coverDataUrl?: string; pageCount: number }> {
+  const zip = await JSZip.loadAsync(blob);
+  const imageFiles = Object.values(zip.files)
+    .filter((f) => !f.dir && !f.name.startsWith('__MACOSX') && IMAGE_EXT_RE.test(f.name))
+    .sort((a, b) => naturalSortStrings(a.name, b.name));
+
+  if (imageFiles.length === 0) {
+    return { pageCount: 0 };
+  }
+  const first = imageFiles[0];
+  const ab = await first.async('arraybuffer');
+  const imgBlob = new Blob([ab], { type: mimeFromName(first.name) });
+  const coverDataUrl = await blobToDataUrl(imgBlob);
+  return { coverDataUrl, pageCount: imageFiles.length };
+}
+
+let cachedWasmBinary: ArrayBuffer | null = null;
+
+async function loadUnrarWasm(): Promise<ArrayBuffer> {
+  if (cachedWasmBinary) return cachedWasmBinary;
+  const wasmUrl = new URL('node-unrar-js/esm/js/unrar.wasm', import.meta.url).href;
+  const res = await fetch(wasmUrl);
+  if (!res.ok) throw new Error('No se pudo cargar unrar.wasm');
+  cachedWasmBinary = await res.arrayBuffer();
+  return cachedWasmBinary;
+}
+
+export async function extractCbrPages(blob: Blob): Promise<ComicPage[]> {
+  const { createExtractorFromData } = await import('node-unrar-js');
+  const wasmBinary = await loadUnrarWasm();
+  const data = await blob.arrayBuffer();
+  const extractor = await createExtractorFromData({ data, wasmBinary });
+  const list = extractor.getFileList();
+  const headers = [...list.fileHeaders]
+    .filter((h) => !h.flags.directory && IMAGE_EXT_RE.test(h.name))
+    .sort((a, b) => naturalSortStrings(a.name, b.name));
+
+  const extracted = extractor.extract({ files: headers.map((h) => h.name) });
+  const pages: ComicPage[] = [];
+  for (const file of extracted.files) {
+    if (!file.extraction) continue;
+    const copy = new Uint8Array(file.extraction);
+    const imgBlob = new Blob([copy], { type: mimeFromName(file.fileHeader.name) });
+    pages.push({
+      name: file.fileHeader.name,
+      url: URL.createObjectURL(imgBlob),
+    });
+  }
+  pages.sort((a, b) => naturalSortStrings(a.name, b.name));
+  return pages;
+}
+
+export async function extractCbrCoverAndCount(
+  blob: Blob
+): Promise<{ coverDataUrl?: string; pageCount: number }> {
+  try {
+    const { createExtractorFromData } = await import('node-unrar-js');
+    const wasmBinary = await loadUnrarWasm();
+    const data = await blob.arrayBuffer();
+    const extractor = await createExtractorFromData({ data, wasmBinary });
+    const list = extractor.getFileList();
+    const headers = [...list.fileHeaders]
+      .filter((h) => !h.flags.directory && IMAGE_EXT_RE.test(h.name))
+      .sort((a, b) => naturalSortStrings(a.name, b.name));
+
+    if (!headers.length) return { pageCount: 0 };
+    const first = headers[0];
+    const extracted = extractor.extract({ files: [first.name] });
+    for (const file of extracted.files) {
+      if (file.extraction) {
+        const copy = new Uint8Array(file.extraction);
+        const imgBlob = new Blob([copy], { type: mimeFromName(first.name) });
+        const coverDataUrl = await blobToDataUrl(imgBlob);
+        return { coverDataUrl, pageCount: headers.length };
+      }
+    }
+    return { pageCount: headers.length };
+  } catch (err) {
+    console.warn('CBR metadata parse fallback:', err);
+    return { pageCount: 0 };
+  }
+}
