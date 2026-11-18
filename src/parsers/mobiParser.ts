@@ -3,11 +3,82 @@
  * Supports uncompressed (type 1) and PalmDOC LZ77 compressed (type 2) MOBI/PRC/AZW files.
  */
 
+import { blobToDataUrl, optimizeCoverDataUrl } from './coverGenerator';
+
 export interface MobiParseResult {
   title: string;
   author: string;
+  coverDataUrl?: string;
   html: string;
   warning?: string;
+}
+
+function detectMobiImageMime(bytes: Uint8Array): string | null {
+  if (bytes.length < 16) return null;
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'image/gif';
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  return null;
+}
+
+async function extractMobiCoverFromRecords(
+  bytes: Uint8Array,
+  offsets: number[],
+  firstImageIndex: number,
+  coverOffset: number | null,
+  thumbOffset: number | null,
+  fallbackStart: number
+): Promise<string | undefined> {
+  const tryRecord = async (recIdx: number): Promise<string | undefined> => {
+    if (recIdx <= 0 || recIdx >= offsets.length) return undefined;
+    const start = offsets[recIdx];
+    const end = recIdx + 1 < offsets.length ? offsets[recIdx + 1] : bytes.byteLength;
+    if (end - start < 512) return undefined;
+    const slice = bytes.subarray(start, end);
+    const mime = detectMobiImageMime(slice);
+    if (!mime) return undefined;
+    const copy = new Uint8Array(slice);
+    const raw = await blobToDataUrl(new Blob([copy], { type: mime }));
+    return optimizeCoverDataUrl(raw);
+  };
+
+  if (firstImageIndex !== 0xffffffff && firstImageIndex < offsets.length) {
+    if (coverOffset !== null && coverOffset !== 0xffffffff) {
+      const url = await tryRecord(firstImageIndex + coverOffset);
+      if (url) return url;
+    }
+    if (thumbOffset !== null && thumbOffset !== 0xffffffff) {
+      const url = await tryRecord(firstImageIndex + thumbOffset);
+      if (url) return url;
+    }
+  }
+
+  // Fallback: scan image records after text records for the first sizable cover image
+  const scanStart =
+    firstImageIndex !== 0xffffffff && firstImageIndex < offsets.length
+      ? firstImageIndex
+      : Math.max(1, fallbackStart);
+  const scanLimit = Math.min(offsets.length, scanStart + 24);
+  for (let idx = scanStart; idx < scanLimit; idx++) {
+    const start = offsets[idx];
+    const end = idx + 1 < offsets.length ? offsets[idx + 1] : bytes.byteLength;
+    if (end - start < 2048) continue;
+    const url = await tryRecord(idx);
+    if (url) return url;
+  }
+  return undefined;
 }
 
 function decompressPalmDoc(input: Uint8Array): Uint8Array {
@@ -103,11 +174,16 @@ export async function parseMobiBlob(blob: Blob, fallbackTitle: string): Promise<
   }
 
   let title = pdbName;
+  let author = 'Biblioteca MOBI';
   let encoding = 65001; // UTF-8 default
   let extraFlags = 0;
+  let firstImageIndex = 0xffffffff;
+  let coverOffset: number | null = null;
+  let thumbOffset: number | null = null;
 
   // Check MOBI header magic at offset 16
   if (rec0.byteLength >= 132 && readAscii(rec0, 16, 4) === 'MOBI') {
+    const mobiHeaderLen = rec0.getUint32(20, false);
     encoding = rec0.getUint32(28, false);
     const fullNameOffset = rec0.getUint32(84, false);
     const fullNameLen = rec0.getUint32(88, false);
@@ -116,15 +192,52 @@ export async function parseMobiBlob(blob: Blob, fallbackTitle: string): Promise<
       const parsedTitle = dec.decode(new Uint8Array(buf, rec0Start + fullNameOffset, fullNameLen)).trim();
       if (parsedTitle) title = parsedTitle;
     }
+    firstImageIndex = rec0.getUint32(108, false);
+    const exthFlags = rec0.getUint32(128, false);
     if (rec0.byteLength >= 244) {
       extraFlags = rec0.getUint16(242, false);
     }
+
+    // Parse EXTH header for cover offset (201), thumbnail offset (202), and author (100)
+    const exthStart = 16 + mobiHeaderLen;
+    if ((exthFlags & 0x40) !== 0 && exthStart + 12 <= rec0.byteLength && readAscii(rec0, exthStart, 4) === 'EXTH') {
+      const exthCount = rec0.getUint32(exthStart + 8, false);
+      let pos = exthStart + 12;
+      const dec = new TextDecoder(encoding === 1252 ? 'windows-1252' : 'utf-8', { fatal: false });
+      for (let i = 0; i < exthCount && pos + 8 <= rec0.byteLength; i++) {
+        const recType = rec0.getUint32(pos, false);
+        const recLen = rec0.getUint32(pos + 4, false);
+        if (recLen < 8 || pos + recLen > rec0.byteLength) break;
+        const valLen = recLen - 8;
+        if (recType === 201 && valLen === 4) {
+          coverOffset = rec0.getUint32(pos + 8, false);
+        } else if (recType === 202 && valLen === 4) {
+          thumbOffset = rec0.getUint32(pos + 8, false);
+        } else if (recType === 100 && valLen > 0) {
+          const parsedAuthor = dec
+            .decode(new Uint8Array(buf, rec0Start + pos + 8, valLen))
+            .trim();
+          if (parsedAuthor) author = parsedAuthor;
+        }
+        pos += recLen;
+      }
+    }
   }
+
+  const coverDataUrl = await extractMobiCoverFromRecords(
+    bytes,
+    offsets,
+    firstImageIndex,
+    coverOffset,
+    thumbOffset,
+    textRecordCount + 1
+  );
 
   if (compression === 17480) {
     return {
       title,
-      author: 'Desconocido',
+      author,
+      coverDataUrl,
       warning: 'Compresión Huff/CDIC',
       html: `<div style="padding:20px;border-radius:14px;background:rgba(141,126,199,0.12);">
         <h3>Formato AZW/MOBI con compresión Huff/CDIC</h3>
@@ -204,7 +317,8 @@ export async function parseMobiBlob(blob: Blob, fallbackTitle: string): Promise<
 
   return {
     title,
-    author: 'Biblioteca MOBI',
+    author,
+    coverDataUrl,
     html,
   };
 }

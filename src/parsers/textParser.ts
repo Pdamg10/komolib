@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { marked } from 'marked';
 import type { BookFormat } from '../types/library';
+import { blobToDataUrl, naturalSortStrings, optimizeCoverDataUrl } from './coverGenerator';
 import { parseMobiBlob } from './mobiParser';
 
 export interface ParsedRichDocument {
@@ -50,10 +51,13 @@ export async function parseFb2(blob: Blob): Promise<ParsedRichDocument> {
 
   // Extract cover from <binary>
   let coverDataUrl: string | undefined;
-  const coverRef = doc
-    .querySelector('title-info > coverpage > image')
-    ?.getAttributeNS('http://www.w3.org/1999/xlink', 'href')
-    ?.replace(/^#/, '');
+  const coverImageEl = doc.querySelector('title-info > coverpage > image');
+  const coverRef = (
+    coverImageEl?.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ||
+    coverImageEl?.getAttribute('l:href') ||
+    coverImageEl?.getAttribute('href') ||
+    ''
+  ).replace(/^#/, '');
 
   const binaries = Array.from(doc.querySelectorAll('binary'));
   const coverBin =
@@ -61,7 +65,7 @@ export async function parseFb2(blob: Blob): Promise<ParsedRichDocument> {
   if (coverBin && coverBin.textContent) {
     const contentType = coverBin.getAttribute('content-type') || 'image/jpeg';
     const b64 = coverBin.textContent.replace(/\s+/g, '');
-    coverDataUrl = `data:${contentType};base64,${b64}`;
+    coverDataUrl = await optimizeCoverDataUrl(`data:${contentType};base64,${b64}`);
   }
 
   // Convert body sections into HTML
@@ -101,6 +105,46 @@ export async function parseFb2(blob: Blob): Promise<ParsedRichDocument> {
   const { html, chapters } = extractChaptersFromHtml(rawHtml);
 
   return { title, author, description, coverDataUrl, html, chapters };
+}
+
+export async function extractDocxCover(blob: Blob): Promise<string | undefined> {
+  try {
+    const zip = await JSZip.loadAsync(blob);
+    const mediaImages = Object.values(zip.files)
+      .filter((f) => !f.dir && /^word\/media\/.*\.(jpe?g|png|webp|gif|bmp)$/i.test(f.name))
+      .sort((a, b) => naturalSortStrings(a.name, b.name));
+
+    if (!mediaImages.length) return undefined;
+    const preferred =
+      mediaImages.find((f) => /(cover|portada)/i.test(f.name)) || mediaImages[0];
+    const ab = await preferred.async('arraybuffer');
+    if (ab.byteLength < 2048) return undefined;
+    const lower = preferred.name.toLowerCase();
+    const mime = lower.endsWith('.png')
+      ? 'image/png'
+      : lower.endsWith('.webp')
+      ? 'image/webp'
+      : lower.endsWith('.gif')
+      ? 'image/gif'
+      : 'image/jpeg';
+    const raw = await blobToDataUrl(new Blob([ab], { type: mime }));
+    return optimizeCoverDataUrl(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function extractHtmlEmbeddedCover(blob: Blob): Promise<string | undefined> {
+  try {
+    const raw = await blob.text();
+    const match = raw.match(/<img[^>]+src=["'](data:image\/[^"']+)["']/i);
+    if (match?.[1] && match[1].length > 512) {
+      return optimizeCoverDataUrl(match[1]);
+    }
+  } catch {
+    // ignore
+  }
+  return undefined;
 }
 
 export async function parseDocx(blob: Blob): Promise<ParsedRichDocument> {

@@ -6,7 +6,6 @@ export const TopBar: React.FC = () => {
   const {
     searchQuery,
     setSearchQuery,
-    books,
     setImportModalOpen,
     theme,
     updateTheme,
@@ -53,19 +52,22 @@ export const TopBar: React.FC = () => {
         title="Importar libros, mangas, manhwas, PDF, CBZ, CBR, EPUB..."
       >
         <Upload size={18} style={{ color: 'var(--accent-primary)' }} />
-        <span className="top-action-badge">{books.length}</span>
       </button>
 
       <button
         className="top-action-circle"
         onClick={() => {
           if (window.innerWidth <= 960) {
-            setMobilePanelOpen(!mobilePanelOpen);
+            const next = !mobilePanelOpen;
+            setMobilePanelOpen(next);
+            if (next && !theme.showRightPanel) {
+              updateTheme({ showRightPanel: true });
+            }
           } else {
             updateTheme({ showRightPanel: !theme.showRightPanel });
           }
         }}
-        title={theme.showRightPanel ? 'Ocultar panel derecho' : 'Mostrar panel derecho (Chat / Estudio / Sync)'}
+        title={theme.showRightPanel ? 'Ocultar panel derecho' : 'Mostrar panel derecho (Chat IA / Log y Notas)'}
       >
         <PanelRight size={18} />
       </button>
@@ -79,7 +81,11 @@ export const QuickImportFloat: React.FC = () => {
     <button
       className="pill-btn"
       onClick={() => setImportModalOpen(true)}
-      style={{ background: 'var(--accent-primary)', color: '#fff' }}
+      style={{
+        background: 'var(--accent-primary)',
+        color: 'var(--accent-contrast)',
+        borderColor: 'transparent',
+      }}
     >
       <Plus size={14} /> Importar
     </button>

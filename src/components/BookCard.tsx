@@ -2,6 +2,11 @@ import React from 'react';
 import { Cloud, Edit3, Heart, Headphones, Star } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import type { BookItem } from '../types/library';
+import {
+  BookCoverVisual,
+  getAdaptiveRibbonCss,
+  getAdaptiveSpineCss,
+} from './BookCoverVisual';
 
 interface BookCardProps {
   book: BookItem;
@@ -9,6 +14,18 @@ interface BookCardProps {
 
 export const BookCard: React.FC<BookCardProps> = ({ book }) => {
   const { openBook, updateBook, setEditingBook, theme } = useLibrary();
+
+  const hasOriginal =
+    Boolean(book.coverDataUrl) &&
+    (book.hasOriginalCover === true ||
+      (book.hasOriginalCover === undefined &&
+        !book.coverDataUrl.startsWith('data:image/svg+xml')));
+
+  const adaptiveSeed = `${book.id}:${book.title}`;
+  const effectiveSpineColor = hasOriginal ? book.spineColor : getAdaptiveSpineCss(adaptiveSeed);
+  const effectiveRibbonColor = hasOriginal
+    ? book.ribbonColor || '#f2ba59'
+    : getAdaptiveRibbonCss(adaptiveSeed);
 
   const badgeLabel =
     book.kind === 'manhwa'
@@ -35,10 +52,10 @@ export const BookCard: React.FC<BookCardProps> = ({ book }) => {
       <div className="book-hardcover-wrap">
         <div
           className={`book-hardcover ${theme.showBookPages3D ? '' : 'flat-mode'}`}
-          style={{ backgroundColor: book.spineColor }}
+          style={{ backgroundColor: effectiveSpineColor }}
         >
           <div className="book-cover-img-box">
-            <img src={book.coverDataUrl} alt={book.title} loading="lazy" />
+            <BookCoverVisual book={book} />
 
             <span className="book-format-pill">
               {book.format === 'audio' ? (
@@ -53,7 +70,13 @@ export const BookCard: React.FC<BookCardProps> = ({ book }) => {
             {!book.hasLocalFile && book.hasRemoteFile && (
               <span
                 className="book-format-pill"
-                style={{ top: 'auto', bottom: 14, left: 7, background: 'rgba(76,108,138,0.88)' }}
+                style={{
+                  top: 'auto',
+                  bottom: 14,
+                  left: 7,
+                  background: 'color-mix(in srgb, var(--sidebar-pill-bg) 90%, transparent)',
+                  color: 'var(--sidebar-pill-contrast)',
+                }}
                 title="En servidor — toca para descargar y leer"
               >
                 <Cloud size={10} />
@@ -98,7 +121,7 @@ export const BookCard: React.FC<BookCardProps> = ({ book }) => {
           {theme.showBookRibbons && (
             <div
               className="book-ribbon"
-              style={{ backgroundColor: book.ribbonColor || '#f2ba59' }}
+              style={{ backgroundColor: effectiveRibbonColor }}
             />
           )}
         </div>

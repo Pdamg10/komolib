@@ -8,10 +8,8 @@ export const CategoryStrip: React.FC = () => {
     categories,
     activeCategory,
     setActiveCategory,
-    setRightTab,
+    setStudioModalOpen,
     theme,
-    updateTheme,
-    setMobilePanelOpen,
   } = useLibrary();
 
   if (!theme.showCategories) return null;
@@ -31,12 +29,8 @@ export const CategoryStrip: React.FC = () => {
 
       <button
         className="category-chip"
-        onClick={() => {
-          setRightTab('studio');
-          if (!theme.showRightPanel) updateTheme({ showRightPanel: true });
-          setMobilePanelOpen(true);
-        }}
-        title="Crear o personalizar categorías"
+        onClick={() => setStudioModalOpen(true)}
+        title="Crear o personalizar categorías y apariencia"
       >
         <div
           style={{

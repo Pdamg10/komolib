@@ -1,7 +1,22 @@
 import JSZip from 'jszip';
-import { blobToDataUrl, naturalSortStrings } from './coverGenerator';
+import { blobToDataUrl, naturalSortStrings, optimizeCoverDataUrl } from './coverGenerator';
 
 const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|avif|bmp|svg)$/i;
+
+function isValidComicImage(name: string): boolean {
+  if (name.startsWith('__MACOSX')) return false;
+  const base = name.split('/').pop() || name;
+  if (base.startsWith('.')) return false;
+  return IMAGE_EXT_RE.test(base);
+}
+
+function pickCoverEntry<T extends { name: string }>(entries: T[]): T {
+  const explicit = entries.find((e) => {
+    const base = (e.name.split('/').pop() || e.name).toLowerCase();
+    return /^(cover|portada|front|000|00)[\W_.]/.test(base) || /^cover\./.test(base);
+  });
+  return explicit || entries[0];
+}
 
 function mimeFromName(name: string): string {
   const lower = name.toLowerCase();
@@ -42,16 +57,17 @@ export async function extractCbzCoverAndCount(
 ): Promise<{ coverDataUrl?: string; pageCount: number }> {
   const zip = await JSZip.loadAsync(blob);
   const imageFiles = Object.values(zip.files)
-    .filter((f) => !f.dir && !f.name.startsWith('__MACOSX') && IMAGE_EXT_RE.test(f.name))
+    .filter((f) => !f.dir && isValidComicImage(f.name))
     .sort((a, b) => naturalSortStrings(a.name, b.name));
 
   if (imageFiles.length === 0) {
     return { pageCount: 0 };
   }
-  const first = imageFiles[0];
-  const ab = await first.async('arraybuffer');
-  const imgBlob = new Blob([ab], { type: mimeFromName(first.name) });
-  const coverDataUrl = await blobToDataUrl(imgBlob);
+  const coverEntry = pickCoverEntry(imageFiles);
+  const ab = await coverEntry.async('arraybuffer');
+  const imgBlob = new Blob([ab], { type: mimeFromName(coverEntry.name) });
+  const rawUrl = await blobToDataUrl(imgBlob);
+  const coverDataUrl = await optimizeCoverDataUrl(rawUrl);
   return { coverDataUrl, pageCount: imageFiles.length };
 }
 
@@ -101,17 +117,18 @@ export async function extractCbrCoverAndCount(
     const extractor = await createExtractorFromData({ data, wasmBinary });
     const list = extractor.getFileList();
     const headers = [...list.fileHeaders]
-      .filter((h) => !h.flags.directory && IMAGE_EXT_RE.test(h.name))
+      .filter((h) => !h.flags.directory && isValidComicImage(h.name))
       .sort((a, b) => naturalSortStrings(a.name, b.name));
 
     if (!headers.length) return { pageCount: 0 };
-    const first = headers[0];
-    const extracted = extractor.extract({ files: [first.name] });
+    const coverEntry = pickCoverEntry(headers);
+    const extracted = extractor.extract({ files: [coverEntry.name] });
     for (const file of extracted.files) {
       if (file.extraction) {
         const copy = new Uint8Array(file.extraction);
-        const imgBlob = new Blob([copy], { type: mimeFromName(first.name) });
-        const coverDataUrl = await blobToDataUrl(imgBlob);
+        const imgBlob = new Blob([copy], { type: mimeFromName(coverEntry.name) });
+        const rawUrl = await blobToDataUrl(imgBlob);
+        const coverDataUrl = await optimizeCoverDataUrl(rawUrl);
         return { coverDataUrl, pageCount: headers.length };
       }
     }

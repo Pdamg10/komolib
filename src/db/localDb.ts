@@ -1,6 +1,8 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type {
+  BookAnnotation,
   BookItem,
+  BookmarkDesign,
   BookmarkItem,
   CategoryItem,
   ChatMessage,
@@ -29,6 +31,10 @@ interface KomoLibSchema extends DBSchema {
     key: string;
     value: BookmarkItem;
   };
+  annotations: {
+    key: string;
+    value: BookAnnotation;
+  };
   notes: {
     key: string;
     value: NoteItem;
@@ -43,7 +49,7 @@ let dbPromise: Promise<IDBPDatabase<KomoLibSchema>> | null = null;
 
 export function getDb() {
   if (!dbPromise) {
-    dbPromise = openDB<KomoLibSchema>('komolib-db', 1, {
+    dbPromise = openDB<KomoLibSchema>('komolib-db', 2, {
       upgrade(db) {
         if (!db.objectStoreNames.contains('books')) {
           db.createObjectStore('books', { keyPath: 'id' });
@@ -53,6 +59,9 @@ export function getDb() {
         }
         if (!db.objectStoreNames.contains('bookmarks')) {
           db.createObjectStore('bookmarks', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('annotations')) {
+          db.createObjectStore('annotations', { keyPath: 'id' });
         }
         if (!db.objectStoreNames.contains('notes')) {
           db.createObjectStore('notes', { keyPath: 'id' });
@@ -113,6 +122,40 @@ export async function dbDeleteBookmark(id: string): Promise<void> {
   await db.delete('bookmarks', id);
 }
 
+export async function dbGetAllAnnotations(): Promise<BookAnnotation[]> {
+  const db = await getDb();
+  const items = await db.getAll('annotations');
+  return items.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export async function dbPutAnnotation(ann: BookAnnotation): Promise<void> {
+  const db = await getDb();
+  await db.put('annotations', ann);
+}
+
+export async function dbDeleteAnnotation(id: string): Promise<void> {
+  const db = await getDb();
+  await db.delete('annotations', id);
+}
+
+export async function dbEstimateLocalMetadataBytes(): Promise<number> {
+  const db = await getDb();
+  const [books, bookmarks, annotations, notes, customDesigns] = await Promise.all([
+    db.getAll('books'),
+    db.getAll('bookmarks'),
+    db.getAll('annotations'),
+    db.getAll('notes'),
+    db.get('kv', 'customBookmarkDesigns'),
+  ]);
+  try {
+    return new Blob([
+      JSON.stringify({ books, bookmarks, annotations, notes, customDesigns }),
+    ]).size;
+  } catch {
+    return 0;
+  }
+}
+
 export async function dbGetAllNotes(): Promise<NoteItem[]> {
   const db = await getDb();
   const items = await db.getAll('notes');
@@ -147,5 +190,6 @@ export type PersistedKvMap = {
   readerSettings: ReaderSettings;
   syncConfig: SyncConfig;
   chatMessages: ChatMessage[];
+  customBookmarkDesigns: BookmarkDesign[];
   seeded: boolean;
 };

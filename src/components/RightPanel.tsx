@@ -1,21 +1,21 @@
 import React from 'react';
-import { BookmarkCheck, MessageCircle, Palette, X } from 'lucide-react';
+import { BookmarkCheck, MessageCircle, X } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import { ChatTab } from './ChatTab';
 import { NotesSyncTab } from './NotesSyncTab';
-import { StudioTab } from './StudioTab';
 
 export const RightPanel: React.FC = () => {
-  const { theme, rightTab, setRightTab, mobilePanelOpen, setMobilePanelOpen } = useLibrary();
+  const { theme, updateTheme, rightTab, setRightTab, mobilePanelOpen, setMobilePanelOpen } =
+    useLibrary();
 
   if (!theme.showRightPanel && !mobilePanelOpen) return null;
 
-  const title =
-    rightTab === 'chat'
-      ? 'Chat'
-      : rightTab === 'studio'
-      ? 'Estudio Visual'
-      : 'Notas y Sync';
+  const title = rightTab === 'chat' ? 'Chat IA' : 'Reading Log y Notas';
+
+  const handleClosePanel = () => {
+    setMobilePanelOpen(false);
+    updateTheme({ showRightPanel: false });
+  };
 
   return (
     <aside
@@ -28,10 +28,12 @@ export const RightPanel: React.FC = () => {
         <div className="right-panel-top">
           <h3 className="right-panel-title">{title}</h3>
           <button
+            type="button"
             className="circle-arrow-btn"
             style={{ background: 'var(--card-bg)' }}
-            onClick={() => setMobilePanelOpen(false)}
-            title="Cambiar vista / cerrar en móvil"
+            onClick={handleClosePanel}
+            title="Cerrar panel lateral"
+            aria-label="Cerrar panel lateral"
           >
             <X size={15} />
           </button>
@@ -44,15 +46,7 @@ export const RightPanel: React.FC = () => {
             className={`panel-tab-btn ${rightTab === 'chat' ? 'active' : ''}`}
             onClick={() => setRightTab('chat')}
           >
-            <MessageCircle size={13} /> Chat
-          </button>
-          <button
-            role="tab"
-            aria-selected={rightTab === 'studio'}
-            className={`panel-tab-btn ${rightTab === 'studio' ? 'active' : ''}`}
-            onClick={() => setRightTab('studio')}
-          >
-            <Palette size={13} /> Estudio
+            <MessageCircle size={13} /> Chat IA
           </button>
           <button
             role="tab"
@@ -60,14 +54,12 @@ export const RightPanel: React.FC = () => {
             className={`panel-tab-btn ${rightTab === 'notes' ? 'active' : ''}`}
             onClick={() => setRightTab('notes')}
           >
-            <BookmarkCheck size={13} /> Notas
+            <BookmarkCheck size={13} /> Log / Notas
           </button>
         </div>
       </div>
 
-      {rightTab === 'chat' && <ChatTab />}
-      {rightTab === 'studio' && <StudioTab />}
-      {rightTab === 'notes' && <NotesSyncTab />}
+      {rightTab === 'chat' ? <ChatTab /> : <NotesSyncTab />}
     </aside>
   );
 };

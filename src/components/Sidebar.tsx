@@ -1,11 +1,14 @@
 import React from 'react';
 import {
+  BarChart3,
   Bookmark,
+  ClipboardList,
   Heart,
   LayoutGrid,
   Palette,
   Play,
   Star,
+  Users,
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import type { NavSection } from '../types/library';
@@ -17,14 +20,15 @@ export const Sidebar: React.FC = () => {
     profile,
     setProfileModalOpen,
     books,
+    sharedRooms,
+    sharedShelves,
     theme,
-    updateTheme,
-    setRightTab,
-    setMobilePanelOpen,
+    setStudioModalOpen,
   } = useLibrary();
 
   const favCount = books.filter((b) => b.favorite).length;
   const readingCount = books.filter((b) => b.progress > 0 && b.progress < 100).length;
+  const sharedTotalCount = sharedRooms.length + sharedShelves.length;
 
   const navItems: Array<{
     id: NavSection;
@@ -33,18 +37,26 @@ export const Sidebar: React.FC = () => {
     badge?: number;
   }> = [
     { id: 'home', label: 'Biblioteca', icon: <LayoutGrid size={19} /> },
+    { id: 'dashboard', label: 'Dashboard y Estadísticas', icon: <BarChart3 size={19} /> },
+    { id: 'reading-log', label: 'Reading Log y Reseñas', icon: <ClipboardList size={19} /> },
+    {
+      id: 'annotations',
+      label: 'Marcadores, Separadores y Anotaciones',
+      icon: <Bookmark size={19} />,
+    },
+    {
+      id: 'shared',
+      label: 'Compartir Libros y Sync',
+      icon: <Users size={19} />,
+      badge: sharedTotalCount || undefined,
+    },
     { id: 'favorites', label: 'Favoritos', icon: <Star size={19} />, badge: favCount || undefined },
-    { id: 'wishlist', label: 'Lista de deseos', icon: <Heart size={19} /> },
+    { id: 'wishlist', label: 'Wishlist / Por leer', icon: <Heart size={19} /> },
     { id: 'reading', label: 'Leyendo y Audio', icon: <Play size={19} />, badge: readingCount || undefined },
-    { id: 'collections', label: 'Colecciones', icon: <Bookmark size={19} /> },
   ];
 
   const handleOpenStudio = () => {
-    setRightTab('studio');
-    if (!theme.showRightPanel) {
-      updateTheme({ showRightPanel: true });
-    }
-    setMobilePanelOpen(true);
+    setStudioModalOpen(true);
   };
 
   return (

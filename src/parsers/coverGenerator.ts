@@ -109,41 +109,134 @@ export function generateCozyCover(
   };
 }
 
-export async function extractDominantColorFromDataUrl(dataUrl: string, fallback: string): Promise<string> {
+function toHexChannel(n: number): string {
+  return Math.max(0, Math.min(255, Math.round(n)))
+    .toString(16)
+    .padStart(2, '0');
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  return `#${toHexChannel(r)}${toHexChannel(g)}${toHexChannel(b)}`;
+}
+
+export async function extractCoverPaletteFromDataUrl(
+  dataUrl: string,
+  fallbackSpine: string,
+  fallbackRibbon = '#f2ba59'
+): Promise<{ spineColor: string; ribbonColor: string }> {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
       try {
+        const w = 32;
+        const h = 44;
         const canvas = document.createElement('canvas');
-        canvas.width = 24;
-        canvas.height = 24;
+        canvas.width = w;
+        canvas.height = h;
         const ctx = canvas.getContext('2d');
-        if (!ctx) return resolve(fallback);
-        ctx.drawImage(img, 0, 0, 24, 24);
-        const data = ctx.getImageData(0, 0, 24, 24).data;
-        let r = 0;
-        let g = 0;
-        let b = 0;
-        let count = 0;
-        for (let i = 0; i < data.length; i += 4) {
-          if (data[i + 3] < 128) continue;
-          r += data[i];
-          g += data[i + 1];
-          b += data[i + 2];
-          count++;
+        if (!ctx) return resolve({ spineColor: fallbackSpine, ribbonColor: fallbackRibbon });
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+
+        // Sample the left edge (spine-adjacent 20%) so the 3D book spine blends seamlessly with the original cover
+        let sr = 0;
+        let sg = 0;
+        let sb = 0;
+        let sCount = 0;
+
+        // Also find the most vibrant accent pixel for the bookmark ribbon
+        let bestScore = -1;
+        let ar = 242;
+        let ag = 186;
+        let ab = 89;
+
+        const spineCols = Math.max(4, Math.round(w * 0.2));
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const idx = (y * w + x) * 4;
+            if (data[idx + 3] < 128) continue;
+            const r = data[idx];
+            const g = data[idx + 1];
+            const b = data[idx + 2];
+
+            if (x < spineCols) {
+              sr += r;
+              sg += g;
+              sb += b;
+              sCount++;
+            }
+
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+            const sat = max === 0 ? 0 : (max - min) / max;
+            const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+            // Favor vivid, mid-bright colors for the hanging bookmark ribbon
+            const lumWeight = 1 - Math.abs(lum - 0.58) * 1.4;
+            const score = sat * Math.max(0.15, lumWeight);
+            if (score > bestScore && sat > 0.25) {
+              bestScore = score;
+              ar = r;
+              ag = g;
+              ab = b;
+            }
+          }
         }
-        if (!count) return resolve(fallback);
-        // Darken slightly for crisp spine contrast
-        const dr = Math.max(20, Math.round((r / count) * 0.78));
-        const dg = Math.max(20, Math.round((g / count) * 0.78));
-        const db = Math.max(20, Math.round((b / count) * 0.78));
-        resolve(`rgb(${dr}, ${dg}, ${db})`);
+
+        if (!sCount) return resolve({ spineColor: fallbackSpine, ribbonColor: fallbackRibbon });
+
+        // Slightly deepen the left-edge color so the hardcover spine has subtle 3D depth
+        const dr = Math.max(18, (sr / sCount) * 0.82);
+        const dg = Math.max(18, (sg / sCount) * 0.82);
+        const db = Math.max(18, (sb / sCount) * 0.82);
+
+        const spineColor = rgbToHex(dr, dg, db);
+        const ribbonColor = bestScore > 0.22 ? rgbToHex(ar, ag, ab) : fallbackRibbon;
+        resolve({ spineColor, ribbonColor });
       } catch {
-        resolve(fallback);
+        resolve({ spineColor: fallbackSpine, ribbonColor: fallbackRibbon });
       }
     };
-    img.onerror = () => resolve(fallback);
+    img.onerror = () => resolve({ spineColor: fallbackSpine, ribbonColor: fallbackRibbon });
+    img.src = dataUrl;
+  });
+}
+
+export async function extractDominantColorFromDataUrl(dataUrl: string, fallback: string): Promise<string> {
+  const { spineColor } = await extractCoverPaletteFromDataUrl(dataUrl, fallback);
+  return spineColor;
+}
+
+export async function optimizeCoverDataUrl(dataUrl: string, maxDim = 900): Promise<string> {
+  if (!dataUrl || dataUrl.startsWith('data:image/svg+xml')) return dataUrl;
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      if (!w || !h || (w <= maxDim && h <= maxDim)) {
+        resolve(dataUrl);
+        return;
+      }
+      const scale = Math.min(maxDim / w, maxDim / h);
+      const cw = Math.max(1, Math.round(w * scale));
+      const ch = Math.max(1, Math.round(h * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = cw;
+      canvas.height = ch;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, cw, ch);
+      try {
+        resolve(canvas.toDataURL('image/jpeg', 0.88));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
     img.src = dataUrl;
   });
 }

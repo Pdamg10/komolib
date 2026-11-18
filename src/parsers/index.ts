@@ -1,18 +1,20 @@
 import type { BookFormat, BookItem, ContentKind } from '../types/library';
+import { extractAudioCover } from './audioCoverParser';
 import { extractCbrCoverAndCount, extractCbzCoverAndCount } from './comicParser';
 import {
   blobToDataUrl,
-  extractDominantColorFromDataUrl,
+  extractCoverPaletteFromDataUrl,
   generateCozyCover,
   naturalSortStrings,
+  optimizeCoverDataUrl,
 } from './coverGenerator';
 import { extractEpubMetaAndCover } from './epubParser';
 import { extractPdfMetaAndCover } from './pdfParser';
-import { parseFb2 } from './textParser';
+import { extractDocxCover, extractHtmlEmbeddedCover, parseFb2 } from './textParser';
 import { parseMobiBlob } from './mobiParser';
 
 export const ACCEPTED_EXTENSIONS =
-  '.epub,.pdf,.cbz,.cbr,.zip,.rar,.txt,.md,.html,.htm,.fb2,.mobi,.azw,.azw3,.prc,.docx,.mp3,.m4b,.ogg,.wav,.jpg,.jpeg,.png,.webp,.avif';
+  '.epub,.pdf,.cbz,.cbr,.zip,.rar,.txt,.md,.html,.htm,.fb2,.mobi,.azw,.azw3,.prc,.docx,.mp3,.m4b,.m4a,.ogg,.wav,.jpg,.jpeg,.png,.webp,.avif';
 
 export function detectFormat(fileName: string, mimeType = ''): BookFormat | null {
   const lower = fileName.toLowerCase();
@@ -61,6 +63,68 @@ export interface ImportedBookBundle {
   extraImages?: Blob[];
 }
 
+export async function extractOriginalCoverFromBlob(
+  blob: Blob,
+  format: BookFormat,
+  fallbackTitle = 'Sin título',
+  extraImages?: Blob[]
+): Promise<{
+  coverDataUrl?: string;
+  title?: string;
+  author?: string;
+  description?: string;
+  pageCount?: number;
+}> {
+  if (format === 'epub') {
+    return extractEpubMetaAndCover(blob);
+  }
+  if (format === 'pdf') {
+    return extractPdfMetaAndCover(blob);
+  }
+  if (format === 'cbz') {
+    return extractCbzCoverAndCount(blob);
+  }
+  if (format === 'cbr') {
+    return extractCbrCoverAndCount(blob);
+  }
+  if (format === 'fb2') {
+    const meta = await parseFb2(blob);
+    return {
+      title: meta.title,
+      author: meta.author,
+      description: meta.description,
+      coverDataUrl: meta.coverDataUrl,
+    };
+  }
+  if (format === 'mobi' || format === 'azw3') {
+    const meta = await parseMobiBlob(blob, fallbackTitle);
+    return {
+      title: meta.title,
+      author: meta.author !== 'Biblioteca MOBI' && meta.author !== 'Desconocido' ? meta.author : undefined,
+      coverDataUrl: meta.coverDataUrl,
+    };
+  }
+  if (format === 'docx') {
+    const coverDataUrl = await extractDocxCover(blob);
+    return { coverDataUrl };
+  }
+  if (format === 'html') {
+    const coverDataUrl = await extractHtmlEmbeddedCover(blob);
+    return { coverDataUrl };
+  }
+  if (format === 'audio') {
+    const coverDataUrl = await extractAudioCover(blob);
+    return { coverDataUrl };
+  }
+  if (format === 'images') {
+    const first = extraImages?.length ? extraImages[0] : blob;
+    const raw = await blobToDataUrl(first);
+    const coverDataUrl = await optimizeCoverDataUrl(raw);
+    return { coverDataUrl, pageCount: extraImages?.length || 1 };
+  }
+  return {};
+}
+
 export async function importSingleFile(
   file: File,
   overrides?: {
@@ -79,45 +143,19 @@ export async function importSingleFile(
   let coverDataUrl: string | undefined;
   let pageCount: number | undefined;
 
-  if (format === 'epub') {
-    const meta = await extractEpubMetaAndCover(file);
-    if (!overrides?.title && meta.title) title = meta.title;
-    if (!overrides?.author && meta.author) author = meta.author;
-    if (meta.description) description = meta.description;
-    if (meta.coverDataUrl) coverDataUrl = meta.coverDataUrl;
-  } else if (format === 'pdf') {
-    const meta = await extractPdfMetaAndCover(file);
-    if (!overrides?.title && meta.title) title = meta.title;
-    if (!overrides?.author && meta.author) author = meta.author;
-    if (meta.coverDataUrl) coverDataUrl = meta.coverDataUrl;
-    pageCount = meta.pageCount;
-  } else if (format === 'cbz') {
-    const meta = await extractCbzCoverAndCount(file);
-    if (meta.coverDataUrl) coverDataUrl = meta.coverDataUrl;
-    pageCount = meta.pageCount;
-  } else if (format === 'cbr') {
-    const meta = await extractCbrCoverAndCount(file);
-    if (meta.coverDataUrl) coverDataUrl = meta.coverDataUrl;
-    pageCount = meta.pageCount;
-  } else if (format === 'fb2') {
-    const meta = await parseFb2(file);
-    if (!overrides?.title && meta.title) title = meta.title;
-    if (!overrides?.author && meta.author) author = meta.author;
-    if (meta.description) description = meta.description;
-    if (meta.coverDataUrl) coverDataUrl = meta.coverDataUrl;
-  } else if (format === 'mobi' || format === 'azw3') {
-    const meta = await parseMobiBlob(file, title);
-    if (!overrides?.title && meta.title) title = meta.title;
-  } else if (format === 'images') {
-    coverDataUrl = await blobToDataUrl(file);
-    pageCount = 1;
-  }
+  const extracted = await extractOriginalCoverFromBlob(file, format, title);
+  if (!overrides?.title && extracted.title) title = extracted.title;
+  if (!overrides?.author && extracted.author) author = extracted.author;
+  if (extracted.description) description = extracted.description;
+  if (extracted.coverDataUrl) coverDataUrl = extracted.coverDataUrl;
+  if (extracted.pageCount !== undefined) pageCount = extracted.pageCount;
 
   const generated = generateCozyCover(title, author, kind, format);
+  const hasOriginalCover = Boolean(coverDataUrl);
   const finalCover = coverDataUrl || generated.coverDataUrl;
-  const spineColor = coverDataUrl
-    ? await extractDominantColorFromDataUrl(coverDataUrl, generated.spineColor)
-    : generated.spineColor;
+  const palette = coverDataUrl
+    ? await extractCoverPaletteFromDataUrl(coverDataUrl, generated.spineColor, generated.ribbonColor)
+    : { spineColor: generated.spineColor, ribbonColor: generated.ribbonColor };
 
   const defaultCats = new Set<string>(overrides?.categories || []);
   defaultCats.add('new');
@@ -140,8 +178,10 @@ export async function importSingleFile(
     categories: Array.from(defaultCats),
     tags: [format.toUpperCase()],
     coverDataUrl: finalCover,
-    spineColor,
-    ribbonColor: generated.ribbonColor,
+    hasOriginalCover,
+    coverCheckedV2: true,
+    spineColor: palette.spineColor,
+    ribbonColor: palette.ribbonColor,
     fileName: file.name,
     fileSize: file.size,
     mimeType: file.type || 'application/octet-stream',
@@ -165,9 +205,14 @@ export async function importImageBundle(
   categories: string[] = []
 ): Promise<ImportedBookBundle> {
   const sorted = [...files].sort((a, b) => naturalSortStrings(a.name, b.name));
-  const firstCover = await blobToDataUrl(sorted[0]);
+  const rawCover = await blobToDataUrl(sorted[0]);
+  const firstCover = await optimizeCoverDataUrl(rawCover);
   const generated = generateCozyCover(title, author, kind, 'IMAGES');
-  const spineColor = await extractDominantColorFromDataUrl(firstCover, generated.spineColor);
+  const palette = await extractCoverPaletteFromDataUrl(
+    firstCover,
+    generated.spineColor,
+    generated.ribbonColor
+  );
 
   const cats = new Set<string>(categories);
   cats.add('new');
@@ -187,8 +232,10 @@ export async function importImageBundle(
     categories: Array.from(cats),
     tags: ['IMÁGENES', `${sorted.length} PÁGS`],
     coverDataUrl: firstCover,
-    spineColor,
-    ribbonColor: generated.ribbonColor,
+    hasOriginalCover: true,
+    coverCheckedV2: true,
+    spineColor: palette.spineColor,
+    ribbonColor: palette.ribbonColor,
     fileName: `${title || 'volumen'}.images`,
     fileSize: totalSize,
     mimeType: 'application/x-komolib-images',

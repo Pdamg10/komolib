@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronRight, Paperclip, Send, Sparkles, Trash2 } from 'lucide-react';
+import { Paperclip, Send, Sparkles, Trash2 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
+import { BookCoverVisual } from './BookCoverVisual';
 
 export const ChatTab: React.FC = () => {
   const {
@@ -10,7 +11,6 @@ export const ChatTab: React.FC = () => {
     books,
     openBook,
     setImportModalOpen,
-    setRightTab,
   } = useLibrary();
 
   const [input, setInput] = useState('');
@@ -39,38 +39,12 @@ export const ChatTab: React.FC = () => {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       <div className="right-panel-body">
-        <button
-          className="chat-info-card"
-          onClick={() => setRightTab('notes')}
-          style={{ textAlign: 'left', width: '100%' }}
-        >
-          <div>
-            <div style={{ fontSize: 12.5, fontWeight: 800 }}>Asistente y Sincronización</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>
-              Busca libros, usa /nota o conecta IA local
-            </div>
-          </div>
-          <span
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: '50%',
-              background: 'var(--card-bg)',
-              display: 'grid',
-              placeItems: 'center',
-              flexShrink: 0,
-            }}
-          >
-            <ChevronRight size={15} />
-          </span>
-        </button>
-
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {quickPrompts.map((q) => (
             <button
               key={q}
               className="pill-btn"
-              style={{ height: 26, fontSize: 11, background: 'rgba(255,255,255,0.75)' }}
+              style={{ height: 26, fontSize: 11, background: 'var(--card-bg)' }}
               onClick={() => sendChatMessage(q)}
             >
               <Sparkles size={11} /> {q}
@@ -78,7 +52,7 @@ export const ChatTab: React.FC = () => {
           ))}
           <button
             className="pill-btn"
-            style={{ height: 26, fontSize: 11, background: 'rgba(255,255,255,0.55)', marginLeft: 'auto' }}
+            style={{ height: 26, fontSize: 11, background: 'var(--card-bg)', marginLeft: 'auto' }}
             onClick={clearChat}
             title="Limpiar chat"
           >
@@ -105,7 +79,17 @@ export const ChatTab: React.FC = () => {
                           onClick={() => openBook(b)}
                           title={`Abrir ${b.title}`}
                         >
-                          <img src={b.coverDataUrl} alt={b.title} />
+                          <div
+                            style={{
+                              width: 58,
+                              height: 82,
+                              borderRadius: 7,
+                              overflow: 'hidden',
+                              boxShadow: '0 4px 10px rgba(0, 0, 0, 0.16)',
+                            }}
+                          >
+                            <BookCoverVisual book={b} compact />
+                          </div>
                           <div
                             style={{
                               fontSize: 9.5,
@@ -128,6 +112,13 @@ export const ChatTab: React.FC = () => {
             </div>
           );
         })}
+        {sending && (
+          <div className="chat-bubble-row assistant">
+            <div className="chat-bubble assistant" style={{ opacity: 0.78 }}>
+              Pensando recomendación...
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 

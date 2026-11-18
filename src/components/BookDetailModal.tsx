@@ -1,10 +1,28 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Image, Trash2, X } from 'lucide-react';
+import { Image, RefreshCw, Share2, Sparkles, Trash2, X } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
+import {
+  extractCoverPaletteFromDataUrl,
+  optimizeCoverDataUrl,
+} from '../parsers/coverGenerator';
 import type { ContentKind } from '../types/library';
+import {
+  BookCoverVisual,
+  getAdaptiveRibbonCss,
+  getAdaptiveSpineCss,
+} from './BookCoverVisual';
 
 export const BookDetailModal: React.FC = () => {
-  const { editingBook, setEditingBook, updateBook, deleteBook, categories } = useLibrary();
+  const {
+    editingBook,
+    setEditingBook,
+    updateBook,
+    reExtractBookCover,
+    deleteBook,
+    createRoomForBook,
+    setNavSection,
+    categories,
+  } = useLibrary();
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [description, setDescription] = useState('');
@@ -12,7 +30,9 @@ export const BookDetailModal: React.FC = () => {
   const [spineColor, setSpineColor] = useState('#4c6c8a');
   const [ribbonColor, setRibbonColor] = useState('#f2ba59');
   const [coverDataUrl, setCoverDataUrl] = useState('');
+  const [hasOriginalCover, setHasOriginalCover] = useState(true);
   const [cats, setCats] = useState<string[]>([]);
+  const [extracting, setExtracting] = useState(false);
   const coverRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -24,6 +44,11 @@ export const BookDetailModal: React.FC = () => {
     setSpineColor(editingBook.spineColor);
     setRibbonColor(editingBook.ribbonColor);
     setCoverDataUrl(editingBook.coverDataUrl);
+    setHasOriginalCover(
+      editingBook.hasOriginalCover !== undefined
+        ? editingBook.hasOriginalCover
+        : !editingBook.coverDataUrl.startsWith('data:image/svg+xml')
+    );
     setCats(editingBook.categories || []);
   }, [editingBook]);
 
@@ -33,8 +58,31 @@ export const BookDetailModal: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => setCoverDataUrl(String(reader.result || ''));
+    reader.onload = async () => {
+      const raw = String(reader.result || '');
+      if (!raw) return;
+      const optimized = await optimizeCoverDataUrl(raw);
+      const pal = await extractCoverPaletteFromDataUrl(
+        optimized,
+        spineColor.startsWith('#') ? spineColor : '#4c6c8a',
+        ribbonColor || '#f2ba59'
+      );
+      setCoverDataUrl(optimized);
+      setHasOriginalCover(true);
+      setSpineColor(pal.spineColor);
+      setRibbonColor(pal.ribbonColor);
+    };
     reader.readAsDataURL(file);
+  };
+
+  const handleReExtract = async () => {
+    if (extracting) return;
+    setExtracting(true);
+    try {
+      await reExtractBookCover(editingBook.id);
+    } finally {
+      setExtracting(false);
+    }
   };
 
   const toggleCat = (id: string) => {
@@ -51,10 +99,16 @@ export const BookDetailModal: React.FC = () => {
       spineColor,
       ribbonColor,
       coverDataUrl,
+      hasOriginalCover,
+      coverCheckedV2: true,
       categories: cats,
     });
     setEditingBook(null);
   };
+
+  const adaptiveSeed = `${editingBook.id}:${title || editingBook.title}`;
+  const previewSpine = hasOriginalCover ? spineColor : getAdaptiveSpineCss(adaptiveSeed);
+  const previewRibbon = hasOriginalCover ? ribbonColor : getAdaptiveRibbonCss(adaptiveSeed);
 
   return (
     <div className="modal-overlay" onClick={() => setEditingBook(null)}>
@@ -67,31 +121,53 @@ export const BookDetailModal: React.FC = () => {
         </div>
 
         <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-          <div style={{ width: 112, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div
-              style={{
-                width: 112,
-                height: 154,
-                borderRadius: 12,
-                overflow: 'hidden',
-                background: spineColor,
-                padding: '0 0 10px 5px',
-                boxShadow: 'var(--shadow-book)',
-              }}
-            >
-              <img
-                src={coverDataUrl}
-                alt={title}
-                style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8 }}
-              />
+          <div style={{ width: 122, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 7 }}>
+            <div className="book-hardcover-wrap" style={{ width: 122, paddingBottom: 12 }}>
+              <div className="book-hardcover" style={{ backgroundColor: previewSpine }}>
+                <div className="book-cover-img-box">
+                  <BookCoverVisual
+                    book={{
+                      id: editingBook.id,
+                      title: title || editingBook.title,
+                      author: author || editingBook.author,
+                      format: editingBook.format,
+                      kind,
+                      coverDataUrl,
+                      hasOriginalCover,
+                    }}
+                  />
+                </div>
+                <div className="book-pages-block" />
+                <div className="book-ribbon" style={{ backgroundColor: previewRibbon }} />
+              </div>
             </div>
+
             <button
               type="button"
               className="pill-btn"
-              style={{ justifyContent: 'center', fontSize: 11 }}
+              style={{ justifyContent: 'center', fontSize: 11, height: 29 }}
               onClick={() => coverRef.current?.click()}
             >
-              <Image size={12} /> Portada
+              <Image size={12} /> Subir portada
+            </button>
+            <button
+              type="button"
+              className="pill-btn"
+              style={{ justifyContent: 'center', fontSize: 10.5, height: 28 }}
+              onClick={handleReExtract}
+              disabled={extracting}
+              title="Extraer la portada original desde el archivo del libro"
+            >
+              <RefreshCw size={11} className={extracting ? 'spin' : ''} /> Original
+            </button>
+            <button
+              type="button"
+              className={`pill-btn ${!hasOriginalCover ? 'active' : ''}`}
+              style={{ justifyContent: 'center', fontSize: 10.5, height: 28 }}
+              onClick={() => setHasOriginalCover(false)}
+              title="Usar portada adaptable al tema actual"
+            >
+              <Sparkles size={11} /> Adaptable
             </button>
             <input ref={coverRef} type="file" accept="image/*" hidden onChange={handleCoverUpload} />
           </div>
@@ -122,11 +198,19 @@ export const BookDetailModal: React.FC = () => {
             <div style={{ display: 'flex', gap: 14 }}>
               <label className="color-row" style={{ gap: 8 }}>
                 <span>Color lomo</span>
-                <input type="color" value={spineColor.startsWith('#') ? spineColor : '#4c6c8a'} onChange={(e) => setSpineColor(e.target.value)} />
+                <input
+                  type="color"
+                  value={spineColor.startsWith('#') ? spineColor : '#4c6c8a'}
+                  onChange={(e) => setSpineColor(e.target.value)}
+                />
               </label>
               <label className="color-row" style={{ gap: 8 }}>
                 <span>Cinta</span>
-                <input type="color" value={ribbonColor} onChange={(e) => setRibbonColor(e.target.value)} />
+                <input
+                  type="color"
+                  value={ribbonColor.startsWith('#') ? ribbonColor : '#f2ba59'}
+                  onChange={(e) => setRibbonColor(e.target.value)}
+                />
               </label>
             </div>
           </div>
@@ -163,15 +247,30 @@ export const BookDetailModal: React.FC = () => {
           </div>
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
-          <button
-            type="button"
-            className="pill-btn"
-            style={{ color: '#c84b4e' }}
-            onClick={() => deleteBook(editingBook.id)}
-          >
-            <Trash2 size={14} /> Eliminar
-          </button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="pill-btn"
+              style={{ color: '#c84b4e' }}
+              onClick={() => deleteBook(editingBook.id)}
+            >
+              <Trash2 size={14} /> Eliminar
+            </button>
+            <button
+              type="button"
+              className="pill-btn"
+              onClick={async () => {
+                const room = await createRoomForBook(editingBook);
+                if (room) {
+                  setEditingBook(null);
+                  setNavSection('shared');
+                }
+              }}
+            >
+              <Share2 size={13} /> Compartir lectura
+            </button>
+          </div>
 
           <div style={{ display: 'flex', gap: 8 }}>
             <button type="button" className="pill-btn" onClick={() => setEditingBook(null)}>

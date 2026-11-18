@@ -1,53 +1,198 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Bookmark,
   BookmarkPlus,
+  ChevronDown,
+  ChevronRight,
+  Edit3,
+  Eye,
+  Highlighter,
+  ImagePlus,
   List,
+  Lock,
+  MapPin,
+  PenTool,
+  Send,
   Settings2,
+  Smile,
+  Sparkles,
   StickyNote,
   Sun,
+  Trash2,
+  Users,
   X,
 } from 'lucide-react';
 import { useLibrary } from '../../context/LibraryContext';
+import {
+  READING_EMOJI_GROUPS,
+  READING_EMOJIS,
+  READING_STICKERS,
+  STICKER_GROUPS,
+  TOOL_META,
+  type ReadingStickerItem,
+} from '../../data/bookmarksCatalog';
 import { dbGetBookFile } from '../../db/localDb';
-import type { ComicReadMode, ReaderSettings } from '../../types/library';
+import { subscribeToRoomStream } from '../../services/sharedReadingService';
+import type {
+  AnnotationTool,
+  BookAnnotation,
+  ComicReadMode,
+  ReaderJumpTarget,
+  ReaderSettings,
+} from '../../types/library';
 import { ComicMangaReader } from './ComicMangaReader';
 import { EpubReader } from './EpubReader';
 import { PdfReader } from './PdfReader';
 import { READER_PALETTES } from './readerThemes';
-import { TextRichReader } from './TextRichReader';
+import { TextRichReader, type ReaderSelectionPayload } from './TextRichReader';
+
+const TOOL_LIST: AnnotationTool[] = [
+  'highlighter',
+  'pencil',
+  'pen',
+  'postit',
+  'sticker',
+  'emoji',
+];
 
 export const ReaderShell: React.FC = () => {
   const {
     activeBook,
+    readerJumpTarget,
+    clearReaderJumpTarget,
     closeReader,
     readerSettings,
     updateReaderSettings,
     updateBook,
+    bookmarks,
     addBookmark,
-    addNote,
+    deleteBookmark,
+    annotations,
+    addAnnotation,
+    deleteAnnotation,
+    allBookmarkDesigns,
+    addCustomBookmarkDesign,
+    deleteCustomBookmarkDesign,
+    customStationery,
+    addCustomSwatch,
+    addCustomSticker,
+    addCustomEmoji,
+    deviceId,
+    syncConfig,
+    sharedRooms,
+    updateLocalRoom,
+    removeLocalRoom,
+    sendRoomComment,
+    showToast,
   } = useLibrary();
 
   const [fileData, setFileData] = useState<{ blob: Blob; extraImages?: Blob[] } | null>(null);
   const [toc, setToc] = useState<Array<{ id: string; title: string; href: string }>>([]);
   const [jumpHref, setJumpHref] = useState<string | null>(null);
-  const [drawer, setDrawer] = useState<'none' | 'settings' | 'toc' | 'note'>('none');
-  const [quickNote, setQuickNote] = useState('');
-  const [livePos, setLivePos] = useState<{ page?: number; cfi?: string; scrollRatio?: number; pct: number }>({
-    pct: 0,
-  });
+  const [localJumpTarget, setLocalJumpTarget] = useState<ReaderJumpTarget | null>(null);
+  const [drawer, setDrawer] = useState<'none' | 'settings' | 'toc' | 'marks' | 'room'>('none');
+  const [marksTab, setMarksTab] = useState<'separadores' | 'anotaciones' | 'marcadores'>('anotaciones');
+  const [annFilter, setAnnFilter] = useState<AnnotationTool | 'all'>('all');
+  const [showHangingBookmark, setShowHangingBookmark] = useState(true);
+  const [pinMode, setPinMode] = useState(false);
+
+  // Active text/page selection annotation composer
+  const [pendingSel, setPendingSel] = useState<ReaderSelectionPayload | null>(null);
+  const [selTool, setSelTool] = useState<AnnotationTool>('highlighter');
+  const [selColor, setSelColor] = useState<string>(TOOL_META.highlighter.defaultColor);
+  const [selVariant, setSelVariant] = useState<string>(TOOL_META.highlighter.defaultVariant);
+  const [selNote, setSelNote] = useState('');
+  const [selQuote, setSelQuote] = useState('');
+  const [selStickerGroup, setSelStickerGroup] = useState<ReadingStickerItem['group']>('emociones');
+  const [selSticker, setSelSticker] = useState(`${READING_STICKERS[0].emoji} ${READING_STICKERS[0].label}`);
+  const [selEmojiGroup, setSelEmojiGroup] = useState<string>(READING_EMOJI_GROUPS[0].id);
+  const [selEmoji, setSelEmoji] = useState(READING_EMOJIS[0]);
+  const [syncAlsoBookmark, setSyncAlsoBookmark] = useState(false);
+
+  // Inline "+ Agregar" custom stationery inside the reader dock
+  const [addingCustomItem, setAddingCustomItem] = useState(false);
+  const [newItemColor, setNewItemColor] = useState('#ff8fa3');
+  const [newItemName, setNewItemName] = useState('');
+  const [newItemMeaning, setNewItemMeaning] = useState('');
+  const [newItemEmoji, setNewItemEmoji] = useState('🌟');
+
+  // Custom bookmark upload state
+  const [customBmName, setCustomBmName] = useState('');
+  const customBmInputRef = useRef<HTMLInputElement>(null);
+
+  // Shared room drawer state
+  const [roomCommentDraft, setRoomCommentDraft] = useState('');
+  const [revealedSpoilers, setRevealedSpoilers] = useState<Record<string, boolean>>({});
+  const [focusedAnnId, setFocusedAnnId] = useState<string | null>(null);
+  const [expandedDrawerIds, setExpandedDrawerIds] = useState<Record<string, boolean>>({});
+  const [expandAllDrawer, setExpandAllDrawer] = useState(false);
+
+  const [livePos, setLivePos] = useState<{
+    page?: number;
+    cfi?: string;
+    scrollRatio?: number;
+    chapter?: string;
+    chapterHref?: string;
+    pct: number;
+  }>({ pct: 0 });
+
+  const activeRoom = activeBook
+    ? sharedRooms.find((r) => r.bookId === activeBook.id)
+    : undefined;
+
+  const bookAnnotations = useMemo(
+    () => (activeBook ? annotations.filter((a) => a.bookId === activeBook.id) : []),
+    [annotations, activeBook?.id]
+  );
+
+  const bookBookmarks = useMemo(
+    () => (activeBook ? bookmarks.filter((b) => b.bookId === activeBook.id) : []),
+    [bookmarks, activeBook?.id]
+  );
+
+  const activeBookmarkDesign = useMemo(() => {
+    const id = activeBook?.activeBookmarkDesignId;
+    if (id === 'none') return null;
+    if (id) {
+      return allBookmarkDesigns.find((d) => d.id === id) || allBookmarkDesigns[0] || null;
+    }
+    return allBookmarkDesigns[0] || null;
+  }, [activeBook?.activeBookmarkDesignId, allBookmarkDesigns]);
+
+  const effectiveJumpTarget = localJumpTarget || (readerJumpTarget?.bookId === activeBook?.id ? readerJumpTarget : null);
+
+  useEffect(() => {
+    if (!activeRoom?.code || !syncConfig.serverUrl.trim()) return;
+    return subscribeToRoomStream(
+      syncConfig,
+      activeRoom.code,
+      (updated) => {
+        updateLocalRoom(updated);
+      },
+      (deletedCode) => {
+        removeLocalRoom(deletedCode);
+        setDrawer((curr) => (curr === 'room' ? 'none' : curr));
+        showToast(`La sala ${deletedCode} fue cerrada por el anfitrión`);
+      }
+    );
+  }, [activeRoom?.code, syncConfig, updateLocalRoom, removeLocalRoom, showToast]);
 
   useEffect(() => {
     if (!activeBook) {
       setFileData(null);
       setToc([]);
       setDrawer('none');
+      setPendingSel(null);
+      setLocalJumpTarget(null);
+      setPinMode(false);
       return;
     }
     setLivePos({
       page: activeBook.currentPage,
       cfi: activeBook.currentCfi,
       scrollRatio: activeBook.scrollRatio,
+      chapter: activeBook.currentChapter,
       pct: activeBook.progress || 0,
     });
     dbGetBookFile(activeBook.id).then((rec) => {
@@ -64,40 +209,207 @@ export const ReaderShell: React.FC = () => {
     activeBook.format === 'images';
   const isPdf = activeBook.format === 'pdf';
   const isEpub = activeBook.format === 'epub';
+  const supportsPinMode = isPdf || isComicLike;
 
-  const handleSaveBookmark = async () => {
-    await addBookmark({
-      bookId: activeBook.id,
-      label: livePos.page
-        ? `Página ${livePos.page} (${livePos.pct}%)`
-        : `Posición ${livePos.pct}%`,
+  const handleSelectTool = (tool: AnnotationTool) => {
+    setSelTool(tool);
+    setAddingCustomItem(false);
+    if (tool === 'sticker') {
+      const matched = [...customStationery.stickers, ...READING_STICKERS].find(
+        (st) => `${st.emoji} ${st.label}` === selSticker
+      );
+      setSelColor(matched?.color || TOOL_META.sticker.defaultColor);
+    } else {
+      setSelColor(TOOL_META[tool].defaultColor);
+    }
+    setSelVariant(TOOL_META[tool].defaultVariant);
+  };
+
+  const handleIncomingSelection = (sel: ReaderSelectionPayload) => {
+    setPendingSel(sel);
+    setSelQuote(sel.quote);
+    setSelNote('');
+    setSyncAlsoBookmark(false);
+  };
+
+  const handleOpenQuickMarkAtCurrentPos = () => {
+    setPendingSel({
+      quote: '',
+      chapter: livePos.chapter,
+      chapterHref: livePos.chapterHref,
       page: livePos.page,
+      progress: livePos.pct,
       cfi: livePos.cfi,
       scrollRatio: livePos.scrollRatio,
     });
+    setSelQuote('');
+    setSelNote('');
+    setSelTool('postit');
+    setSelColor(TOOL_META.postit.defaultColor);
+    setSelVariant(TOOL_META.postit.defaultVariant);
   };
 
-  const handleSaveQuickNote = async (e: React.FormEvent) => {
+  const handleSaveAnnotation = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!quickNote.trim()) return;
-    await addNote({
+    if (!pendingSel) return;
+    const finalQuote =
+      selQuote.trim() ||
+      pendingSel.quote.trim() ||
+      (pendingSel.page ? `Página ${pendingSel.page}` : `Posición ${pendingSel.progress}%`);
+
+    const chosenSticker =
+      selTool === 'sticker'
+        ? selSticker
+        : selTool === 'emoji'
+        ? selEmoji
+        : undefined;
+
+    await addAnnotation({
       bookId: activeBook.id,
-      text: quickNote.trim(),
-      page: livePos.page,
-      color: '#f5b855',
+      tool: selTool,
+      color: selColor,
+      styleVariant: selVariant,
+      quote: finalQuote.slice(0, 400),
+      note: selNote.trim() || undefined,
+      sticker: chosenSticker,
+      chapter: pendingSel.chapter || livePos.chapter,
+      chapterHref: pendingSel.chapterHref || livePos.chapterHref,
+      page: pendingSel.page ?? livePos.page,
+      progress: pendingSel.progress ?? livePos.pct,
+      cfi: pendingSel.cfi,
+      scrollRatio: pendingSel.scrollRatio ?? livePos.scrollRatio,
+      pageX: pendingSel.pageX,
+      pageY: pendingSel.pageY,
+      bookmarkDesignId: activeBookmarkDesign?.id,
     });
-    setQuickNote('');
+
+    if (syncAlsoBookmark) {
+      await addBookmark({
+        bookId: activeBook.id,
+        label:
+          (pendingSel.chapter || livePos.chapter)
+            ? `${pendingSel.chapter || livePos.chapter} · ${
+                pendingSel.page ? `Pág. ${pendingSel.page}` : `${pendingSel.progress}%`
+              }`
+            : pendingSel.page
+            ? `Página ${pendingSel.page} (${pendingSel.progress}%)`
+            : `Posición ${pendingSel.progress}%`,
+        chapter: pendingSel.chapter || livePos.chapter,
+        chapterHref: pendingSel.chapterHref || livePos.chapterHref,
+        page: pendingSel.page ?? livePos.page,
+        progress: pendingSel.progress ?? livePos.pct,
+        cfi: pendingSel.cfi || livePos.cfi,
+        scrollRatio: pendingSel.scrollRatio ?? livePos.scrollRatio,
+        excerpt: finalQuote.slice(0, 120),
+        designId: activeBookmarkDesign?.id,
+      });
+    }
+
+    setPendingSel(null);
+    setSelNote('');
+    setSelQuote('');
+    window.getSelection?.()?.removeAllRanges?.();
+  };
+
+  const handlePlaceVisualBookmark = async (designId?: string) => {
+    const chosenId = designId || activeBookmarkDesign?.id;
+    const chPart = livePos.chapter ? `${livePos.chapter} · ` : '';
+    const locPart = livePos.page
+      ? `Página ${livePos.page} (${livePos.pct}%)`
+      : `Posición ${livePos.pct}%`;
+    await addBookmark({
+      bookId: activeBook.id,
+      label: `${chPart}${locPart}`,
+      chapter: livePos.chapter,
+      chapterHref: livePos.chapterHref,
+      page: livePos.page,
+      progress: livePos.pct,
+      cfi: livePos.cfi,
+      scrollRatio: livePos.scrollRatio,
+      designId: chosenId,
+    });
+  };
+
+  const handleSelectBookmarkDesign = async (designId: string) => {
+    await updateBook(activeBook.id, { activeBookmarkDesignId: designId });
+    setShowHangingBookmark(designId !== 'none');
+    showToast(designId === 'none' ? 'Separador oculto en este libro' : 'Separador colocado en el libro');
+  };
+
+  const handleUploadCustomBookmark = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const created = await addCustomBookmarkDesign(customBmName, file);
+    if (created) {
+      setCustomBmName('');
+      await updateBook(activeBook.id, { activeBookmarkDesignId: created.id });
+      setShowHangingBookmark(true);
+    }
+    e.target.value = '';
+  };
+
+  const triggerJump = (target: Omit<ReaderJumpTarget, 'id' | 'bookId'>) => {
+    clearReaderJumpTarget();
+    setLocalJumpTarget({
+      ...target,
+      id: `lj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      bookId: activeBook.id,
+    });
     setDrawer('none');
+  };
+
+  const handleAnnotationClick = (ann: BookAnnotation) => {
+    setFocusedAnnId(ann.id);
+    setExpandedDrawerIds((prev) => ({ ...prev, [ann.id]: true }));
+    setMarksTab('anotaciones');
+    setAnnFilter('all');
+    setDrawer('marks');
+  };
+
+  const filteredAnnotations =
+    annFilter === 'all'
+      ? bookAnnotations
+      : bookAnnotations.filter((a) => a.tool === annFilter);
+
+  const renderToolIcon = (tool: AnnotationTool, size = 13) => {
+    switch (tool) {
+      case 'highlighter':
+        return <Highlighter size={size} />;
+      case 'pencil':
+        return <Edit3 size={size} />;
+      case 'pen':
+        return <PenTool size={size} />;
+      case 'postit':
+        return <StickyNote size={size} />;
+      case 'sticker':
+        return <Sparkles size={size} />;
+      case 'emoji':
+        return <Smile size={size} />;
+    }
   };
 
   return (
     <div
       className="reader-overlay"
-      style={{
-        background: pal.bg,
-        color: pal.fg,
-        filter: `brightness(${readerSettings.brightness}%)`,
-      }}
+      style={
+        {
+          background: pal.bg,
+          color: pal.fg,
+          filter: `brightness(${readerSettings.brightness}%)`,
+          colorScheme: pal.isDark ? 'dark' : 'light',
+          '--reader-bar': pal.bar,
+          '--reader-border': pal.border,
+          '--shell-bg': pal.bg,
+          '--sidebar-bg': pal.surface,
+          '--banner-bg': pal.surface,
+          '--card-bg': pal.inputBg,
+          '--input-bg': pal.inputBg,
+          '--text-primary': pal.fg,
+          '--text-muted': pal.muted,
+          '--border-subtle': pal.border,
+          '--border-strong': pal.border,
+        } as React.CSSProperties
+      }
     >
       {/* Blue-light warmth overlay */}
       {readerSettings.warmth > 0 && (
@@ -138,54 +450,139 @@ export const ReaderShell: React.FC = () => {
             >
               {activeBook.title}
             </div>
-            <div style={{ fontSize: 11, color: pal.muted, fontWeight: 600 }}>
-              {activeBook.author} · {activeBook.format.toUpperCase()} · {livePos.pct}%
+            <div
+              style={{
+                fontSize: 11,
+                color: pal.muted,
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {livePos.chapter ? `${livePos.chapter} · ` : `${activeBook.author} · `}
+              {livePos.page ? `Pág. ${livePos.page} · ` : ''}
+              {livePos.pct}%
             </div>
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           {toc.length > 0 && (
             <button
               className="circle-arrow-btn"
-              style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
+              style={{
+                background: drawer === 'toc' ? 'var(--accent-secondary)' : 'rgba(128,128,128,0.14)',
+                color: drawer === 'toc' ? 'var(--accent-secondary-contrast)' : pal.fg,
+              }}
               onClick={() => setDrawer(drawer === 'toc' ? 'none' : 'toc')}
               title="Índice de capítulos"
             >
               <List size={16} />
             </button>
           )}
+
+          {supportsPinMode && (
+            <button
+              className="pill-btn"
+              style={{
+                background: pinMode ? 'var(--accent-primary)' : 'rgba(128,128,128,0.16)',
+                color: pinMode ? 'var(--accent-contrast)' : pal.fg,
+                borderColor: 'transparent',
+                height: 32,
+                fontSize: 11.5,
+              }}
+              onClick={() => {
+                setPinMode(!pinMode);
+                if (!pinMode) showToast('Toca cualquier parte de la página para fijar un Post-it, sticker o marca');
+              }}
+              title="Activar modo anotar en página (Post-it, stickers, emojis)"
+            >
+              <MapPin size={13} /> {pinMode ? 'Tocando pág...' : 'Anotar pág.'}
+            </button>
+          )}
+
           <button
             className="circle-arrow-btn"
             style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
-            onClick={handleSaveBookmark}
-            title="Guardar marcador aquí"
+            onClick={handleOpenQuickMarkAtCurrentPos}
+            title="Añadir Post-it, resaltado, sticker o emoji aquí"
+          >
+            <Highlighter size={15} />
+          </button>
+
+          <button
+            className="circle-arrow-btn"
+            style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
+            onClick={() => handlePlaceVisualBookmark()}
+            title="Colocar separador de página aquí"
           >
             <BookmarkPlus size={16} />
           </button>
-          <button
-            className="circle-arrow-btn"
-            style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
-            onClick={() => setDrawer(drawer === 'note' ? 'none' : 'note')}
-            title="Añadir nota rápida"
-          >
-            <StickyNote size={16} />
-          </button>
+
           <button
             className="pill-btn"
             style={{
-              background: drawer === 'settings' ? '#e86f68' : 'rgba(128,128,128,0.16)',
-              color: drawer === 'settings' ? '#fff' : pal.fg,
+              background: drawer === 'marks' ? 'var(--accent-primary)' : 'rgba(128,128,128,0.16)',
+              color: drawer === 'marks' ? 'var(--accent-contrast)' : pal.fg,
+              borderColor: 'transparent',
+              height: 32,
+              fontSize: 11.5,
+            }}
+            onClick={() => setDrawer(drawer === 'marks' ? 'none' : 'marks')}
+            title="Separadores, Resaltados, Post-its y Stickers"
+          >
+            <Bookmark size={13} /> Marcas
+          </button>
+
+          {activeRoom && (
+            <button
+              className="pill-btn"
+              style={{
+                background: drawer === 'room' ? 'var(--accent-secondary)' : 'rgba(128,128,128,0.16)',
+                color: drawer === 'room' ? 'var(--accent-secondary-contrast)' : pal.fg,
+                borderColor: 'transparent',
+                height: 32,
+                fontSize: 11.5,
+              }}
+              onClick={() => setDrawer(drawer === 'room' ? 'none' : 'room')}
+              title={`Sala compartida ${activeRoom.code}`}
+            >
+              <Users size={13} /> Sala ({Object.keys(activeRoom.participants || {}).length})
+            </button>
+          )}
+
+          <button
+            className="circle-arrow-btn"
+            style={{
+              background: drawer === 'settings' ? 'var(--accent-primary)' : 'rgba(128,128,128,0.14)',
+              color: drawer === 'settings' ? 'var(--accent-contrast)' : pal.fg,
             }}
             onClick={() => setDrawer(drawer === 'settings' ? 'none' : 'settings')}
+            title="Ajustes del lector"
           >
-            <Settings2 size={14} /> Ajustes
+            <Settings2 size={16} />
           </button>
         </div>
       </header>
 
       {/* Main Reader Stage */}
       <main className="reader-stage">
+        {/* Visual Hanging Physical Bookmark (Separador de Libro) */}
+        {showHangingBookmark && activeBookmarkDesign && (
+          <button
+            type="button"
+            className="reader-hanging-bookmark"
+            onClick={() => {
+              setMarksTab('separadores');
+              setDrawer('marks');
+            }}
+            title={`Separador: ${activeBookmarkDesign.name} — Pulsa para cambiar o marcar página`}
+          >
+            <img src={activeBookmarkDesign.imageUrl} alt={activeBookmarkDesign.name} />
+          </button>
+        )}
+
         {!fileData ? (
           <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}>Cargando archivo...</div>
         ) : isComicLike ? (
@@ -194,9 +591,14 @@ export const ReaderShell: React.FC = () => {
             blob={fileData.blob}
             extraImages={fileData.extraImages}
             settings={readerSettings}
+            annotations={bookAnnotations}
+            jumpTarget={effectiveJumpTarget}
+            pinMode={pinMode}
+            onTextSelect={handleIncomingSelection}
+            onAnnotationClick={handleAnnotationClick}
             onProgress={(page, total) => {
               const pct = total ? Math.round((page / total) * 100) : 0;
-              setLivePos({ page, pct });
+              setLivePos((prev) => ({ ...prev, page, pct }));
               updateBook(activeBook.id, { currentPage: page, pageCount: total, progress: pct });
             }}
           />
@@ -205,9 +607,14 @@ export const ReaderShell: React.FC = () => {
             book={activeBook}
             blob={fileData.blob}
             settings={readerSettings}
+            annotations={bookAnnotations}
+            jumpTarget={effectiveJumpTarget}
+            pinMode={pinMode}
+            onTextSelect={handleIncomingSelection}
+            onAnnotationClick={handleAnnotationClick}
             onProgress={(page, total) => {
               const pct = total ? Math.round((page / total) * 100) : 0;
-              setLivePos({ page, pct });
+              setLivePos((prev) => ({ ...prev, page, pct }));
               updateBook(activeBook.id, { currentPage: page, pageCount: total, progress: pct });
             }}
           />
@@ -216,11 +623,20 @@ export const ReaderShell: React.FC = () => {
             book={activeBook}
             blob={fileData.blob}
             settings={readerSettings}
+            annotations={bookAnnotations}
             onTocLoaded={setToc}
             jumpHref={jumpHref}
-            onProgress={(pct, cfi) => {
-              setLivePos({ cfi, pct });
-              updateBook(activeBook.id, { currentCfi: cfi, progress: pct });
+            jumpTarget={effectiveJumpTarget}
+            onTextSelect={handleIncomingSelection}
+            onAnnotationClick={handleAnnotationClick}
+            onProgress={(pct, cfi, chapter, chapterHref, page) => {
+              setLivePos({ cfi, pct, chapter, chapterHref, page });
+              updateBook(activeBook.id, {
+                currentCfi: cfi,
+                progress: pct,
+                currentChapter: chapter,
+                currentPage: page,
+              });
             }}
           />
         ) : (
@@ -228,15 +644,824 @@ export const ReaderShell: React.FC = () => {
             book={activeBook}
             blob={fileData.blob}
             settings={readerSettings}
+            annotations={bookAnnotations}
             onTocLoaded={setToc}
             jumpHref={jumpHref}
-            onProgress={(pct, scrollRatio) => {
-              setLivePos({ scrollRatio, pct });
-              updateBook(activeBook.id, { scrollRatio, progress: pct });
+            jumpTarget={effectiveJumpTarget}
+            onTextSelect={handleIncomingSelection}
+            onAnnotationClick={handleAnnotationClick}
+            onProgress={(pct, scrollRatio, chapter, chapterHref) => {
+              setLivePos({ scrollRatio, pct, chapter, chapterHref });
+              updateBook(activeBook.id, {
+                scrollRatio,
+                progress: pct,
+                currentChapter: chapter,
+              });
             }}
           />
         )}
+
+        {/* Floating Selection / Page Annotation Toolkit */}
+        {pendingSel && (
+          <form
+            className="annotation-floating-dock"
+            style={{ background: pal.bar, color: pal.fg, border: `1px solid ${pal.border}` }}
+            onSubmit={handleSaveAnnotation}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>Marcar lectura</span>
+                <span style={{ fontSize: 10.5, opacity: 0.72, fontWeight: 700 }}>
+                  {pendingSel.chapter ? `${pendingSel.chapter} · ` : ''}
+                  {pendingSel.page ? `Pág. ${pendingSel.page} · ` : ''}
+                  {pendingSel.progress}%
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingSel(null)}
+                style={{ color: pal.fg, display: 'grid', placeItems: 'center' }}
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            {/* 6 Tool Buttons */}
+            <div className="annotation-tool-tabs">
+              {TOOL_LIST.map((tool) => (
+                <button
+                  key={tool}
+                  type="button"
+                  className={`annotation-tool-btn ${selTool === tool ? 'active' : ''}`}
+                  onClick={() => handleSelectTool(tool)}
+                >
+                  {renderToolIcon(tool, 12)}
+                  <span>{TOOL_META[tool].short}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Tool-specific picker (Named Stationery Colors + Variants / Categorized Stickers / Categorized Emojis + Custom Add) */}
+            {selTool === 'sticker' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {STICKER_GROUPS.map((grp) => (
+                    <button
+                      key={grp.id}
+                      type="button"
+                      className={`pill-btn ${selStickerGroup === grp.id ? 'active' : ''}`}
+                      style={{ height: 24, fontSize: 10, padding: '0 8px' }}
+                      onClick={() => setSelStickerGroup(grp.id)}
+                    >
+                      {grp.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className={`pill-btn ${addingCustomItem ? 'active' : ''}`}
+                    style={{ height: 24, fontSize: 10, padding: '0 8px', marginLeft: 'auto' }}
+                    onClick={() => setAddingCustomItem(!addingCustomItem)}
+                  >
+                    + Agregar sticker
+                  </button>
+                </div>
+
+                {addingCustomItem && (
+                  <div className="custom-stationery-inline">
+                    <input
+                      className="studio-input"
+                      style={{ width: 52, textAlign: 'center', padding: '4px 6px' }}
+                      placeholder="🌟"
+                      value={newItemEmoji}
+                      onChange={(e) => setNewItemEmoji(e.target.value)}
+                    />
+                    <input
+                      className="studio-input"
+                      style={{ flex: 1, minWidth: 110, padding: '4px 8px' }}
+                      placeholder="Etiqueta (ej. Mi favorito)"
+                      value={newItemName}
+                      onChange={(e) => setNewItemName(e.target.value)}
+                    />
+                    <input
+                      type="color"
+                      value={newItemColor}
+                      onChange={(e) => setNewItemColor(e.target.value)}
+                      style={{ width: 28, height: 28, border: 'none', background: 'transparent', cursor: 'pointer' }}
+                    />
+                    <button
+                      type="button"
+                      className="pill-btn active"
+                      style={{ height: 28, fontSize: 10.5, padding: '0 10px' }}
+                      onClick={() => {
+                        if (!newItemName.trim()) return;
+                        addCustomSticker({
+                          emoji: newItemEmoji || '✨',
+                          label: newItemName.trim(),
+                          color: newItemColor,
+                          group: selStickerGroup,
+                        });
+                        setSelSticker(`${newItemEmoji || '✨'} ${newItemName.trim()}`);
+                        setSelColor(newItemColor);
+                        setNewItemName('');
+                        setAddingCustomItem(false);
+                      }}
+                    >
+                      Añadir
+                    </button>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', maxHeight: 96, overflowY: 'auto' }}>
+                  {[
+                    ...customStationery.stickers.filter((st) => st.group === selStickerGroup),
+                    ...READING_STICKERS.filter((st) => st.group === selStickerGroup),
+                  ].map((st) => {
+                    const val = `${st.emoji} ${st.label}`;
+                    const active = selSticker === val;
+                    return (
+                      <button
+                        key={st.id}
+                        type="button"
+                        className="pill-btn"
+                        style={{
+                          height: 27,
+                          fontSize: 11,
+                          padding: '0 9px',
+                          background: active ? st.color : 'rgba(128,128,128,0.14)',
+                          color: active ? '#fff' : pal.fg,
+                          borderColor: 'transparent',
+                        }}
+                        onClick={() => {
+                          setSelSticker(val);
+                          setSelColor(st.color);
+                        }}
+                      >
+                        {val}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : selTool === 'emoji' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {READING_EMOJI_GROUPS.map((grp) => (
+                    <button
+                      key={grp.id}
+                      type="button"
+                      className={`pill-btn ${selEmojiGroup === grp.id ? 'active' : ''}`}
+                      style={{ height: 24, fontSize: 10, padding: '0 8px' }}
+                      onClick={() => setSelEmojiGroup(grp.id)}
+                    >
+                      {grp.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className={`pill-btn ${addingCustomItem ? 'active' : ''}`}
+                    style={{ height: 24, fontSize: 10, padding: '0 8px', marginLeft: 'auto' }}
+                    onClick={() => setAddingCustomItem(!addingCustomItem)}
+                  >
+                    + Agregar emoji
+                  </button>
+                </div>
+
+                {addingCustomItem && (
+                  <div className="custom-stationery-inline">
+                    <input
+                      className="studio-input"
+                      style={{ flex: 1, padding: '4px 8px' }}
+                      placeholder="Pega o escribe cualquier emoji (ej. 🦊, 🥀, ⚡)"
+                      value={newItemEmoji}
+                      onChange={(e) => setNewItemEmoji(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="pill-btn active"
+                      style={{ height: 28, fontSize: 10.5, padding: '0 10px' }}
+                      onClick={() => {
+                        if (!newItemEmoji.trim()) return;
+                        addCustomEmoji(newItemEmoji.trim());
+                        setSelEmoji(newItemEmoji.trim());
+                        setAddingCustomItem(false);
+                      }}
+                    >
+                      Añadir
+                    </button>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxHeight: 84, overflowY: 'auto' }}>
+                  {[
+                    ...customStationery.emojis,
+                    ...(
+                      READING_EMOJI_GROUPS.find((g) => g.id === selEmojiGroup) ||
+                      READING_EMOJI_GROUPS[0]
+                    ).emojis,
+                  ].map((em, idx) => (
+                    <button
+                      key={`${em}-${idx}`}
+                      type="button"
+                      style={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: 9,
+                        fontSize: 16,
+                        background:
+                          selEmoji === em ? 'var(--accent-primary)' : 'rgba(128,128,128,0.14)',
+                        display: 'grid',
+                        placeItems: 'center',
+                      }}
+                      onClick={() => setSelEmoji(em)}
+                    >
+                      {em}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                {/* Stroke / Paper Style Variant Pills */}
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: 10.5, fontWeight: 700, opacity: 0.72 }}>Estilo:</span>
+                  {TOOL_META[selTool].variants.map((v) => (
+                    <button
+                      key={v.id}
+                      type="button"
+                      className={`pill-btn ${selVariant === v.id ? 'active' : ''}`}
+                      style={{ height: 24, fontSize: 10, padding: '0 8px' }}
+                      onClick={() => setSelVariant(v.id)}
+                    >
+                      {v.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className={`pill-btn ${addingCustomItem ? 'active' : ''}`}
+                    style={{ height: 24, fontSize: 10, padding: '0 8px', marginLeft: 'auto' }}
+                    onClick={() => setAddingCustomItem(!addingCustomItem)}
+                  >
+                    + Agregar {TOOL_META[selTool].short.toLowerCase()}
+                  </button>
+                </div>
+
+                {addingCustomItem && (
+                  <div className="custom-stationery-inline">
+                    <input
+                      type="color"
+                      value={newItemColor}
+                      onChange={(e) => setNewItemColor(e.target.value)}
+                      style={{ width: 28, height: 28, border: 'none', background: 'transparent', cursor: 'pointer' }}
+                    />
+                    <input
+                      className="studio-input"
+                      style={{ flex: 1, minWidth: 100, padding: '4px 8px' }}
+                      placeholder={`Nombre (ej. ${TOOL_META[selTool].short} Coral)`}
+                      value={newItemName}
+                      onChange={(e) => setNewItemName(e.target.value)}
+                    />
+                    <input
+                      className="studio-input"
+                      style={{ flex: 1, minWidth: 100, padding: '4px 8px' }}
+                      placeholder="Uso (ej. Escenas clave)"
+                      value={newItemMeaning}
+                      onChange={(e) => setNewItemMeaning(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="pill-btn active"
+                      style={{ height: 28, fontSize: 10.5, padding: '0 10px' }}
+                      onClick={() => {
+                        addCustomSwatch({
+                          tool: selTool as 'highlighter' | 'pencil' | 'pen' | 'postit',
+                          color: newItemColor,
+                          name: newItemName || `${TOOL_META[selTool].short} personalizado`,
+                          meaning: newItemMeaning || 'Color personalizado',
+                        });
+                        setSelColor(newItemColor);
+                        setNewItemName('');
+                        setNewItemMeaning('');
+                        setAddingCustomItem(false);
+                      }}
+                    >
+                      Añadir
+                    </button>
+                  </div>
+                )}
+
+                {/* Curated + Custom Book Stationery Color Swatches + Active Meaning Legend */}
+                {(() => {
+                  const combinedSwatches = [
+                    ...customStationery.swatches
+                      .filter((s) => s.tool === selTool)
+                      .map((s) => ({ color: s.color, name: s.name, meaning: s.meaning })),
+                    ...TOOL_META[selTool].swatches,
+                  ];
+                  const activeSwatch = combinedSwatches.find(
+                    (s) => s.color.toLowerCase() === selColor.toLowerCase()
+                  );
+                  return (
+                    <>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        {combinedSwatches.map((sw, idx) => (
+                          <button
+                            key={`${sw.color}-${idx}`}
+                            type="button"
+                            onClick={() => setSelColor(sw.color)}
+                            title={`${sw.name} — ${sw.meaning}`}
+                            style={{
+                              width: 24,
+                              height: 24,
+                              borderRadius: selTool === 'postit' ? 6 : '50%',
+                              background: sw.color,
+                              border:
+                                selColor.toLowerCase() === sw.color.toLowerCase()
+                                  ? `2.5px solid ${pal.fg}`
+                                  : '1.5px solid rgba(128,128,128,0.38)',
+                              transform:
+                                selColor.toLowerCase() === sw.color.toLowerCase()
+                                  ? 'scale(1.12)'
+                                  : 'none',
+                            }}
+                            aria-label={sw.name}
+                          />
+                        ))}
+                      </div>
+                      {activeSwatch && (
+                        <div style={{ fontSize: 10.5, opacity: 0.8, fontWeight: 700 }}>
+                          {activeSwatch.name} ·{' '}
+                          <span style={{ opacity: 0.8 }}>{activeSwatch.meaning}</span>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* Selected phrase preview / editable quote */}
+            <input
+              className="studio-input"
+              placeholder="Frase, oración o palabra marcada..."
+              value={selQuote}
+              onChange={(e) => setSelQuote(e.target.value)}
+            />
+
+            {/* Optional Post-it / comment note */}
+            <textarea
+              className="studio-input"
+              rows={selTool === 'postit' ? 3 : 2}
+              placeholder={
+                selTool === 'postit'
+                  ? 'Escribe tu Post-it adhesivo aquí...'
+                  : 'Añade un comentario opcional sobre esta frase...'
+              }
+              value={selNote}
+              onChange={(e) => setSelNote(e.target.value)}
+            />
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={syncAlsoBookmark}
+                  onChange={(e) => setSyncAlsoBookmark(e.target.checked)}
+                />
+                Sincronizar también como marcador de página
+              </label>
+
+              <button type="submit" className="coral-cta-btn" style={{ height: 33, padding: '0 16px', fontSize: 12 }}>
+                Guardar {TOOL_META[selTool].short}
+              </button>
+            </div>
+          </form>
+        )}
       </main>
+
+      {/* Bookmarks, Separadores & Annotations Drawer */}
+      {drawer === 'marks' && (
+        <aside
+          className="reader-drawer"
+          style={{ width: 345, background: pal.bar, color: pal.fg, borderLeft: `1px solid ${pal.border}` }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong style={{ fontSize: 14 }}>Separadores y Anotaciones</strong>
+            <button onClick={() => setDrawer('none')} style={{ color: pal.fg }}>
+              <X size={16} />
+            </button>
+          </div>
+
+          {/* 3 Sub-tabs */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: 4,
+              background: 'rgba(128,128,128,0.12)',
+              padding: 3,
+              borderRadius: 11,
+            }}
+          >
+            {(
+              [
+                { id: 'separadores', label: 'Separadores' },
+                { id: 'anotaciones', label: 'Notas' },
+                { id: 'marcadores', label: 'Págs' },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setMarksTab(tab.id)}
+                style={{
+                  padding: '6px 4px',
+                  borderRadius: 9,
+                  fontSize: 11,
+                  fontWeight: 800,
+                  background: marksTab === tab.id ? 'var(--accent-primary)' : 'transparent',
+                  color: marksTab === tab.id ? 'var(--accent-contrast)' : pal.fg,
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {marksTab === 'separadores' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="coral-cta-btn"
+                  style={{ flex: 1, height: 34, fontSize: 11.5, justifyContent: 'center' }}
+                  onClick={() => handlePlaceVisualBookmark()}
+                >
+                  <BookmarkPlus size={14} /> Marcar aquí ({livePos.page ? `Pág. ${livePos.page}` : `${livePos.pct}%`})
+                </button>
+                <button
+                  type="button"
+                  className="pill-btn"
+                  style={{ height: 34, fontSize: 11 }}
+                  onClick={() =>
+                    handleSelectBookmarkDesign(
+                      activeBook.activeBookmarkDesignId === 'none'
+                        ? allBookmarkDesigns[0]?.id || ''
+                        : 'none'
+                    )
+                  }
+                >
+                  {showHangingBookmark && activeBookmarkDesign ? 'Ocultar' : 'Mostrar'}
+                </button>
+              </div>
+
+              <div style={{ fontSize: 11.5, fontWeight: 800, opacity: 0.8 }}>
+                Elige tu separador de libro
+              </div>
+
+              <div className="bookmark-design-grid">
+                {allBookmarkDesigns.map((design) => {
+                  const selected = activeBookmarkDesign?.id === design.id;
+                  return (
+                    <div
+                      key={design.id}
+                      className={`bookmark-design-card ${selected ? 'selected' : ''}`}
+                      onClick={() => handleSelectBookmarkDesign(design.id)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="bookmark-design-thumb">
+                        <img src={design.imageUrl} alt={design.name} loading="lazy" />
+                        {!design.builtin && (
+                          <button
+                            type="button"
+                            className="bookmark-design-del"
+                            title="Eliminar separador personalizado"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteCustomBookmarkDesign(design.id);
+                            }}
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        )}
+                      </div>
+                      <span className="bookmark-design-name">{design.name}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Add more custom bookmarks */}
+              <div
+                style={{
+                  background: 'rgba(128,128,128,0.1)',
+                  borderRadius: 12,
+                  padding: 10,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 7,
+                }}
+              >
+                <div style={{ fontSize: 11.5, fontWeight: 800 }}>+ Agregar más separadores</div>
+                <input
+                  className="studio-input"
+                  placeholder="Nombre del separador (opcional)"
+                  value={customBmName}
+                  onChange={(e) => setCustomBmName(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="pill-btn"
+                  style={{ justifyContent: 'center', height: 33 }}
+                  onClick={() => customBmInputRef.current?.click()}
+                >
+                  <ImagePlus size={13} /> Elegir imagen desde tu dispositivo
+                </button>
+                <input
+                  ref={customBmInputRef}
+                  type="file"
+                  accept="image/*"
+                  hidden
+                  onChange={handleUploadCustomBookmark}
+                />
+                <div style={{ fontSize: 10, opacity: 0.7 }}>
+                  Se comprime automáticamente a WebP ligero (~20 KB) en almacenamiento local.
+                </div>
+              </div>
+            </div>
+          ) : marksTab === 'anotaciones' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className={`pill-btn ${annFilter === 'all' ? 'active' : ''}`}
+                  style={{ height: 24, fontSize: 10.5, padding: '0 8px' }}
+                  onClick={() => setAnnFilter('all')}
+                >
+                  Todas
+                </button>
+                {TOOL_LIST.map((tool) => {
+                  const hasAny = bookAnnotations.some((a) => a.tool === tool);
+                  if (!hasAny) return null;
+                  return (
+                    <button
+                      key={tool}
+                      type="button"
+                      className={`pill-btn ${annFilter === tool ? 'active' : ''}`}
+                      style={{ height: 24, fontSize: 10.5, padding: '0 8px' }}
+                      onClick={() => setAnnFilter(tool)}
+                    >
+                      {TOOL_META[tool].short}
+                    </button>
+                  );
+                })}
+                {filteredAnnotations.length > 0 && (
+                  <button
+                    type="button"
+                    className="pill-btn"
+                    style={{ height: 24, fontSize: 10, padding: '0 8px', marginLeft: 'auto' }}
+                    onClick={() => {
+                      const next = !expandAllDrawer;
+                      setExpandAllDrawer(next);
+                      setExpandedDrawerIds({});
+                    }}
+                  >
+                    {expandAllDrawer ? 'Compactar' : 'Desglosar'}
+                  </button>
+                )}
+              </div>
+
+              <button
+                type="button"
+                className="pill-btn"
+                style={{ justifyContent: 'center', height: 30, fontSize: 11 }}
+                onClick={handleOpenQuickMarkAtCurrentPos}
+              >
+                <Highlighter size={12} /> Nueva nota / post-it / sticker aquí
+              </button>
+
+              {filteredAnnotations.length === 0 ? (
+                <div style={{ fontSize: 11.5, opacity: 0.75, lineHeight: 1.45 }}>
+                  Selecciona cualquier palabra, frase u oración mientras lees (o usa "Anotar pág." en PDF/Manga) para marcar con resaltador, lápiz, bolígrafo, post-it, stickers o emojis.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {filteredAnnotations.map((ann) => {
+                    const isOpen = expandAllDrawer || Boolean(expandedDrawerIds[ann.id]);
+                    return (
+                      <div
+                        key={ann.id}
+                        className={`compact-mark-row ${isOpen ? 'expanded' : ''} ${focusedAnnId === ann.id ? 'focused' : ''}`}
+                        style={{
+                          borderLeft: `3.5px solid ${ann.color}`,
+                          background:
+                            isOpen && ann.tool === 'postit'
+                              ? `color-mix(in srgb, ${ann.color} 22%, transparent)`
+                              : 'rgba(128,128,128,0.1)',
+                        }}
+                      >
+                        <div className="compact-mark-head">
+                          <button
+                            type="button"
+                            className="compact-mark-toggle"
+                            style={{ color: pal.fg }}
+                            onClick={() =>
+                              setExpandedDrawerIds((prev) => ({
+                                ...prev,
+                                [ann.id]: !isOpen,
+                              }))
+                            }
+                            title={isOpen ? 'Compactar' : 'Desglosar detalle'}
+                          >
+                            {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                            <span className="compact-mark-icon" style={{ color: ann.color }}>
+                              {renderToolIcon(ann.tool, 11)}
+                            </span>
+                            <span className="compact-mark-snippet">
+                              {ann.sticker ? `${ann.sticker} · ` : ''}
+                              {ann.quote}
+                            </span>
+                          </button>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                            <span style={{ fontSize: 9.5, opacity: 0.7, fontWeight: 700 }}>
+                              {ann.page ? `P.${ann.page}` : `${Math.round(ann.progress)}%`}
+                            </span>
+                            <button
+                              type="button"
+                              className="pill-btn"
+                              style={{ height: 21, fontSize: 10, padding: '0 6px' }}
+                              onClick={() =>
+                                triggerJump({
+                                  annotationId: ann.id,
+                                  cfi: ann.cfi,
+                                  chapterHref: ann.chapterHref,
+                                  page: ann.page,
+                                  scrollRatio: ann.scrollRatio,
+                                  quote: ann.quote,
+                                })
+                              }
+                            >
+                              Ir
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteAnnotation(ann.id)}
+                              style={{ color: pal.muted, display: 'grid', placeItems: 'center' }}
+                              title="Eliminar marca"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+
+                        {isOpen && (
+                          <div className="compact-mark-body">
+                            <div style={{ fontSize: 10, opacity: 0.75, fontWeight: 700 }}>
+                              {TOOL_META[ann.tool].label}
+                              {ann.sticker ? ` · ${ann.sticker}` : ''}
+                              {ann.chapter ? ` · ${ann.chapter}` : ''}
+                              {ann.page ? ` · Pág. ${ann.page}` : ''} · {Math.round(ann.progress)}%
+                            </div>
+
+                            <div
+                              className={`ann-quote-preview tool-${ann.tool}${ann.styleVariant ? ` komo-variant-${ann.styleVariant}` : ''}`}
+                              style={{ '--mark-color': ann.color } as React.CSSProperties}
+                            >
+                              “{ann.quote}”
+                            </div>
+
+                            {ann.note && (
+                              <div style={{ fontSize: 11.5, lineHeight: 1.4 }}>{ann.note}</div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button
+                type="button"
+                className="coral-cta-btn"
+                style={{ justifyContent: 'center', height: 32, fontSize: 11.5 }}
+                onClick={() => handlePlaceVisualBookmark()}
+              >
+                <BookmarkPlus size={14} /> Guardar marcador en este punto
+              </button>
+
+              {bookBookmarks.length === 0 ? (
+                <div style={{ fontSize: 11.5, opacity: 0.75 }}>
+                  Todavía no guardaste marcadores de página en este libro.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {bookBookmarks.map((bm) => {
+                    const design =
+                      allBookmarkDesigns.find((d) => d.id === bm.designId) || activeBookmarkDesign;
+                    const isOpen = Boolean(expandedDrawerIds[bm.id]);
+                    return (
+                      <div
+                        key={bm.id}
+                        className={`compact-mark-row ${isOpen ? 'expanded' : ''}`}
+                        style={{ background: 'rgba(128,128,128,0.1)' }}
+                      >
+                        <div className="compact-mark-head">
+                          <button
+                            type="button"
+                            className="compact-mark-toggle"
+                            style={{ color: pal.fg }}
+                            onClick={() =>
+                              setExpandedDrawerIds((prev) => ({
+                                ...prev,
+                                [bm.id]: !isOpen,
+                              }))
+                            }
+                          >
+                            {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                            {design && (
+                              <img
+                                src={design.imageUrl}
+                                alt={design.name}
+                                style={{
+                                  width: 14,
+                                  height: 28,
+                                  objectFit: 'cover',
+                                  borderRadius: 3,
+                                  flexShrink: 0,
+                                }}
+                              />
+                            )}
+                            <span className="compact-mark-snippet" style={{ fontWeight: 700 }}>
+                              {bm.label}
+                            </span>
+                          </button>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                            <button
+                              type="button"
+                              className="pill-btn"
+                              style={{ height: 21, fontSize: 10, padding: '0 6px' }}
+                              onClick={() =>
+                                triggerJump({
+                                  cfi: bm.cfi,
+                                  chapterHref: bm.chapterHref,
+                                  page: bm.page,
+                                  scrollRatio: bm.scrollRatio,
+                                })
+                              }
+                            >
+                              Ir
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteBookmark(bm.id)}
+                              style={{ color: pal.muted, display: 'grid', placeItems: 'center' }}
+                              title="Eliminar marcador"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+
+                        {isOpen && (
+                          <div
+                            className="compact-mark-body"
+                            style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}
+                          >
+                            {design && (
+                              <img
+                                src={design.imageUrl}
+                                alt={design.name}
+                                style={{
+                                  width: 34,
+                                  height: 78,
+                                  objectFit: 'cover',
+                                  borderRadius: 5,
+                                  flexShrink: 0,
+                                }}
+                              />
+                            )}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 11.5, fontWeight: 800 }}>{bm.label}</div>
+                              {bm.excerpt && (
+                                <div style={{ fontSize: 11, opacity: 0.8, marginTop: 3 }}>
+                                  “{bm.excerpt}”
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </aside>
+      )}
 
       {/* Settings Drawer */}
       {drawer === 'settings' && (
@@ -267,7 +1492,7 @@ export const ReaderShell: React.FC = () => {
                       color: READER_PALETTES[t].fg,
                       border:
                         readerSettings.theme === t
-                          ? '2.5px solid #e86f68'
+                          ? '2.5px solid var(--accent-primary)'
                           : '1px solid rgba(128,128,128,0.35)',
                       fontSize: 10,
                       fontWeight: 800,
@@ -479,30 +1704,154 @@ export const ReaderShell: React.FC = () => {
         </aside>
       )}
 
-      {/* Quick Note Drawer */}
-      {drawer === 'note' && (
+      {/* Shared Reading Room Live Drawer */}
+      {drawer === 'room' && activeRoom && (
         <aside
           className="reader-drawer"
           style={{ background: pal.bar, color: pal.fg, borderLeft: `1px solid ${pal.border}` }}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <strong style={{ fontSize: 14 }}>Nota rápida</strong>
+            <strong style={{ fontSize: 14 }}>Sala {activeRoom.code}</strong>
             <button onClick={() => setDrawer('none')} style={{ color: pal.fg }}>
               <X size={16} />
             </button>
           </div>
-          <form onSubmit={handleSaveQuickNote} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <textarea
-              className="studio-input"
-              rows={5}
-              placeholder="Escribe tu comentario o cita..."
-              value={quickNote}
-              onChange={(e) => setQuickNote(e.target.value)}
-            />
-            <button type="submit" className="coral-cta-btn" style={{ justifyContent: 'center' }}>
-              Guardar nota
-            </button>
-          </form>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 800, opacity: 0.8 }}>Progreso mutuo en vivo</div>
+            {Object.values(activeRoom.participants || {})
+              .sort((a, b) => (b.progress || 0) - (a.progress || 0))
+              .map((p) => {
+                const isMe = p.id === deviceId;
+                return (
+                  <div
+                    key={p.id}
+                    style={{
+                      background: 'rgba(128,128,128,0.1)',
+                      borderRadius: 10,
+                      padding: '8px 10px',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        fontSize: 11.5,
+                        fontWeight: 800,
+                        marginBottom: 4,
+                      }}
+                    >
+                      <span>
+                        {p.avatarEmoji} {p.name} {isMe ? '(Tú)' : ''}
+                      </span>
+                      <span>
+                        {p.currentPage ? `Pág. ${p.currentPage} · ` : ''}
+                        {Math.round(p.progress || 0)}%
+                      </span>
+                    </div>
+                    <div className="goal-track">
+                      <div
+                        className={`goal-fill ${isMe ? '' : 'secondary'}`}
+                        style={{ width: `${Math.min(100, Math.max(3, Math.round(p.progress || 0)))}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 800, opacity: 0.8 }}>
+              Comentarios sin spoilers ({activeRoom.comments?.length || 0})
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!roomCommentDraft.trim()) return;
+                await sendRoomComment(
+                  activeRoom.code,
+                  roomCommentDraft.trim(),
+                  livePos.pct,
+                  livePos.page
+                );
+                setRoomCommentDraft('');
+              }}
+              style={{ display: 'flex', gap: 6 }}
+            >
+              <input
+                className="studio-input"
+                placeholder={`Nota en ${livePos.pct}%...`}
+                value={roomCommentDraft}
+                onChange={(e) => setRoomCommentDraft(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="circle-arrow-btn"
+                style={{
+                  width: 36,
+                  height: 36,
+                  flexShrink: 0,
+                  background: 'var(--accent-primary)',
+                  color: 'var(--accent-contrast)',
+                  borderColor: 'transparent',
+                }}
+              >
+                <Send size={13} />
+              </button>
+            </form>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {[...(activeRoom.comments || [])].reverse().map((c) => {
+                const isSpoiler =
+                  c.participantId !== deviceId &&
+                  c.progressAt > livePos.pct + 2 &&
+                  !revealedSpoilers[c.id];
+                return (
+                  <div
+                    key={c.id}
+                    style={{
+                      background: 'rgba(128,128,128,0.1)',
+                      borderRadius: 10,
+                      padding: '8px 10px',
+                      fontSize: 11.5,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        fontWeight: 800,
+                        fontSize: 10.5,
+                        marginBottom: 3,
+                      }}
+                    >
+                      <span>
+                        {c.avatarEmoji} {c.authorName}
+                      </span>
+                      <span style={{ opacity: 0.7 }}>{Math.round(c.progressAt)}%</span>
+                    </div>
+                    {isSpoiler ? (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, opacity: 0.75, fontSize: 10.5 }}>
+                          <Lock size={11} /> Spoiler ({Math.round(c.progressAt)}%)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setRevealedSpoilers((prev) => ({ ...prev, [c.id]: true }))}
+                          style={{ fontSize: 10.5, fontWeight: 800, color: 'var(--accent-primary)', display: 'inline-flex', alignItems: 'center', gap: 3 }}
+                        >
+                          <Eye size={11} /> Ver
+                        </button>
+                      </div>
+                    ) : (
+                      <div style={{ lineHeight: 1.4 }}>{c.text}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </aside>
       )}
     </div>

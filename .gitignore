@@ -24,3 +24,7 @@ npm-debug.log*
 .DS_Store
 .env
 .env.local
+.env.*
+!.env.example
+server/.env
+server/.env.*

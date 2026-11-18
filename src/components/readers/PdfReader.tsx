@@ -1,17 +1,37 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Loader2, ZoomIn, ZoomOut } from 'lucide-react';
 import { pdfjsLib } from '../../parsers/pdfParser';
-import type { BookItem, ReaderSettings } from '../../types/library';
+import type {
+  BookAnnotation,
+  BookItem,
+  ReaderJumpTarget,
+  ReaderSettings,
+} from '../../types/library';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
+import type { ReaderSelectionPayload } from './TextRichReader';
 
 interface PdfReaderProps {
   book: BookItem;
   blob: Blob;
   settings: ReaderSettings;
+  annotations?: BookAnnotation[];
+  jumpTarget?: ReaderJumpTarget | null;
+  pinMode?: boolean;
   onProgress: (page: number, total: number) => void;
+  onTextSelect?: (sel: ReaderSelectionPayload) => void;
+  onAnnotationClick?: (ann: BookAnnotation) => void;
 }
 
-export const PdfReader: React.FC<PdfReaderProps> = ({ book, blob, onProgress }) => {
+export const PdfReader: React.FC<PdfReaderProps> = ({
+  book,
+  blob,
+  annotations = [],
+  jumpTarget,
+  pinMode = false,
+  onProgress,
+  onTextSelect,
+  onAnnotationClick,
+}) => {
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [pageNum, setPageNum] = useState(Math.max(1, book.currentPage || 1));
@@ -89,7 +109,15 @@ export const PdfReader: React.FC<PdfReaderProps> = ({ book, blob, onProgress }) 
   }, [pdfDoc, pageNum, scale]);
 
   useEffect(() => {
+    if (jumpTarget?.page && numPages > 0) {
+      const clamped = Math.min(numPages, Math.max(1, jumpTarget.page));
+      setPageNum(clamped);
+    }
+  }, [jumpTarget?.id, numPages]);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === 'ArrowRight') setPageNum((p) => Math.min(numPages, p + 1));
       if (e.key === 'ArrowLeft') setPageNum((p) => Math.max(1, p - 1));
     };
@@ -127,14 +155,62 @@ export const PdfReader: React.FC<PdfReaderProps> = ({ book, blob, onProgress }) 
           padding: '18px 16px',
         }}
       >
-        <canvas
-          ref={canvasRef}
+        <div
           style={{
-            borderRadius: 6,
-            boxShadow: '0 10px 30px rgba(0,0,0,0.18)',
-            background: '#fff',
+            position: 'relative',
+            display: 'inline-block',
+            cursor: pinMode ? 'crosshair' : 'default',
           }}
-        />
+          onClick={(e) => {
+            if (!pinMode || !onTextSelect) return;
+            const rect = e.currentTarget.getBoundingClientRect();
+            const pageX = Math.round(((e.clientX - rect.left) / Math.max(1, rect.width)) * 100);
+            const pageY = Math.round(((e.clientY - rect.top) / Math.max(1, rect.height)) * 100);
+            const pct = numPages ? Math.round((pageNum / numPages) * 100) : 0;
+            onTextSelect({
+              quote: `Marca en página ${pageNum}`,
+              page: pageNum,
+              progress: pct,
+              pageX,
+              pageY,
+            });
+          }}
+        >
+          <canvas
+            ref={canvasRef}
+            style={{
+              display: 'block',
+              borderRadius: 6,
+              boxShadow: '0 10px 30px rgba(0,0,0,0.18)',
+              background: '#fff',
+            }}
+          />
+          {annotations
+            .filter((a) => a.page === pageNum && a.pageX !== undefined && a.pageY !== undefined)
+            .map((a) => (
+              <button
+                key={a.id}
+                type="button"
+                className={`page-pin-badge pin-${a.tool}${a.styleVariant ? ` pin-var-${a.styleVariant}` : ''}`}
+                style={{
+                  left: `${a.pageX}%`,
+                  top: `${a.pageY}%`,
+                  background: a.color,
+                }}
+                title={`${a.quote}${a.note ? ` — ${a.note}` : ''}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onAnnotationClick?.(a);
+                }}
+              >
+                {a.tool === 'postit' ? (
+                  <span className="pin-postit-shape" aria-hidden="true" />
+                ) : (
+                  a.sticker || (a.tool === 'pencil' ? '✏️' : a.tool === 'pen' ? '🖊️' : '🖍️')
+                )}
+              </button>
+            ))}
+        </div>
       </div>
 
       <div className="reader-bottombar" style={{ justifyContent: 'center' }}>

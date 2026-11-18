@@ -30,14 +30,20 @@ export async function extractPdfMetaAndCover(
   let coverDataUrl: string | undefined;
   try {
     const page = await pdf.getPage(1);
-    const viewport = page.getViewport({ scale: 0.65 });
+    const baseViewport = page.getViewport({ scale: 1 });
+    const targetWidth = 480;
+    const scale = Math.min(1.6, Math.max(0.45, targetWidth / Math.max(1, baseViewport.width)));
+    const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
+    canvas.width = Math.max(1, Math.round(viewport.width));
+    canvas.height = Math.max(1, Math.round(viewport.height));
     const ctx = canvas.getContext('2d');
     if (ctx) {
+      // Fill white page background so transparent PDFs never export black in JPEG
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: ctx, viewport }).promise;
-      coverDataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      coverDataUrl = canvas.toDataURL('image/jpeg', 0.88);
     }
   } catch {
     // fallback cover

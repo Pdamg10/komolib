@@ -1,23 +1,52 @@
 import React, { useState } from 'react';
+import { BookOpen, Smartphone, X } from 'lucide-react';
+import { AnnotationsView } from './components/AnnotationsView';
 import { AudioPlayerBar } from './components/AudioPlayerBar';
 import { BookDetailModal } from './components/BookDetailModal';
 import { BookShelf } from './components/BookShelf';
 import { CategoryStrip } from './components/CategoryStrip';
-import { FeaturedBanner } from './components/FeaturedBanner';
+import { DashboardView } from './components/DashboardView';
 import { ImportModal } from './components/ImportModal';
 import { ProfileModal } from './components/ProfileModal';
+import { ReadingLogView } from './components/ReadingLogView';
 import { ReaderShell } from './components/readers/ReaderShell';
 import { RightPanel } from './components/RightPanel';
+import { SharedReadingView } from './components/SharedReadingView';
 import { Sidebar } from './components/Sidebar';
+import { StudioModal } from './components/StudioModal';
 import { TopBar } from './components/TopBar';
 import { LibraryProvider, useLibrary } from './context/LibraryContext';
+import { extractFilesFromDataTransfer, isImageFile } from './utils/fileFolderImport';
 
 const AppWorkspace: React.FC = () => {
-  const { theme, importFiles, toast, ready } = useLibrary();
+  const {
+    theme,
+    navSection,
+    books,
+    openBook,
+    remoteActiveSession,
+    dismissRemoteSession,
+    importFiles,
+    toast,
+    ready,
+  } = useLibrary();
   const [globalDragging, setGlobalDragging] = useState(false);
+
+  const isFullView = theme.fullView !== false;
+  const hasWallpaper = Boolean(theme.customWallpaperUrl);
+
+  const backdropClasses = [
+    'app-backdrop',
+    isFullView ? 'full-view' : '',
+    hasWallpaper ? 'has-wallpaper' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   const shellClasses = [
     'app-shell',
+    isFullView ? 'full-view' : '',
+    hasWallpaper ? 'has-wallpaper' : '',
     theme.showRightPanel ? '' : 'no-right-panel',
     theme.compactSidebar ? 'compact-sidebar' : '',
   ]
@@ -26,9 +55,9 @@ const AppWorkspace: React.FC = () => {
 
   return (
     <div
-      className="app-backdrop"
+      className={backdropClasses}
       style={
-        theme.customWallpaperUrl
+        hasWallpaper
           ? { backgroundImage: `url(${theme.customWallpaperUrl})` }
           : undefined
       }
@@ -42,10 +71,10 @@ const AppWorkspace: React.FC = () => {
       onDrop={async (e) => {
         e.preventDefault();
         setGlobalDragging(false);
-        const dropped = Array.from(e.dataTransfer.files || []);
+        const dropped = await extractFilesFromDataTransfer(e.dataTransfer);
         if (dropped.length) {
-          const allImages = dropped.length > 1 && dropped.every((f) => f.type.startsWith('image/'));
-          await importFiles(dropped, { bundleImages: allImages });
+          const imageCount = dropped.filter((f) => isImageFile(f)).length;
+          await importFiles(dropped, { bundleImages: imageCount > 1 });
         }
       }}
     >
@@ -54,16 +83,66 @@ const AppWorkspace: React.FC = () => {
 
         <main className="main-canvas">
           <TopBar />
-          <CategoryStrip />
-          {ready ? (
-            <>
-              <BookShelf />
-              <FeaturedBanner />
-            </>
-          ) : (
+
+          {remoteActiveSession && (
+            <div className="remote-resume-banner">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                <span className="quickstart-step-icon" style={{ width: 32, height: 32, flexShrink: 0 }}>
+                  <Smartphone size={15} />
+                </span>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    Continuar desde {remoteActiveSession.deviceName}: {remoteActiveSession.title}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>
+                    Progreso sincronizado: {Math.round(remoteActiveSession.progress || 0)}%
+                    {remoteActiveSession.currentPage ? ` · Página ${remoteActiveSession.currentPage}` : ''}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  className="coral-cta-btn"
+                  style={{ height: 30, padding: '0 13px', fontSize: 11.5 }}
+                  onClick={() => {
+                    const target = books.find((b) => b.id === remoteActiveSession.bookId);
+                    if (target) openBook(target);
+                    dismissRemoteSession();
+                  }}
+                >
+                  <BookOpen size={12} /> Continuar aquí
+                </button>
+                <button
+                  type="button"
+                  className="circle-arrow-btn"
+                  style={{ width: 28, height: 28 }}
+                  onClick={dismissRemoteSession}
+                  aria-label="Ocultar aviso"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!ready ? (
             <div style={{ padding: 40, textAlign: 'center', fontWeight: 700, color: 'var(--text-muted)' }}>
               Preparando tu librería KomoLib...
             </div>
+          ) : navSection === 'dashboard' ? (
+            <DashboardView />
+          ) : navSection === 'reading-log' ? (
+            <ReadingLogView />
+          ) : navSection === 'annotations' ? (
+            <AnnotationsView />
+          ) : navSection === 'shared' ? (
+            <SharedReadingView />
+          ) : (
+            <>
+              <CategoryStrip />
+              <BookShelf />
+            </>
           )}
         </main>
 
@@ -76,7 +155,7 @@ const AppWorkspace: React.FC = () => {
               inset: 12,
               borderRadius: 24,
               border: '3px dashed var(--accent-primary)',
-              background: 'rgba(253, 251, 248, 0.9)',
+              background: 'color-mix(in srgb, var(--shell-bg) 92%, transparent)',
               backdropFilter: 'blur(6px)',
               zIndex: 80,
               display: 'grid',
@@ -86,10 +165,10 @@ const AppWorkspace: React.FC = () => {
           >
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--accent-primary)' }}>
-                Suelta aquí tus libros, mangas o manhwas
+                Suelta aquí tus archivos o carpetas
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 6 }}>
-                EPUB · PDF · CBZ · CBR · MOBI · FB2 · DOCX · TXT · Imágenes · Audio
+                Carpetas · EPUB · PDF · CBZ · CBR · MOBI · FB2 · DOCX · TXT · Imágenes · Audio
               </div>
             </div>
           </div>
@@ -101,6 +180,7 @@ const AppWorkspace: React.FC = () => {
 
       {/* Modals & Floating Audio Player */}
       <ImportModal />
+      <StudioModal />
       <BookDetailModal />
       <ProfileModal />
       <AudioPlayerBar />
@@ -113,8 +193,9 @@ const AppWorkspace: React.FC = () => {
             bottom: 22,
             left: '50%',
             transform: 'translateX(-50%)',
-            background: '#2f2926',
-            color: '#fff',
+            background: 'var(--text-primary)',
+            color: 'var(--shell-bg)',
+            border: '1px solid var(--border-subtle)',
             padding: '10px 18px',
             borderRadius: 999,
             fontSize: 12.5,

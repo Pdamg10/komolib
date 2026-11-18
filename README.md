@@ -20,12 +20,20 @@
 npm run dev
 ```
 
-### 2. Iniciar el Servidor de Sincronización (Node.js)
+### 2. Iniciar el Servidor de Sincronización y Salas Compartidas (Node.js)
 ```bash
+# Modo Wi-Fi local (escucha en http://0.0.0.0:4123)
 npm run dev:server
+
+# Modo Internet automático (abre además un túnel HTTPS con Cloudflare Quick Tunnel)
+npm run dev:tunnel
 ```
-El servidor escucha en `http://0.0.0.0:4123` (puedes protegerlo definiendo `KOMOLIB_TOKEN=tu_clave`).  
-Desde la app (Web o APK), entra en **Panel Derecho → Notas → Servidor de Sincronización**, ingresa la IP local de tu PC (ej. `http://192.168.1.50:4123`) y pulsa **Sincronizar ahora**.
+- **Web ↔ APK en vivo:** En la app entra en **Lectura Compartida y Sync → Red, Túnel y APK**. Puedes emparejar tu APK Android copiando/pegando el enlace de emparejamiento o escaneando el QR privado. Los cambios de progreso, libros, notas, marcadores, tema y sesión activa (*"Continuar desde Web PC / APK Android"*) se sincronizan automáticamente en tiempo real (SSE).
+- **Salas de Lectura Compartida (Buddy Read):** Crea una sala para cualquier libro (genera código `KOMO-XXXX`, enlace y QR), lee viendo el progreso mutuo en vivo y deja notas protegidas contra spoilers hasta que el otro lector alcance tu porcentaje.
+- **Internet / Túnel / VPS:**
+  - Con `cloudflared` disponible, pulsa **Activar túnel** desde la UI o arranca con `npm run dev:tunnel`.
+  - O usa tu propio túnel/VPS (`ngrok`, Tailscale Funnel, Cloudflare Tunnel nombrado o Nginx/Caddy) configurando `PUBLIC_URL=https://tu-dominio` en `.env` (o en la UI).
+  - Recomendado para Internet: define `KOMOLIB_TOKEN=tu_clave` en `.env` para proteger tu biblioteca personal; los invitados de salas compartidas seguirán pudiendo entrar solo a su sala usando el código `KOMO-XXXX`.
 
 ### 3. Compilar el APK Android
 ```bash

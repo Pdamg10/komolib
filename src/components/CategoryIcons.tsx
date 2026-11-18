@@ -25,7 +25,7 @@ export const CategoryBookIcon: React.FC<{ icon: string; color: string; accent: s
       <svg width="34" height="34" viewBox="0 0 36 36" fill="none">
         <rect x="7" y="4" width="22" height="28" rx="4" fill="#587085" />
         <rect x="9.5" y="6.5" width="17" height="21" rx="2" fill="#fcfaf5" />
-        <path d="M12.5 11h11M12.5 15h11M12.5 19h8M12.5 23h9" stroke="#b9b0a6" stroke-width="1.8" stroke-linecap="round" />
+        <path d="M12.5 11h11M12.5 15h11M12.5 19h8M12.5 23h9" stroke="#b9b0a6" strokeWidth="1.8" strokeLinecap="round" />
         <circle cx="18" cy="29.8" r="1.2" fill="#f3ede4" />
       </svg>
     );
@@ -154,7 +154,7 @@ export const CollectionMiniIcon: React.FC<{ icon: string }> = ({ icon }) => {
   if (icon === 'classic') {
     return (
       <svg width="36" height="36" viewBox="0 0 38 38" fill="none">
-        <rect width="38" height="38" rx="11" fill="#f5f0e8" />
+        <rect width="38" height="38" rx="11" fill="var(--banner-bg)" />
         <rect x="9" y="9" width="14" height="4" rx="2" fill="#d9cfc2" />
         <rect x="11" y="13" width="10" height="14" rx="1.5" fill="#e5ddd2" />
         <rect x="9" y="27" width="14" height="3.5" rx="1.7" fill="#d4c9ba" />
@@ -165,7 +165,7 @@ export const CollectionMiniIcon: React.FC<{ icon: string }> = ({ icon }) => {
   if (icon === 'ufo') {
     return (
       <svg width="36" height="36" viewBox="0 0 38 38" fill="none">
-        <rect width="38" height="38" rx="11" fill="#f2eff9" />
+        <rect width="38" height="38" rx="11" fill="var(--banner-bg)" />
         <ellipse cx="19" cy="21" rx="11" ry="5" fill="#7c6cc4" />
         <path d="M13 19.5a6 6 0 0 1 12 0z" fill="#f5c65d" />
         <circle cx="14" cy="21" r="1.4" fill="#fff" />
@@ -176,7 +176,7 @@ export const CollectionMiniIcon: React.FC<{ icon: string }> = ({ icon }) => {
   }
   return (
     <svg width="36" height="36" viewBox="0 0 38 38" fill="none">
-      <rect width="38" height="38" rx="11" fill="#f6efe9" />
+      <rect width="38" height="38" rx="11" fill="var(--banner-bg)" />
       <rect x="9" y="18" width="10" height="11" rx="2.5" fill="#e86f68" />
       <rect x="19" y="18" width="10" height="11" rx="2.5" fill="#4c6c8a" />
       <rect x="13" y="9" width="11" height="9" rx="2.5" fill="#5da672" />

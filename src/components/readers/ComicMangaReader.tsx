@@ -1,14 +1,25 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { extractCbrPages, extractCbzPages, type ComicPage } from '../../parsers/comicParser';
-import type { BookItem, ReaderSettings } from '../../types/library';
+import type {
+  BookAnnotation,
+  BookItem,
+  ReaderJumpTarget,
+  ReaderSettings,
+} from '../../types/library';
+import type { ReaderSelectionPayload } from './TextRichReader';
 
 interface ComicMangaReaderProps {
   book: BookItem;
   blob: Blob;
   extraImages?: Blob[];
   settings: ReaderSettings;
+  annotations?: BookAnnotation[];
+  jumpTarget?: ReaderJumpTarget | null;
+  pinMode?: boolean;
   onProgress: (page: number, total: number) => void;
+  onTextSelect?: (sel: ReaderSelectionPayload) => void;
+  onAnnotationClick?: (ann: BookAnnotation) => void;
 }
 
 export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
@@ -16,7 +27,12 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
   blob,
   extraImages,
   settings,
+  annotations = [],
+  jumpTarget,
+  pinMode = false,
   onProgress,
+  onTextSelect,
+  onAnnotationClick,
 }) => {
   const [pages, setPages] = useState<ComicPage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -99,8 +115,22 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
   };
 
   useEffect(() => {
+    if (!jumpTarget?.page || !pages.length) return;
+    const targetIdx = Math.min(pages.length - 1, Math.max(0, jumpTarget.page - 1));
+    setCurrentIdx(targetIdx);
+    onProgress(targetIdx + 1, pages.length);
+    if (isStrip && stripRef.current) {
+      const targetEl = stripRef.current.querySelector(
+        `[data-comic-page="${targetIdx + 1}"]`
+      ) as HTMLElement | null;
+      targetEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [jumpTarget?.id, pages.length, isStrip]);
+
+  useEffect(() => {
     if (isStrip) return;
     const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === 'ArrowRight') {
         if (isRtl) goPrev();
         else goNext();
@@ -163,21 +193,73 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
           padding: settings.comicGap > 0 ? '14px 8px 60px' : '0 0 60px',
         }}
       >
-        {pages.map((p, idx) => (
-          <img
-            key={p.name + idx}
-            src={p.url}
-            alt={`Página ${idx + 1}`}
-            loading="lazy"
-            style={{
-              display: 'block',
-              width: settings.comicFit === 'width' ? `min(100%, ${settings.maxWidth + 140}px)` : 'auto',
-              maxWidth: '100%',
-              maxHeight: settings.comicFit === 'height' ? '92vh' : 'none',
-              objectFit: 'contain',
-            }}
-          />
-        ))}
+        {pages.map((p, idx) => {
+          const pageNo = idx + 1;
+          const pagePins = annotations.filter(
+            (a) => a.page === pageNo && a.pageX !== undefined && a.pageY !== undefined
+          );
+          return (
+            <div
+              key={p.name + idx}
+              data-comic-page={pageNo}
+              style={{
+                position: 'relative',
+                width:
+                  settings.comicFit === 'width'
+                    ? `min(100%, ${settings.maxWidth + 140}px)`
+                    : 'auto',
+                maxWidth: '100%',
+                cursor: pinMode ? 'crosshair' : 'default',
+              }}
+              onClick={(e) => {
+                if (!pinMode || !onTextSelect) return;
+                const rect = e.currentTarget.getBoundingClientRect();
+                const pageX = Math.round(((e.clientX - rect.left) / Math.max(1, rect.width)) * 100);
+                const pageY = Math.round(((e.clientY - rect.top) / Math.max(1, rect.height)) * 100);
+                const pct = pages.length ? Math.round((pageNo / pages.length) * 100) : 0;
+                onTextSelect({
+                  quote: `Viñeta pág. ${pageNo}`,
+                  page: pageNo,
+                  progress: pct,
+                  pageX,
+                  pageY,
+                });
+              }}
+            >
+              <img
+                src={p.url}
+                alt={`Página ${pageNo}`}
+                loading="lazy"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  maxWidth: '100%',
+                  maxHeight: settings.comicFit === 'height' ? '92vh' : 'none',
+                  objectFit: 'contain',
+                }}
+              />
+              {pagePins.map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  className={`page-pin-badge pin-${a.tool}${a.styleVariant ? ` pin-var-${a.styleVariant}` : ''}`}
+                  style={{ left: `${a.pageX}%`, top: `${a.pageY}%`, background: a.color }}
+                  title={`${a.quote}${a.note ? ` — ${a.note}` : ''}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAnnotationClick?.(a);
+                  }}
+                >
+                  {a.tool === 'postit' ? (
+                    <span className="pin-postit-shape" aria-hidden="true" />
+                  ) : (
+                    a.sticker || (a.tool === 'pencil' ? '✏️' : a.tool === 'pen' ? '🖊️' : '🖍️')
+                  )}
+                </button>
+              ))}
+            </div>
+          );
+        })}
       </div>
     );
   }
@@ -199,8 +281,25 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
           justifyContent: 'center',
           gap: 6,
           padding: '10px 48px',
+          position: 'relative',
+          cursor: pinMode ? 'crosshair' : 'default',
         }}
         onClick={(e) => {
+          if (pinMode && onTextSelect) {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const pageX = Math.round(((e.clientX - rect.left) / Math.max(1, rect.width)) * 100);
+            const pageY = Math.round(((e.clientY - rect.top) / Math.max(1, rect.height)) * 100);
+            const pageNo = currentIdx + 1;
+            const pct = pages.length ? Math.round((pageNo / pages.length) * 100) : 0;
+            onTextSelect({
+              quote: `Viñeta pág. ${pageNo}`,
+              page: pageNo,
+              progress: pct,
+              pageX,
+              pageY,
+            });
+            return;
+          }
           const rect = e.currentTarget.getBoundingClientRect();
           const clickLeft = e.clientX - rect.left < rect.width / 2;
           if (isRtl) {
@@ -227,6 +326,27 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
             }}
           />
         ))}
+        {annotations
+          .filter((a) => a.page === currentIdx + 1 && a.pageX !== undefined && a.pageY !== undefined)
+          .map((a) => (
+            <button
+              key={a.id}
+              type="button"
+              className={`page-pin-badge pin-${a.tool}${a.styleVariant ? ` pin-var-${a.styleVariant}` : ''}`}
+              style={{ left: `${a.pageX}%`, top: `${a.pageY}%`, background: a.color }}
+              title={`${a.quote}${a.note ? ` — ${a.note}` : ''}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onAnnotationClick?.(a);
+              }}
+            >
+              {a.tool === 'postit' ? (
+                <span className="pin-postit-shape" aria-hidden="true" />
+              ) : (
+                a.sticker || (a.tool === 'pencil' ? '✏️' : a.tool === 'pen' ? '🖊️' : '🖍️')
+              )}
+            </button>
+          ))}
       </div>
 
       {/* Left / Right floating arrows respecting RTL/LTR */}

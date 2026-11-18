@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FastForward, Pause, Play, Rewind, X } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
+import { BookCoverVisual } from './BookCoverVisual';
 
 function fmtTime(sec: number) {
   if (!Number.isFinite(sec) || sec < 0) return '0:00';
@@ -53,11 +54,9 @@ export const AudioPlayerBar: React.FC = () => {
 
   return (
     <div className="audio-bar">
-      <img
-        src={audioBook.coverDataUrl}
-        alt={audioBook.title}
-        style={{ width: 46, height: 60, borderRadius: 8, objectFit: 'cover' }}
-      />
+      <div style={{ width: 46, height: 60, borderRadius: 8, overflow: 'hidden', flexShrink: 0 }}>
+        <BookCoverVisual book={audioBook} compact />
+      </div>
 
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
@@ -99,7 +98,13 @@ export const AudioPlayerBar: React.FC = () => {
         </button>
         <button
           className="circle-arrow-btn"
-          style={{ background: 'var(--accent-primary)', color: '#fff', width: 38, height: 38 }}
+          style={{
+            background: 'var(--accent-primary)',
+            color: 'var(--accent-contrast)',
+            borderColor: 'transparent',
+            width: 38,
+            height: 38,
+          }}
           onClick={togglePlay}
         >
           {playing ? <Pause size={16} /> : <Play size={16} />}

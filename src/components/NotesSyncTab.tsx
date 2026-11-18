@@ -1,174 +1,286 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Bookmark,
-  Bot,
-  CheckCircle2,
-  Cloud,
+  ClipboardList,
+  ExternalLink,
   Plus,
-  RefreshCw,
-  Server,
+  Star,
   StickyNote,
   Trash2,
-  WifiOff,
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
-import { checkServerHealth } from '../services/syncService';
+import type { ReadingStatus } from '../types/library';
+import { getEffectiveStatus, STATUS_META, STATUS_ORDER } from '../utils/readingStats';
 
 export const NotesSyncTab: React.FC = () => {
   const {
     books,
+    activeBook,
     bookmarks,
+    annotations,
+    allBookmarkDesigns,
     deleteBookmark,
     notes,
     addNote,
     deleteNote,
-    openBook,
-    syncConfig,
-    updateSyncConfig,
-    syncStatus,
-    syncMessage,
-    triggerSync,
+    openBookAt,
+    updateBook,
+    setNavSection,
     showToast,
   } = useLibrary();
 
-  const [noteBookId, setNoteBookId] = useState(books[0]?.id || '');
+  const defaultBook =
+    activeBook ||
+    books.find((b) => getEffectiveStatus(b) === 'reading') ||
+    books[0];
+
+  const [selectedBookId, setSelectedBookId] = useState(defaultBook?.id || '');
   const [noteText, setNoteText] = useState('');
-  const [healthInfo, setHealthInfo] = useState<string>('');
-  const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    if (activeBook?.id) {
+      setSelectedBookId(activeBook.id);
+    } else if (!books.some((b) => b.id === selectedBookId) && books[0]?.id) {
+      setSelectedBookId(books[0].id);
+    }
+  }, [activeBook?.id, books, selectedBookId]);
+
+  const currentBook = books.find((b) => b.id === selectedBookId) || defaultBook;
+  const currentStatus = currentBook ? getEffectiveStatus(currentBook) : 'reading';
+
+  const handleQuickStatus = async (next: ReadingStatus) => {
+    if (!currentBook) return;
+    const now = Date.now();
+    await updateBook(currentBook.id, {
+      readingStatus: next,
+      wishlist: next === 'want_to_read',
+      startedAt:
+        next === 'reading' || next === 'completed'
+          ? currentBook.startedAt || now
+          : currentBook.startedAt,
+      finishedAt: next === 'completed' ? now : currentBook.finishedAt,
+      progress: next === 'completed' ? 100 : currentBook.progress,
+    });
+    showToast(`Estado actualizado a "${STATUS_META[next].label}"`);
+  };
+
+  const handleQuickRating = async (stars: number) => {
+    if (!currentBook) return;
+    const next = currentBook.rating === stars ? 0 : stars;
+    await updateBook(currentBook.id, { rating: next });
+  };
 
   const handleCreateNote = async (e: React.FormEvent) => {
     e.preventDefault();
-    const targetId = noteBookId || books[0]?.id;
-    if (!targetId || !noteText.trim()) return;
+    if (!currentBook || !noteText.trim()) return;
+    const clean = noteText.trim();
     await addNote({
-      bookId: targetId,
-      text: noteText.trim(),
-      color: '#f5b855',
+      bookId: currentBook.id,
+      text: clean,
+      page: currentBook.currentPage,
+      color: STATUS_META[currentStatus].color,
     });
+    await updateBook(currentBook.id, { review: clean });
     setNoteText('');
-  };
-
-  const handleTestServer = async () => {
-    setTesting(true);
-    setHealthInfo('');
-    try {
-      const res = await checkServerHealth(syncConfig);
-      setHealthInfo(`Conectado ✓ (${res.booksCount} libros en servidor)`);
-      showToast('Servidor KomoLib conectado');
-    } catch (err) {
-      setHealthInfo(`Sin conexión (${err instanceof Error ? err.message : 'error'})`);
-    } finally {
-      setTesting(false);
-    }
   };
 
   return (
     <div className="right-panel-body">
-      {/* Node.js Sync Backend Card */}
+      {/* Quick Reading Log & Rating Card */}
       <div className="studio-card">
-        <h4>
-          <Server size={14} /> Servidor de Sincronización (Node.js)
-        </h4>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
-          Sincroniza libros, progreso, marcadores y temas entre tu PC y tu APK Android en red local o VPS.
-        </div>
-
-        <input
-          className="studio-input"
-          placeholder="http://192.168.1.x:4123"
-          value={syncConfig.serverUrl}
-          onChange={(e) => updateSyncConfig({ serverUrl: e.target.value })}
-        />
-        <input
-          className="studio-input"
-          type="password"
-          placeholder="Token opcional (KOMOLIB_TOKEN)"
-          value={syncConfig.token}
-          onChange={(e) => updateSyncConfig({ token: e.target.value })}
-        />
-
-        <div className="toggle-row">
-          <span>Auto-subir nuevos archivos</span>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+          <h4>
+            <ClipboardList size={14} /> Reading Log rápido
+          </h4>
           <button
             type="button"
-            className={`switch ${syncConfig.autoSync ? 'on' : ''}`}
-            onClick={() => updateSyncConfig({ autoSync: !syncConfig.autoSync })}
-          />
-        </div>
-
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button
             className="pill-btn"
-            style={{ flex: 1, justifyContent: 'center', background: 'var(--accent-primary)', color: '#fff' }}
-            onClick={triggerSync}
-            disabled={syncStatus === 'syncing'}
+            style={{ height: 24, fontSize: 10.5, padding: '0 9px' }}
+            onClick={() => setNavSection('reading-log')}
           >
-            <RefreshCw size={13} className={syncStatus === 'syncing' ? 'spin' : ''} />
-            {syncStatus === 'syncing' ? 'Sincronizando...' : 'Sincronizar ahora'}
-          </button>
-          <button className="pill-btn" onClick={handleTestServer} disabled={testing}>
-            <Cloud size={13} /> Probar
+            <ExternalLink size={10} /> Vista completa
           </button>
         </div>
 
-        {(syncMessage || healthInfo) && (
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 700,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              color: syncStatus === 'error' ? '#c84b4e' : 'var(--text-primary)',
-            }}
-          >
-            {syncStatus === 'error' ? <WifiOff size={13} /> : <CheckCircle2 size={13} />}
-            <span>{healthInfo || syncMessage}</span>
+        {currentBook ? (
+          <form onSubmit={handleCreateNote} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <select
+              className="studio-input"
+              value={currentBook.id}
+              onChange={(e) => setSelectedBookId(e.target.value)}
+              aria-label="Seleccionar libro para registrar"
+            >
+              {books.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.title}
+                </option>
+              ))}
+            </select>
+
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                flexWrap: 'wrap',
+              }}
+            >
+              <select
+                className="log-status-select"
+                style={{
+                  background: STATUS_META[currentStatus].bg,
+                  color: STATUS_META[currentStatus].color,
+                }}
+                value={currentStatus}
+                onChange={(e) => handleQuickStatus(e.target.value as ReadingStatus)}
+                aria-label="Estado de lectura"
+              >
+                {STATUS_ORDER.map((st) => (
+                  <option key={st} value={st}>
+                    {STATUS_META[st].label}
+                  </option>
+                ))}
+              </select>
+
+              <div className="star-row" title="Califica este libro">
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className="star-btn"
+                    onClick={() => handleQuickRating(n)}
+                    aria-label={`${n} estrellas`}
+                  >
+                    <Star
+                      size={16}
+                      fill={(currentBook.rating || 0) >= n ? '#e6b24c' : 'none'}
+                      stroke={(currentBook.rating || 0) >= n ? '#e6b24c' : 'var(--text-muted)'}
+                    />
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {currentBook.review && (
+              <div
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-muted)',
+                  background: 'var(--banner-bg)',
+                  borderRadius: 10,
+                  padding: '7px 9px',
+                  lineHeight: 1.4,
+                }}
+              >
+                <strong style={{ color: 'var(--text-primary)' }}>Última reseña:</strong>{' '}
+                {currentBook.review}
+              </div>
+            )}
+
+            <textarea
+              className="studio-input"
+              rows={3}
+              placeholder={`Escribe una nota o reseña de "${currentBook.title}"...`}
+              value={noteText}
+              onChange={(e) => setNoteText(e.target.value)}
+            />
+
+            <button
+              type="submit"
+              className="pill-btn"
+              style={{
+                justifyContent: 'center',
+                background: 'var(--accent-primary)',
+                color: 'var(--accent-contrast)',
+                borderColor: 'transparent',
+              }}
+            >
+              <Plus size={12} /> Guardar nota y reseña
+            </button>
+          </form>
+        ) : (
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+            Importa un libro para empezar a calificar y guardar notas.
           </div>
         )}
       </div>
 
-      {/* Optional AI Endpoint */}
+      {/* Notes History */}
       <div className="studio-card">
         <h4>
-          <Bot size={14} /> IA Opcional para el Chat (Ollama / OpenAI)
+          <StickyNote size={14} /> Notas y Reseñas ({notes.length})
         </h4>
-        <input
-          className="studio-input"
-          placeholder="Endpoint (ej: http://localhost:11434/v1/chat/completions)"
-          value={syncConfig.aiEndpoint}
-          onChange={(e) => updateSyncConfig({ aiEndpoint: e.target.value })}
-        />
-        <div style={{ display: 'flex', gap: 6 }}>
-          <input
-            className="studio-input"
-            placeholder="Modelo (ej: llama3.2)"
-            value={syncConfig.aiModel}
-            onChange={(e) => updateSyncConfig({ aiModel: e.target.value })}
-          />
-          <input
-            className="studio-input"
-            type="password"
-            placeholder="API Key"
-            value={syncConfig.aiApiKey}
-            onChange={(e) => updateSyncConfig({ aiApiKey: e.target.value })}
-          />
-        </div>
-      </div>
-
-      {/* Bookmarks */}
-      <div className="studio-card">
-        <h4>
-          <Bookmark size={14} /> Marcadores ({bookmarks.length})
-        </h4>
-        {bookmarks.length === 0 ? (
+        {notes.length === 0 ? (
           <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-            Guarda marcadores mientras lees cualquier libro, manga o PDF.
+            Tus notas y reseñas del Reading Log aparecerán aquí.
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-            {bookmarks.map((bm) => {
+            {notes.map((n) => {
+              const b = books.find((x) => x.id === n.bookId);
+              return (
+                <div
+                  key={n.id}
+                  style={{
+                    background: 'var(--banner-bg)',
+                    borderLeft: `4px solid ${n.color || 'var(--accent-primary)'}`,
+                    borderRadius: 10,
+                    padding: '8px 10px',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: 3,
+                      gap: 6,
+                    }}
+                  >
+                    <span style={{ fontSize: 10.5, fontWeight: 800, color: 'var(--author-color)' }}>
+                      {b?.title || 'Nota general'}
+                      {b?.rating ? ` · ${'★'.repeat(b.rating)}` : ''}
+                    </span>
+                    <button
+                      onClick={() => deleteNote(n.id)}
+                      style={{ color: 'var(--text-muted)' }}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11.5, lineHeight: 1.4 }}>{n.text}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Bookmarks & Annotations Quick Access */}
+      <div className="studio-card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+          <h4>
+            <Bookmark size={14} /> Marcadores y Marcas
+          </h4>
+          <button
+            type="button"
+            className="pill-btn"
+            style={{ height: 24, fontSize: 10.5, padding: '0 9px' }}
+            onClick={() => setNavSection('annotations')}
+          >
+            <ExternalLink size={10} /> Ver todo
+          </button>
+        </div>
+        {bookmarks.length === 0 && annotations.length === 0 ? (
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+            Guarda separadores, resaltados, post-its, stickers o emojis mientras lees cualquier libro.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            {bookmarks.slice(0, 6).map((bm) => {
               const b = books.find((x) => x.id === bm.bookId);
+              const design = allBookmarkDesigns.find((d) => d.id === bm.designId);
               return (
                 <div
                   key={bm.id}
@@ -182,8 +294,23 @@ export const NotesSyncTab: React.FC = () => {
                     gap: 8,
                   }}
                 >
+                  {design && (
+                    <img
+                      src={design.imageUrl}
+                      alt={design.name}
+                      style={{ width: 18, height: 42, objectFit: 'cover', borderRadius: 4, flexShrink: 0 }}
+                    />
+                  )}
                   <button
-                    onClick={() => b && openBook(b)}
+                    onClick={() =>
+                      b &&
+                      openBookAt(b, {
+                        cfi: bm.cfi,
+                        chapterHref: bm.chapterHref,
+                        page: bm.page,
+                        scrollRatio: bm.scrollRatio,
+                      })
+                    }
                     style={{ textAlign: 'left', flex: 1, minWidth: 0 }}
                   >
                     <div
@@ -208,79 +335,52 @@ export const NotesSyncTab: React.FC = () => {
                 </div>
               );
             })}
-          </div>
-        )}
-      </div>
-
-      {/* Notes */}
-      <div className="studio-card">
-        <h4>
-          <StickyNote size={14} /> Notas de Lectura ({notes.length})
-        </h4>
-        <form onSubmit={handleCreateNote} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <select
-            className="studio-input"
-            value={noteBookId || books[0]?.id || ''}
-            onChange={(e) => setNoteBookId(e.target.value)}
-          >
-            {books.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.title}
-              </option>
-            ))}
-          </select>
-          <textarea
-            className="studio-input"
-            rows={2}
-            placeholder="Escribe una cita o idea sobre este libro..."
-            value={noteText}
-            onChange={(e) => setNoteText(e.target.value)}
-          />
-          <button
-            type="submit"
-            className="pill-btn"
-            style={{ alignSelf: 'flex-end', background: 'var(--accent-secondary)', color: '#fff' }}
-          >
-            <Plus size={12} /> Guardar nota
-          </button>
-        </form>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-          {notes.map((n) => {
-            const b = books.find((x) => x.id === n.bookId);
-            return (
-              <div
-                key={n.id}
-                style={{
-                  background: 'var(--banner-bg)',
-                  borderLeft: `4px solid ${n.color || '#f5b855'}`,
-                  borderRadius: 10,
-                  padding: '8px 10px',
-                }}
-              >
-                <div
+            {annotations.slice(0, 4).map((ann) => {
+              const b = books.find((x) => x.id === ann.bookId);
+              return (
+                <button
+                  key={ann.id}
+                  type="button"
+                  onClick={() =>
+                    b &&
+                    openBookAt(b, {
+                      annotationId: ann.id,
+                      cfi: ann.cfi,
+                      chapterHref: ann.chapterHref,
+                      page: ann.page,
+                      scrollRatio: ann.scrollRatio,
+                      quote: ann.quote,
+                    })
+                  }
                   style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: 3,
+                    background: 'var(--banner-bg)',
+                    borderLeft: `3px solid ${ann.color}`,
+                    borderRadius: 10,
+                    padding: '7px 9px',
+                    textAlign: 'left',
                   }}
                 >
-                  <span style={{ fontSize: 10.5, fontWeight: 800, color: 'var(--author-color)' }}>
-                    {b?.title || 'Nota general'}
-                  </span>
-                  <button
-                    onClick={() => deleteNote(n.id)}
-                    style={{ color: 'var(--text-muted)' }}
+                  <div style={{ fontSize: 10, fontWeight: 800, color: 'var(--text-muted)' }}>
+                    {b?.title || 'Libro'} · {ann.chapter ? `${ann.chapter} · ` : ''}
+                    {ann.page ? `Pág. ${ann.page}` : `${Math.round(ann.progress)}%`}
+                    {ann.sticker ? ` · ${ann.sticker}` : ''}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      marginTop: 2,
+                    }}
                   >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-                <div style={{ fontSize: 11.5, lineHeight: 1.4 }}>{n.text}</div>
-              </div>
-            );
-          })}
-        </div>
+                    “{ann.quote}”
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
