@@ -88,6 +88,22 @@ Pasos:
 
 > Las variables `VITE_*` se insertan en el bundle **en tiempo de build**. Si cambias `VITE_SYNC_SERVER_URL`, vuelve a desplegar (`Deploys → Trigger deploy → Clear cache and deploy site`).
 
+### Error `Unexpected token '<', "<!doctype "... is not valid JSON`
+
+Ese error significa que la web pidió los datos a **Netlify** y recibió el `index.html` del SPA en vez de JSON del API. Causas habituales:
+
+1. `VITE_SYNC_SERVER_URL` no está definida en Netlify.
+2. La variable se agregó pero el sitio no se ha vuelto a desplegar (las `VITE_*` se compilan en el build).
+3. La variable apunta al dominio de Netlify o incluye `/api` al final.
+
+Solución:
+
+```text
+VITE_SYNC_SERVER_URL=https://<dominio-base-del-api>
+```
+
+Sin barra final y sin `/api`. Comprueba que `https://<dominio-base-del-api>/api/health` devuelve JSON y luego haz **Clear cache and deploy site** en Netlify.
+
 **¿Qué variable debo agregar?** Como mínimo:
 
 ```text

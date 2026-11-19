@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   BookOpen,
   CheckCircle2,
   Cloud,
@@ -14,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
+import { SYNC_SERVER_URL } from '../config';
 
 const EMOJIS = ['🦊', '🐱', '🦉', '🐻', '🌸', '📚', '✨', '🧙', '🎧', '🐉'];
 
@@ -80,6 +82,13 @@ export const ProfileModal: React.FC = () => {
   const completed = books.filter((b) => b.progress >= 98).length;
   const favorites = books.filter((b) => b.favorite).length;
   const linkedEmail = syncConfig.accountEmail || profile.email || '';
+  const appOrigin = typeof window !== 'undefined' ? window.location.origin.replace(/\/+$/, '') : '';
+  const savedServer = syncConfig.serverUrl.trim().replace(/\/+$/, '');
+  const cloudServerMissing =
+    typeof window !== 'undefined' &&
+    !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname) &&
+    !SYNC_SERVER_URL &&
+    (!savedServer || savedServer === appOrigin);
 
   return (
     <div className="modal-overlay" onClick={() => setProfileModalOpen(false)}>
@@ -188,6 +197,29 @@ export const ProfileModal: React.FC = () => {
           <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
             Ingresa tu correo electrónico para guardar o recuperar tus libros, progreso, marcas y personalización desde cualquier navegador, APK o internet.
           </div>
+
+          {cloudServerMissing && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 7,
+                padding: '8px 10px',
+                borderRadius: 10,
+                background: 'color-mix(in srgb, #d9534f 10%, var(--card-bg))',
+                border: '1px solid color-mix(in srgb, #d9534f 30%, var(--border-subtle))',
+                fontSize: 11,
+                lineHeight: 1.45,
+              }}
+            >
+              <AlertTriangle size={14} style={{ color: '#d9534f', flexShrink: 0, marginTop: 1 }} />
+              <span>
+                Falta configurar <strong>VITE_SYNC_SERVER_URL</strong> en Netlify con la URL del
+                API de KomoLib. Sin esa variable el respaldo por correo no puede guardarse en la
+                nube.
+              </span>
+            </div>
+          )}
 
           <form onSubmit={handleConnectEmail} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>

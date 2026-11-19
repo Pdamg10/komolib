@@ -102,6 +102,55 @@ export function deriveEmailSpaceId(email: string, pin = ''): string {
   return `acct_${safePrefix}_${hex1}${hex2}`;
 }
 
+function endpointLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Reads a JSON response and turns Netlify's SPA fallback (HTTP 200 + index.html)
+ * into an actionable error instead of the cryptic "Unexpected token '<'".
+ */
+export async function parseJsonResponse<T>(res: Response, url: string): Promise<T> {
+  const raw = await res.text().catch(() => '');
+  const trimmed = raw.trim();
+  const contentType = res.headers.get('content-type') || '';
+
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const parsed = JSON.parse(trimmed) as { error?: string; message?: string };
+      detail = parsed?.error || parsed?.message || '';
+    } catch {
+      if (trimmed && !trimmed.startsWith('<')) detail = trimmed.slice(0, 180);
+    }
+    throw new Error(detail || `El servidor respondió HTTP ${res.status} en ${endpointLabel(url)}`);
+  }
+
+  if (!trimmed) return {} as T;
+
+  if (trimmed.startsWith('<') || /text\/html/i.test(contentType)) {
+    throw new Error(
+      `El servidor ${endpointLabel(url)} devolvió HTML en vez de JSON. ` +
+        `Revisa que VITE_SYNC_SERVER_URL apunte a la URL base del API de KomoLib, sin /api ` +
+        `(por ejemplo https://tu-api.onrender.com), que el API esté despierto y que ` +
+        `/api/health responda JSON. Luego vuelve a desplegar el sitio en Netlify.`
+    );
+  }
+
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    throw new Error(
+      `Respuesta inválida del servidor en ${endpointLabel(url)}: ${trimmed.slice(0, 120)}`
+    );
+  }
+}
+
 export function buildAuthHeaders(config: SyncConfig, isJson = true): HeadersInit {
   const headers: Record<string, string> = {};
   if (isJson) headers['Content-Type'] = 'application/json';
@@ -219,11 +268,11 @@ export function buildStreamUrl(config: SyncConfig, path: string): string {
 
 export async function checkServerHealth(config: SyncConfig): Promise<ServerHealth> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
-  const res = await fetch(`${base}/api/health`, {
+  const url = `${base}/api/health`;
+  const res = await fetch(url, {
     headers: buildAuthHeaders(config, false),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return parseJsonResponse<ServerHealth>(res, url);
 }
 
 export async function sendAiChatViaServer(
@@ -244,25 +293,22 @@ export async function sendAiChatViaServer(
   }
 ): Promise<AiChatResponse> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
-  const res = await fetch(`${base}/api/ai/chat`, {
+  const url = `${base}/api/ai/chat`;
+  const res = await fetch(url, {
     method: 'POST',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(errText || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return parseJsonResponse<AiChatResponse>(res, url);
 }
 
 export async function listInboxFiles(config: SyncConfig): Promise<InboxItem[]> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/inbox`, {
+  const url = `${base}/api/inbox`;
+  const res = await fetch(url, {
     headers: buildAuthHeaders(config, false),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
+  const data = await parseJsonResponse<{ items?: InboxItem[] }>(res, url);
   return Array.isArray(data?.items) ? data.items : [];
 }
 
@@ -352,24 +398,28 @@ export async function uploadBookToServer(
   }
 
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
+  const url = `${base}/api/books/upload`;
   const form = new FormData();
   form.append('id', book.id);
   if (deviceId) form.append('deviceId', deviceId);
   form.append('meta', JSON.stringify(uploadMeta));
   form.append('file', uploadBlob, uploadName);
 
-  const res = await fetch(`${base}/api/books/upload`, {
+  const res = await fetch(url, {
     method: 'POST',
     headers: buildAuthHeaders(config, false),
     body: form,
   });
-  if (!res.ok) return { ok: false };
-  const data = await res.json().catch(() => ({}));
-  return {
-    ok: true,
-    remoteFileName: data?.remoteFileName,
-    format: uploadMeta.format,
-  };
+  try {
+    const data = await parseJsonResponse<{ remoteFileName?: string }>(res, url);
+    return {
+      ok: true,
+      remoteFileName: data?.remoteFileName,
+      format: uploadMeta.format,
+    };
+  } catch {
+    return { ok: false };
+  }
 }
 
 export async function downloadBookFromServer(config: SyncConfig, book: BookItem): Promise<Blob> {
@@ -396,11 +446,11 @@ export async function deleteBookFromServer(config: SyncConfig, bookId: string): 
 
 export async function fetchRemoteSyncState(config: SyncConfig): Promise<RemoteSyncPayload> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
-  const res = await fetch(`${base}/api/sync/state`, {
+  const url = `${base}/api/sync/state`;
+  const res = await fetch(url, {
     headers: buildAuthHeaders(config, false),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return parseJsonResponse<RemoteSyncPayload>(res, url);
 }
 
 export async function syncFullState(
@@ -446,7 +496,8 @@ export async function syncFullState(
       ? { ...localData.theme, customWallpaperUrl: '__KEEP__' }
       : localData.theme;
 
-  const res = await fetch(`${base}/api/sync/state`, {
+  const url = `${base}/api/sync/state`;
+  const res = await fetch(url, {
     method: 'PUT',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({
@@ -479,7 +530,7 @@ export async function syncFullState(
     throw new Error(errText || `Error de sincronización (${res.status})`);
   }
 
-  const merged: RemoteSyncPayload = await res.json();
+  const merged = await parseJsonResponse<RemoteSyncPayload>(res, url);
 
   if (uploadMissingFiles) {
     for (const book of localData.books) {

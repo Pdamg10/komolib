@@ -571,13 +571,20 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       };
 
       // Netlify builds receive the API URL via VITE_SYNC_SERVER_URL. If this browser
-      // still has an old localhost/public address saved, migrate it to the deployed server.
+      // still has an old localhost, temporary tunnel or the Netlify domain saved as
+      // the API, migrate it to the deployed sync server.
       if (SYNC_SERVER_URL) {
-        const savedServer = initialSync.serverUrl.trim();
+        const savedServer = initialSync.serverUrl.trim().replace(/\/+$/, '');
+        const appOrigin =
+          typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)
+            ? window.location.origin.replace(/\/+$/, '')
+            : '';
         const staleServer =
           !savedServer ||
           /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(savedServer) ||
-          /\.trycloudflare\.com$/i.test(savedServer);
+          /\.trycloudflare\.com$/i.test(savedServer) ||
+          /\.netlify\.app$/i.test(savedServer) ||
+          (appOrigin && savedServer === appOrigin);
         if (staleServer) {
           initialSync = { ...initialSync, serverUrl: SYNC_SERVER_URL };
           await dbSetKV('syncConfig', initialSync);
@@ -2098,13 +2105,19 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       const spaceId = deriveEmailSpaceId(cleanEmail, rawPin);
       const s = stateRef.current;
-      const resolvedServer =
-        s.syncConfig.serverUrl.trim() ||
-        (typeof window !== 'undefined' &&
-        window.location.origin.startsWith('http') &&
-        !/:5173$/.test(window.location.origin)
+      const savedServer = s.syncConfig.serverUrl.trim().replace(/\/+$/, '');
+      const appOrigin =
+        typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)
           ? window.location.origin.replace(/\/+$/, '')
-          : 'http://localhost:4123');
+          : '';
+      const resolvedServer =
+        (savedServer &&
+        savedServer !== appOrigin &&
+        !/\.netlify\.app$/i.test(savedServer)
+          ? savedServer
+          : '') ||
+        SYNC_SERVER_URL ||
+        (appOrigin && !/:5173$/.test(appOrigin) ? appOrigin : 'http://localhost:4123');
 
       const nextCfg: SyncConfig = {
         ...s.syncConfig,
@@ -2212,9 +2225,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         );
         return true;
       } catch (err) {
+        const message = err instanceof Error ? err.message : 'Error al conectar con la nube';
         setSyncStatus('error');
-        setSyncMessage(err instanceof Error ? err.message : 'Error al conectar con la nube');
-        showToast('Tu correo quedó vinculado localmente; se sincronizará al conectar con el servidor');
+        setSyncMessage(message);
+        showToast('No se pudo guardar en la nube. Revisa la URL del servidor de sync.');
         updateProfile({ email: cleanEmail });
         return false;
       }
