@@ -12,6 +12,7 @@ import { dbGetBookFile } from '../db/localDb';
 import {
   buildAuthHeaders,
   buildStreamUrl,
+  fetchApi,
   resolveServerUrl,
   uploadBookToServer,
 } from './syncService';
@@ -32,7 +33,7 @@ export async function listSharedRooms(
 ): Promise<SharedRoom[]> {
   const base = resolveServerUrl(config.serverUrl);
   const qs = participantId ? `?participantId=${encodeURIComponent(participantId)}` : '';
-  const res = await fetch(`${base}/api/rooms${qs}`, {
+  const res = await fetchApi(`${base}/api/rooms${qs}`, {
     headers: buildAuthHeaders(config, false),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -68,7 +69,7 @@ export async function createSharedRoom(
   }
 
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/rooms`, {
+  const res = await fetchApi(`${base}/api/rooms`, {
     method: 'POST',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ book: enrichedBook, participant }),
@@ -83,7 +84,7 @@ export async function createSharedRoom(
 
 export async function getSharedRoom(config: SyncConfig, code: string): Promise<SharedRoom> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}`, {
+  const res = await fetchApi(`${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}`, {
     headers: buildAuthHeaders(config, false),
   });
   if (!res.ok) {
@@ -99,7 +100,7 @@ export async function joinSharedRoom(
   participant: ParticipantIdentity
 ): Promise<SharedRoom> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(
+  const res = await fetchApi(
     `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/join`,
     {
       method: 'POST',
@@ -130,7 +131,7 @@ export async function updateSharedRoomProgress(
   }
 ): Promise<SharedRoom> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(
+  const res = await fetchApi(
     `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/progress`,
     {
       method: 'PATCH',
@@ -156,7 +157,7 @@ export async function postSharedRoomComment(
   }
 ): Promise<SharedRoom> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(
+  const res = await fetchApi(
     `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/comments`,
     {
       method: 'POST',
@@ -171,7 +172,7 @@ export async function postSharedRoomComment(
 
 export async function downloadSharedRoomFile(config: SyncConfig, code: string): Promise<Blob> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(
+  const res = await fetchApi(
     `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/file`,
     {
       headers: buildAuthHeaders(config, false),
@@ -189,7 +190,7 @@ export async function leaveSharedRoom(
   participantId: string
 ): Promise<void> {
   const base = resolveServerUrl(config.serverUrl);
-  await fetch(`${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/leave`, {
+  await fetchApi(`${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/leave`, {
     method: 'POST',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ participantId }),
@@ -198,7 +199,7 @@ export async function leaveSharedRoom(
 
 export async function deleteSharedRoom(config: SyncConfig, code: string): Promise<void> {
   const base = resolveServerUrl(config.serverUrl);
-  await fetch(`${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}`, {
+  await fetchApi(`${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}`, {
     method: 'DELETE',
     headers: buildAuthHeaders(config, false),
   }).catch(() => undefined);
@@ -248,7 +249,7 @@ export async function createSharedShelf(
   member: { id: string; name: string; avatarEmoji: string; avatarBg: string }
 ): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/shelves`, {
+  const res = await fetchApi(`${base}/api/shelves`, {
     method: 'POST',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ title, member }),
@@ -263,7 +264,7 @@ export async function createSharedShelf(
 
 export async function getSharedShelf(config: SyncConfig, code: string): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}`, {
+  const res = await fetchApi(`${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}`, {
     headers: buildAuthHeaders(config, false),
   });
   if (!res.ok) {
@@ -281,7 +282,7 @@ export async function joinSharedShelf(
   member: { id: string; name: string; avatarEmoji: string; avatarBg: string }
 ): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(
+  const res = await fetchApi(
     `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/join`,
     {
       method: 'POST',
@@ -343,7 +344,7 @@ export async function shareBookToShelf(
   form.append('meta', JSON.stringify(meta));
 
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(
+  const res = await fetchApi(
     `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/books`,
     {
       method: 'POST',
@@ -364,7 +365,7 @@ export async function removeBookFromShelf(
   shelfBookKey: string
 ): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(
+  const res = await fetchApi(
     `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/books/${encodeURIComponent(shelfBookKey)}`,
     {
       method: 'DELETE',
@@ -382,7 +383,7 @@ export async function downloadShelfBookFile(
   shelfBookKey: string
 ): Promise<Blob> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(
+  const res = await fetchApi(
     `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/books/${encodeURIComponent(shelfBookKey)}/file`,
     {
       headers: buildAuthHeaders(config, false),
@@ -400,7 +401,7 @@ export async function leaveSharedShelf(
   memberId: string
 ): Promise<void> {
   const base = resolveServerUrl(config.serverUrl);
-  await fetch(`${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/leave`, {
+  await fetchApi(`${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/leave`, {
     method: 'POST',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ memberId }),
@@ -409,7 +410,7 @@ export async function leaveSharedShelf(
 
 export async function deleteSharedShelf(config: SyncConfig, code: string): Promise<void> {
   const base = resolveServerUrl(config.serverUrl);
-  await fetch(`${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}`, {
+  await fetchApi(`${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}`, {
     method: 'DELETE',
     headers: buildAuthHeaders(config, false),
   }).catch(() => undefined);

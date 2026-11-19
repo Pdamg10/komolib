@@ -136,8 +136,8 @@ export async function parseJsonResponse<T>(res: Response, url: string): Promise<
   if (trimmed.startsWith('<') || /text\/html/i.test(contentType)) {
     throw new Error(
       `El servidor ${endpointLabel(url)} devolvió HTML en vez de JSON. ` +
-        `Revisa que VITE_SYNC_SERVER_URL apunte a la URL base del API de KomoLib, sin /api ` +
-        `(por ejemplo https://tu-api.onrender.com), que el API esté despierto y que ` +
+        `Revisa que VITE_SYNC_SERVER_URL apunte a la URL base de TU API de KomoLib, sin /api ` +
+        `(por ejemplo https://komolib-api-xxxx.onrender.com), que el API esté despierto y que ` +
         `/api/health responda JSON. Luego vuelve a desplegar el sitio en Netlify.`
     );
   }
@@ -148,6 +148,47 @@ export async function parseJsonResponse<T>(res: Response, url: string): Promise<
     throw new Error(
       `Respuesta inválida del servidor en ${endpointLabel(url)}: ${trimmed.slice(0, 120)}`
     );
+  }
+}
+
+/**
+ * Fetch wrapper that replaces the browser's generic "Failed to fetch" with a
+ * message that explains what to check (URL, HTTPS, localhost, CORS, server down).
+ */
+export async function fetchApi(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'Error de red';
+    const appOrigin =
+      typeof window !== 'undefined' ? window.location.origin : 'el navegador';
+    let hint = '';
+
+    try {
+      const target = new URL(url);
+      if (typeof window !== 'undefined' && window.location.protocol === 'https:' && target.protocol === 'http:') {
+        hint =
+          'La página está en HTTPS y el API en HTTP, así que el navegador bloquea la conexión. Usa la URL HTTPS del API.';
+      } else if (
+        typeof window !== 'undefined' &&
+        /^(localhost|127\.0\.0\.1)$/i.test(target.hostname) &&
+        !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
+      ) {
+        hint =
+          'La URL apunta a localhost; desde Netlify eso es tu propio navegador, no el servidor. Usa la URL pública del API.';
+      }
+    } catch {
+      // ignore malformed URL
+    }
+
+    if (!hint) {
+      hint =
+        `Verifica que el API esté desplegado y en línea, que la URL sea correcta ` +
+        `(sin /api al final) y que permita CORS desde ${appOrigin}. ` +
+        `Si está en Render, usa su URL pública y espera unos segundos si estaba dormido.`;
+    }
+
+    throw new Error(`No se pudo conectar con ${endpointLabel(url)}. ${hint} Detalle: ${detail}`);
   }
 }
 
@@ -269,7 +310,7 @@ export function buildStreamUrl(config: SyncConfig, path: string): string {
 export async function checkServerHealth(config: SyncConfig): Promise<ServerHealth> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const url = `${base}/api/health`;
-  const res = await fetch(url, {
+  const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
   return parseJsonResponse<ServerHealth>(res, url);
@@ -294,7 +335,7 @@ export async function sendAiChatViaServer(
 ): Promise<AiChatResponse> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const url = `${base}/api/ai/chat`;
-  const res = await fetch(url, {
+  const res = await fetchApi(url, {
     method: 'POST',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify(payload),
@@ -305,7 +346,7 @@ export async function sendAiChatViaServer(
 export async function listInboxFiles(config: SyncConfig): Promise<InboxItem[]> {
   const base = resolveServerUrl(config.serverUrl);
   const url = `${base}/api/inbox`;
-  const res = await fetch(url, {
+  const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
   const data = await parseJsonResponse<{ items?: InboxItem[] }>(res, url);
@@ -317,7 +358,7 @@ export async function downloadInboxFile(
   item: InboxItem
 ): Promise<FileWithRelPath> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/inbox/${encodeURIComponent(item.id)}/file`, {
+  const res = await fetchApi(`${base}/api/inbox/${encodeURIComponent(item.id)}/file`, {
     headers: buildAuthHeaders(config, false),
   });
   if (!res.ok) {
@@ -333,7 +374,7 @@ export async function downloadInboxFile(
 
 export async function deleteInboxFile(config: SyncConfig, id: string): Promise<void> {
   const base = resolveServerUrl(config.serverUrl);
-  await fetch(`${base}/api/inbox/${encodeURIComponent(id)}`, {
+  await fetchApi(`${base}/api/inbox/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     headers: buildAuthHeaders(config, false),
   }).catch(() => undefined);
@@ -405,7 +446,7 @@ export async function uploadBookToServer(
   form.append('meta', JSON.stringify(uploadMeta));
   form.append('file', uploadBlob, uploadName);
 
-  const res = await fetch(url, {
+  const res = await fetchApi(url, {
     method: 'POST',
     headers: buildAuthHeaders(config, false),
     body: form,
@@ -424,7 +465,7 @@ export async function uploadBookToServer(
 
 export async function downloadBookFromServer(config: SyncConfig, book: BookItem): Promise<Blob> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
-  const res = await fetch(`${base}/api/books/${encodeURIComponent(book.id)}/file`, {
+  const res = await fetchApi(`${base}/api/books/${encodeURIComponent(book.id)}/file`, {
     headers: buildAuthHeaders(config, false),
   });
   if (!res.ok) {
@@ -438,7 +479,7 @@ export async function downloadBookFromServer(config: SyncConfig, book: BookItem)
 export async function deleteBookFromServer(config: SyncConfig, bookId: string): Promise<void> {
   if (!config.serverUrl.trim() && !config.accountEmail) return;
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
-  await fetch(`${base}/api/books/${encodeURIComponent(bookId)}`, {
+  await fetchApi(`${base}/api/books/${encodeURIComponent(bookId)}`, {
     method: 'DELETE',
     headers: buildAuthHeaders(config, false),
   }).catch(() => undefined);
@@ -447,7 +488,7 @@ export async function deleteBookFromServer(config: SyncConfig, bookId: string): 
 export async function fetchRemoteSyncState(config: SyncConfig): Promise<RemoteSyncPayload> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const url = `${base}/api/sync/state`;
-  const res = await fetch(url, {
+  const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
   return parseJsonResponse<RemoteSyncPayload>(res, url);
@@ -497,7 +538,7 @@ export async function syncFullState(
       : localData.theme;
 
   const url = `${base}/api/sync/state`;
-  const res = await fetch(url, {
+  const res = await fetchApi(url, {
     method: 'PUT',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({

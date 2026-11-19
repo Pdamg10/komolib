@@ -81,8 +81,10 @@ Pasos:
 
    | Variable | Obligatoria | Valor |
    | --- | --- | --- |
-   | `VITE_SYNC_SERVER_URL` | ✅ Sí | URL pública del API, p. ej. `https://komolib-api.onrender.com` |
+   | `VITE_SYNC_SERVER_URL` | ✅ Sí | URL pública de **tu** API, p. ej. `https://komolib-api-xxxx.onrender.com` |
    | `VITE_PUBLIC_APP_URL` | Opcional | URL del sitio en Netlify, p. ej. `https://komolib.netlify.app` |
+
+> ⚠️ `https://komolib-api.onrender.com` es solo un ejemplo de la documentación: **no es un servidor real**. Debes desplegar tu propio API y usar la URL que Render te asigne.
 
 5. Pulsa **Deploy site**.
 
@@ -103,6 +105,16 @@ VITE_SYNC_SERVER_URL=https://<dominio-base-del-api>
 ```
 
 Sin barra final y sin `/api`. Comprueba que `https://<dominio-base-del-api>/api/health` devuelve JSON y luego haz **Clear cache and deploy site** en Netlify.
+
+### Error `Failed to fetch`
+
+El navegador no pudo conectarse al API. No es un error del correo ni de Netlify: la petición ni siquiera llegó a responder. Revisa:
+
+1. Que `VITE_SYNC_SERVER_URL` sea una URL **pública HTTPS** del API, por ejemplo `https://komolib-api.onrender.com`.
+2. Que `https://<dominio-del-api>/api/health` abra en el navegador y muestre JSON.
+3. Que no uses `http://` (Netlify es HTTPS y el navegador bloquea contenido mixto), ni `localhost` o `192.168.x.x` (esos solo funcionan en tu red local).
+4. Que el servicio del API esté encendido. En Render Free puede tardar en despertar; recarga después de unos segundos.
+5. Abre **DevTools → Network** y mira el estado de `/api/sync/state`. Si dice `CORS`, revisa que el API use el middleware CORS del repo; si dice `ERR_CONNECTION_REFUSED`, el servidor está apagado o la URL es incorrecta.
 
 **¿Qué variable debo agregar?** Como mínimo:
 

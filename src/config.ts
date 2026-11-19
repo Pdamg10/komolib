@@ -1,5 +1,12 @@
 function trimUrl(value: string | undefined): string {
-  return (value || '').trim().replace(/\/+$/, '');
+  let url = (value || '').trim();
+  if (
+    (url.startsWith('"') && url.endsWith('"')) ||
+    (url.startsWith("'") && url.endsWith("'"))
+  ) {
+    url = url.slice(1, -1).trim();
+  }
+  return url.replace(/\/+$/, '');
 }
 
 /**
