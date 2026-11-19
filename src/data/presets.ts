@@ -1,3 +1,4 @@
+import { SYNC_SERVER_URL } from '../config';
 import type {
   CategoryItem,
   CollectionCard,
@@ -278,7 +279,7 @@ export const DEFAULT_PROFILE: UserProfile = {
 };
 
 export const DEFAULT_SYNC_CONFIG: SyncConfig = {
-  serverUrl: '',
+  serverUrl: SYNC_SERVER_URL,
   publicUrl: '',
   spaceId: '',
   token: '',

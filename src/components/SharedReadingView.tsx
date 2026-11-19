@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bookmark,
   BookOpen,
@@ -7,13 +7,10 @@ import {
   Download,
   Edit3,
   Eye,
-  Globe,
   HardDrive,
   Highlighter,
-  KeyRound,
   Layers,
   Library,
-  Link2,
   Lock,
   MessageSquare,
   PenTool,
@@ -24,7 +21,6 @@ import {
   Send,
   Share2,
   ShieldCheck,
-  Smartphone,
   Smile,
   Sparkles,
   StickyNote,
@@ -35,6 +31,7 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
+import { PUBLIC_APP_URL } from '../config';
 import { TOOL_META } from '../data/bookmarksCatalog';
 import {
   subscribeToRoomStream,
@@ -85,22 +82,10 @@ export const SharedReadingView: React.FC = () => {
     updateProfile,
     deviceId,
     syncConfig,
-    updateSyncConfig,
     serverOnline,
     liveConnected,
-    serverAuthRequired,
-    serverLanUrl,
-    serverPublicUrl,
-    tunnelUrl,
-    tunnelRunning,
-    tunnelAvailable,
-    refreshServerHealth,
-    startTunnel,
-    stopTunnel,
-    savePublicUrlToServer,
     applyPairingLink,
     syncStatus,
-    syncMessage,
     triggerSync,
     sharedRooms,
     selectedRoomCode,
@@ -157,26 +142,16 @@ export const SharedReadingView: React.FC = () => {
     pendingJoinCode ? 'rooms' : sharedShelves.length > 0 ? 'shelves' : 'rooms'
   );
 
-  // QR, Comments & Network panel state
+  // QR, Comments & Sharing state
   const [showQr, setShowQr] = useState(false);
   const [showShelfQr, setShowShelfQr] = useState(false);
-  const [qrScope, setQrScope] = useState<'auto' | 'internet' | 'lan'>('auto');
   const [copiedKey, setCopiedKey] = useState('');
   const [commentInput, setCommentInput] = useState('');
   const [sendingComment, setSendingComment] = useState(false);
   const [revealedSpoilers, setRevealedSpoilers] = useState<Record<string, boolean>>({});
-  const [showSyncSettings, setShowSyncSettings] = useState(false);
-  const [togglingTunnel, setTogglingTunnel] = useState(false);
-  const [publicUrlDraft, setPublicUrlDraft] = useState(syncConfig.publicUrl || '');
-  const [pairingInput, setPairingInput] = useState('');
-  const [showPairQr, setShowPairQr] = useState(false);
   const [addingBookToShelfId, setAddingBookToShelfId] = useState(books[0]?.id || '');
   const [sharingBookNow, setSharingBookNow] = useState(false);
   const [importingShelfKey, setImportingShelfKey] = useState('');
-
-  useEffect(() => {
-    setPublicUrlDraft(syncConfig.publicUrl || '');
-  }, [syncConfig.publicUrl]);
 
   useEffect(() => {
     if (pendingJoinCode) {
@@ -285,73 +260,42 @@ export const SharedReadingView: React.FC = () => {
     includeBookmarks: shareIncludeBookmarks,
   };
 
-  const effectivePublicUrl = useMemo(() => {
-    const custom = (syncConfig.publicUrl || '').trim().replace(/\/+$/, '');
-    if (custom) return custom;
-    if (tunnelUrl) return tunnelUrl;
-    if (serverPublicUrl) return serverPublicUrl;
-    if (
-      typeof window !== 'undefined' &&
-      window.location.protocol === 'https:' &&
-      !/localhost|127\.0\.0\.1/i.test(window.location.hostname)
-    ) {
-      return window.location.origin.replace(/\/+$/, '');
-    }
-    return '';
-  }, [syncConfig.publicUrl, tunnelUrl, serverPublicUrl]);
-
-  const effectiveLanUrl = useMemo(() => {
-    if (serverLanUrl) return serverLanUrl;
-    const resolved = resolveServerUrl(syncConfig.serverUrl);
-    if (resolved && !/localhost|127\.0\.0\.1/i.test(resolved)) return resolved;
-    if (
-      typeof window !== 'undefined' &&
-      window.location.origin.startsWith('http') &&
-      !/localhost|127\.0\.0\.1/i.test(window.location.hostname)
-    ) {
-      return window.location.origin.replace(/\/+$/, '');
-    }
-    return resolved || 'http://localhost:4123';
-  }, [serverLanUrl, syncConfig.serverUrl]);
-
+  // The invite link must open the web app (Netlify), not the API server.
   const shareBaseUrl = useMemo(() => {
-    if (qrScope === 'internet' && effectivePublicUrl) return effectivePublicUrl;
-    if (qrScope === 'lan') return effectiveLanUrl;
-    if (effectivePublicUrl) return effectivePublicUrl;
-    return effectiveLanUrl;
-  }, [qrScope, effectivePublicUrl, effectiveLanUrl]);
+    if (typeof window !== 'undefined') {
+      const { protocol, hostname, origin } = window.location;
+      if (
+        (protocol === 'http:' || protocol === 'https:') &&
+        !/^(localhost|127\.0\.0\.1)$/i.test(hostname)
+      ) {
+        return origin.replace(/\/+$/, '');
+      }
+    }
+    if (PUBLIC_APP_URL) return PUBLIC_APP_URL;
+    return resolveServerUrl(syncConfig.serverUrl) || 'http://localhost:4123';
+  }, [syncConfig.serverUrl]);
 
-  const isShareInternet = Boolean(effectivePublicUrl && shareBaseUrl === effectivePublicUrl);
+  const buildInviteUrl = useCallback(
+    (param: 'join' | 'shelf', code: string) => {
+      if (!code) return '';
+      const url = new URL(shareBaseUrl);
+      url.searchParams.set(param, code);
+      const api = resolveServerUrl(syncConfig.serverUrl);
+      if (api && /^https?:\/\//i.test(api) && api !== shareBaseUrl) {
+        url.searchParams.set('server', api);
+      }
+      return url.toString();
+    },
+    [shareBaseUrl, syncConfig.serverUrl]
+  );
 
-  const inviteUrl = activeRoom
-    ? `${shareBaseUrl}/?join=${encodeURIComponent(activeRoom.code)}`
-    : '';
+  const inviteUrl = activeRoom ? buildInviteUrl('join', activeRoom.code) : '';
   const qrSvg = useMemo(() => (inviteUrl ? generateQrSvgPath(inviteUrl) : null), [inviteUrl]);
 
-  const shelfInviteUrl = activeShelf
-    ? `${shareBaseUrl}/?shelf=${encodeURIComponent(activeShelf.code)}`
-    : '';
+  const shelfInviteUrl = activeShelf ? buildInviteUrl('shelf', activeShelf.code) : '';
   const shelfQrSvg = useMemo(
     () => (showShelfQr && shelfInviteUrl ? generateQrSvgPath(shelfInviteUrl) : null),
     [showShelfQr, shelfInviteUrl]
-  );
-
-  // Personal Web <-> APK Pairing URL (carries owner's private spaceId so vaults stay 100% isolated!)
-  const pairTargetServer = effectivePublicUrl || effectiveLanUrl;
-  const pairingUrl = useMemo(() => {
-    if (!pairTargetServer) return '';
-    const params = new URLSearchParams();
-    params.set('pair', '1');
-    params.set('server', pairTargetServer);
-    if (syncConfig.spaceId?.trim()) params.set('space', syncConfig.spaceId.trim());
-    if (syncConfig.token.trim()) params.set('token', syncConfig.token.trim());
-    if (effectivePublicUrl) params.set('publicUrl', effectivePublicUrl);
-    return `${pairTargetServer}/?${params.toString()}`;
-  }, [pairTargetServer, syncConfig.spaceId, syncConfig.token, effectivePublicUrl]);
-
-  const pairQrSvg = useMemo(
-    () => (showPairQr && pairingUrl ? generateQrSvgPath(pairingUrl) : null),
-    [showPairQr, pairingUrl]
   );
 
   const toggleShareTool = (tool: AnnotationTool) => {
@@ -483,28 +427,6 @@ export const SharedReadingView: React.FC = () => {
     }
   };
 
-  const handleToggleTunnel = async () => {
-    if (togglingTunnel) return;
-    setTogglingTunnel(true);
-    try {
-      if (tunnelRunning) {
-        await stopTunnel();
-      } else {
-        await startTunnel();
-      }
-      await refreshServerHealth();
-    } finally {
-      setTogglingTunnel(false);
-    }
-  };
-
-  const handleApplyPairing = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pairingInput.trim()) return;
-    const ok = await applyPairingLink(pairingInput);
-    if (ok) setPairingInput('');
-  };
-
   const handleAddBookToActiveShelf = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeShelf || !addingBookToShelfId || sharingBookNow) return;
@@ -587,20 +509,6 @@ export const SharedReadingView: React.FC = () => {
               : 'Solo local'}
           </span>
 
-          {effectivePublicUrl && (
-            <span
-              className="pill-btn"
-              style={{
-                background: 'color-mix(in srgb, var(--accent-secondary) 18%, transparent)',
-                color: 'var(--accent-secondary)',
-                borderColor: 'transparent',
-              }}
-              title={effectivePublicUrl}
-            >
-              <Globe size={13} /> Internet listo
-            </span>
-          )}
-
           {syncConfig.serverUrl.trim() && (
             <button
               type="button"
@@ -613,15 +521,6 @@ export const SharedReadingView: React.FC = () => {
               {syncStatus === 'syncing' ? 'Sincronizando...' : 'Sync personal'}
             </button>
           )}
-
-          <button
-            type="button"
-            className={`pill-btn ${showSyncSettings ? 'active' : ''}`}
-            style={{ background: showSyncSettings ? undefined : 'var(--card-bg)' }}
-            onClick={() => setShowSyncSettings(!showSyncSettings)}
-          >
-            <Smartphone size={13} /> {showSyncSettings ? 'Ocultar red / túnel' : 'Nube, Túnel y APK'}
-          </button>
         </div>
       </div>
 
@@ -673,208 +572,20 @@ export const SharedReadingView: React.FC = () => {
         </form>
       )}
 
-      {/* Collapsible Cloud / Tunnel / Web <-> APK Settings */}
-      {showSyncSettings && (
+      {!serverOnline && (
         <div className="tracker-card">
           <div className="tracker-card-head">
             <h3>
-              <Globe size={15} /> Sincronización Personal Web ↔ APK e Internet / Túnel
+              <WifiOff size={15} /> Servidor de compartir sin conexión
             </h3>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              <div className="toggle-row" style={{ gap: 8 }}>
-                <span>Auto-sync en vivo</span>
-                <button
-                  type="button"
-                  className={`switch ${syncConfig.liveSync !== false ? 'on' : ''}`}
-                  onClick={() => updateSyncConfig({ liveSync: syncConfig.liveSync === false })}
-                  aria-label="Activar o desactivar sincronización automática en vivo"
-                />
-              </div>
-              <button
-                type="button"
-                className="pill-btn"
-                style={{ height: 28, fontSize: 11 }}
-                onClick={refreshServerHealth}
-              >
-                <RefreshCw size={11} /> Comprobar
-              </button>
-            </div>
           </div>
-
-          <div className="shared-forms-grid">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div>
-                <label style={{ fontSize: 11.5, fontWeight: 700, display: 'block', marginBottom: 4 }}>
-                  Dirección del servidor / nube que elijas
-                </label>
-                <input
-                  className="studio-input"
-                  placeholder="http://192.168.1.115:4123 o https://tu-tunel.trycloudflare.com"
-                  value={syncConfig.serverUrl}
-                  onChange={(e) => updateSyncConfig({ serverUrl: e.target.value })}
-                />
-                <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 4 }}>
-                  Wi-Fi local detectado: <strong>{serverLanUrl || 'http://192.168.x.x:4123'}</strong>
-                </div>
-              </div>
-
-              <div>
-                <label style={{ fontSize: 11.5, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
-                  <KeyRound size={12} /> Token personal (`KOMOLIB_TOKEN`){' '}
-                  {serverAuthRequired ? '· Requerido' : '· Opcional'}
-                </label>
-                <input
-                  className="studio-input"
-                  type="password"
-                  placeholder="Protege tu bóveda privada en Internet"
-                  value={syncConfig.token}
-                  onChange={(e) => updateSyncConfig({ token: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <label style={{ fontSize: 11.5, fontWeight: 700, display: 'block' }}>
-                Acceso por Internet / Túnel HTTPS (fuera del Wi-Fi)
-              </label>
-
-              {tunnelAvailable && (
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                    padding: '9px 11px',
-                    borderRadius: 12,
-                    background: 'var(--banner-bg)',
-                    border: '1px solid var(--border-subtle)',
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontSize: 11.5, fontWeight: 800 }}>
-                      {tunnelRunning ? '🌐 Túnel Cloudflare activo' : 'Túnel rápido Cloudflare (1 clic)'}
-                    </div>
-                    <div style={{ fontSize: 10.5, color: 'var(--text-muted)', wordBreak: 'break-all' }}>
-                      {tunnelRunning
-                        ? tunnelUrl
-                        : 'Abre un enlace HTTPS al instante para compartir fuera de casa.'}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className={tunnelRunning ? 'pill-btn' : 'coral-cta-btn'}
-                    style={{ height: 31, padding: '0 13px', fontSize: 11.5 }}
-                    disabled={togglingTunnel || !serverOnline}
-                    onClick={handleToggleTunnel}
-                  >
-                    {togglingTunnel ? 'Conectando...' : tunnelRunning ? 'Detener túnel' : 'Activar túnel'}
-                  </button>
-                </div>
-              )}
-
-              <div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input
-                    className="studio-input"
-                    placeholder="https://mi-komolib.trycloudflare.com o tu VPS"
-                    value={publicUrlDraft}
-                    onChange={(e) => setPublicUrlDraft(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="pill-btn"
-                    style={{ height: 35, flexShrink: 0, background: 'var(--banner-bg)' }}
-                    onClick={() => savePublicUrlToServer(publicUrlDraft)}
-                  >
-                    Guardar
-                  </button>
-                </div>
-                <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 4 }}>
-                  {syncMessage || 'Cada usuario usa su propia bóveda aislada (spaceId) y nadie ve tus libros.'}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div
-            style={{
-              paddingTop: 10,
-              borderTop: '1px solid var(--border-subtle)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 10,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 800 }}>
-                  Emparejar mi APK Android / otro navegador (Bóveda privada)
-                </div>
-                <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
-                  Solo para tus propios dispositivos: sincroniza tu biblioteca, progreso y marcas.
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                <button
-                  type="button"
-                  className="pill-btn"
-                  style={{ height: 30, fontSize: 11 }}
-                  onClick={() => handleCopy(pairingUrl, 'pair')}
-                  disabled={!pairingUrl}
-                >
-                  {copiedKey === 'pair' ? <Check size={12} /> : <Copy size={12} />}
-                  Copiar enlace
-                </button>
-                <button
-                  type="button"
-                  className={`pill-btn ${showPairQr ? 'active' : ''}`}
-                  style={{ height: 30, fontSize: 11 }}
-                  onClick={() => setShowPairQr(!showPairQr)}
-                  disabled={!pairingUrl}
-                >
-                  <QrCode size={12} /> QR Emparejar
-                </button>
-              </div>
-            </div>
-
-            {showPairQr && pairQrSvg && (
-              <div className="device-qr-card">
-                <div className="device-qr-box">
-                  <svg viewBox={`-2 -2 ${pairQrSvg.size + 4} ${pairQrSvg.size + 4}`} width="110" height="110" shapeRendering="crispEdges">
-                    <rect x="-2" y="-2" width={pairQrSvg.size + 4} height={pairQrSvg.size + 4} fill="#ffffff" />
-                    <path d={pairQrSvg.path} fill="#161616" />
-                  </svg>
-                </div>
-                <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div style={{ fontSize: 12, fontWeight: 800 }}>
-                    QR privado de sincronización ({effectivePublicUrl ? 'Internet HTTPS' : 'Wi-Fi local'})
-                  </div>
-                  <div style={{ fontSize: 10.5, fontWeight: 700, padding: '6px 9px', borderRadius: 10, background: 'var(--card-bg)', border: '1px solid var(--border-subtle)', wordBreak: 'break-all' }}>
-                    {pairingUrl}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <form onSubmit={handleApplyPairing} style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              <input
-                className="studio-input"
-                style={{ flex: 1, minWidth: 200 }}
-                placeholder="¿Estás en el APK? Pega aquí tu enlace de emparejamiento o URL del servidor..."
-                value={pairingInput}
-                onChange={(e) => setPairingInput(e.target.value)}
-              />
-              <button
-                type="submit"
-                className="pill-btn"
-                style={{ height: 35, background: 'var(--accent-secondary)', color: 'var(--accent-secondary-contrast)', borderColor: 'transparent' }}
-                disabled={!pairingInput.trim()}
-              >
-                <Link2 size={12} /> Conectar
-              </button>
-            </form>
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+            No se pudo conectar con{' '}
+            <strong style={{ wordBreak: 'break-all' }}>
+              {syncConfig.serverUrl || 'el servidor configurado'}
+            </strong>
+            . Revisa que el servidor esté desplegado y que la variable{' '}
+            <code>VITE_SYNC_SERVER_URL</code> esté configurada en Netlify.
           </div>
         </div>
       )}
@@ -886,16 +597,6 @@ export const SharedReadingView: React.FC = () => {
             <h3>
               <Share2 size={15} /> ¿Qué deseas compartir?
             </h3>
-            {!serverOnline && (
-              <button
-                type="button"
-                className="pill-btn"
-                style={{ height: 26, fontSize: 10.5 }}
-                onClick={() => setShowSyncSettings(true)}
-              >
-                <WifiOff size={11} /> Conectar servidor
-              </button>
-            )}
           </div>
 
           {/* Step 1: Scope Picker (1 Book | Multiple Books | Full Library) */}
@@ -1324,18 +1025,8 @@ export const SharedReadingView: React.FC = () => {
                     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
                         <div style={{ fontSize: 12.5, fontWeight: 800 }}>
-                          {isShareInternet ? '🌐 QR por Internet' : '🏠 QR en Wi-Fi local'} — Estantería mutua
+                          QR para compartir — Estantería mutua
                         </div>
-                        {effectivePublicUrl && (
-                          <div style={{ display: 'flex', gap: 4 }}>
-                            <button type="button" className={`pill-btn ${isShareInternet ? 'active' : ''}`} style={{ height: 23, fontSize: 10, padding: '0 8px' }} onClick={() => setQrScope('internet')}>
-                              Internet
-                            </button>
-                            <button type="button" className={`pill-btn ${!isShareInternet ? 'active' : ''}`} style={{ height: 23, fontSize: 10, padding: '0 8px' }} onClick={() => setQrScope('lan')}>
-                              Wi-Fi
-                            </button>
-                          </div>
-                        )}
                       </div>
                       <div style={{ fontSize: 11, fontWeight: 700, padding: '6px 9px', borderRadius: 10, background: 'var(--card-bg)', border: '1px solid var(--border-subtle)', wordBreak: 'break-all' }}>
                         {shelfInviteUrl}
@@ -1652,18 +1343,8 @@ export const SharedReadingView: React.FC = () => {
                   <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 12.5, fontWeight: 800 }}>
-                        {isShareInternet ? '🌐 QR por Internet' : '🏠 QR en Wi-Fi local'}
+                        QR para compartir la sala
                       </div>
-                      {effectivePublicUrl && (
-                        <div style={{ display: 'flex', gap: 4 }}>
-                          <button type="button" className={`pill-btn ${isShareInternet ? 'active' : ''}`} style={{ height: 24, fontSize: 10.5, padding: '0 8px' }} onClick={() => setQrScope('internet')}>
-                            <Globe size={10} /> Internet
-                          </button>
-                          <button type="button" className={`pill-btn ${!isShareInternet ? 'active' : ''}`} style={{ height: 24, fontSize: 10.5, padding: '0 8px' }} onClick={() => setQrScope('lan')}>
-                            <Wifi size={10} /> Wi-Fi
-                          </button>
-                        </div>
-                      )}
                     </div>
                     <div style={{ fontSize: 11, fontWeight: 700, padding: '6px 9px', borderRadius: 10, background: 'var(--card-bg)', border: '1px solid var(--border-subtle)', wordBreak: 'break-all' }}>
                       {inviteUrl}

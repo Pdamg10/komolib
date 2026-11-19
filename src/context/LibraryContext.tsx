@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
+  dbClearAllUserData,
   dbDeleteAnnotation,
   dbDeleteBook,
   dbDeleteBookmark,
@@ -29,7 +30,8 @@ import {
   DEFAULT_SYNC_CONFIG,
   DEFAULT_THEME,
 } from '../data/presets';
-import { INITIAL_CHAT_MESSAGES, seedInitialLibrary } from '../data/seedLibrary';
+import { INITIAL_CHAT_MESSAGES } from '../data/seedLibrary';
+import { SYNC_SERVER_URL } from '../config';
 import {
   extractOriginalCoverFromBlob,
   importImageBundle,
@@ -44,15 +46,13 @@ import {
 import {
   checkServerHealth,
   deleteBookFromServer,
+  deriveEmailSpaceId,
   downloadBookFromServer,
   fetchRemoteSyncState,
   parsePairingInput,
   sendAiChatViaServer,
-  startServerTunnel,
-  stopServerTunnel,
   subscribeToSyncStream,
   syncFullState,
-  updateServerPublicUrl,
   uploadBookToServer,
   type RemoteSyncPayload,
 } from '../services/syncService';
@@ -189,20 +189,18 @@ interface LibraryContextValue {
   liveConnected: boolean;
   serverAuthRequired: boolean;
   serverLanUrl: string;
-  serverPublicUrl: string;
-  tunnelUrl: string;
-  tunnelRunning: boolean;
-  tunnelAvailable: boolean;
   refreshServerHealth: () => Promise<void>;
-  startTunnel: () => Promise<string | null>;
-  stopTunnel: () => Promise<void>;
-  savePublicUrlToServer: (url: string) => Promise<void>;
   applyPairingLink: (raw: string) => Promise<boolean>;
   remoteActiveSession: ActiveReadingSession | null;
   dismissRemoteSession: () => void;
   syncStatus: 'idle' | 'syncing' | 'ok' | 'error';
   syncMessage: string;
   triggerSync: (silent?: boolean) => Promise<void>;
+  // Cloud Account by Email & Full Backup/Restore
+  loginWithEmail: (email: string, pin?: string) => Promise<boolean>;
+  logoutAccount: () => Promise<void>;
+  exportBackupJson: () => void;
+  importBackupJson: (file: File) => Promise<boolean>;
   // Shared Reading Rooms (Buddy Read)
   sharedRooms: SharedRoom[];
   selectedRoomCode: string;
@@ -372,10 +370,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [liveConnected, setLiveConnected] = useState(false);
   const [serverAuthRequired, setServerAuthRequired] = useState(false);
   const [serverLanUrl, setServerLanUrl] = useState('');
-  const [serverPublicUrl, setServerPublicUrl] = useState('');
-  const [tunnelUrl, setTunnelUrl] = useState('');
-  const [tunnelRunning, setTunnelRunning] = useState(false);
-  const [tunnelAvailable, setTunnelAvailable] = useState(false);
   const [deviceId, setDeviceId] = useState('');
   const [remoteActiveSession, setRemoteActiveSession] = useState<ActiveReadingSession | null>(null);
   const [sharedRooms, setSharedRooms] = useState<SharedRoom[]>([]);
@@ -416,8 +410,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     bookmarks,
     annotations,
     customBookmarkDesigns,
+    customStationery,
     notes,
     categories,
+    collections,
+    readerSettings,
     theme,
     profile,
     syncConfig,
@@ -430,8 +427,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     bookmarks,
     annotations,
     customBookmarkDesigns,
+    customStationery,
     notes,
     categories,
+    collections,
+    readerSettings,
     theme,
     profile,
     syncConfig,
@@ -479,6 +479,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         savedCustomDesigns,
         savedCustomStationery,
         savedPendingTombstones,
+        savedThemeTs,
+        savedProfileTs,
+        savedExplicitLogout,
       ] = await Promise.all([
         dbGetKV<ThemeConfig>('theme'),
         dbGetKV<CategoryItem[]>('categories'),
@@ -500,7 +503,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           notes?: string[];
           customBookmarkDesigns?: string[];
         }>('pendingTombstones'),
+        dbGetKV<number>('themeUpdatedAt'),
+        dbGetKV<number>('profileUpdatedAt'),
+        dbGetKV<boolean>('explicitLogout'),
       ]);
+
+      if (typeof savedThemeTs === 'number') themeUpdatedAtRef.current = savedThemeTs;
+      if (typeof savedProfileTs === 'number') profileUpdatedAtRef.current = savedProfileTs;
 
       if (savedPendingTombstones) {
         if (Array.isArray(savedPendingTombstones.books)) {
@@ -533,9 +542,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         joinedShelfCodesRef.current = savedShelfCodes;
       }
 
-      let loadedBooks = await dbGetAllBooks();
-      if (!seeded && loadedBooks.length === 0) {
-        loadedBooks = await seedInitialLibrary();
+      // First-time users ALWAYS start with an empty library (0 demo books).
+      // Also purge any legacy auto-seeded demo books if present.
+      const allStoredBooks = await dbGetAllBooks();
+      const demoBooks = allStoredBooks.filter((b) => b.isDemo);
+      for (const dbk of demoBooks) {
+        await dbDeleteBook(dbk.id).catch(() => undefined);
+      }
+      const loadedBooks = allStoredBooks.filter((b) => !b.isDemo);
+      if (!seeded) {
         await dbSetKV('seeded', true);
       }
 
@@ -554,6 +569,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ...DEFAULT_SYNC_CONFIG,
         ...(savedSync || {}),
       };
+
+      // Netlify builds receive the API URL via VITE_SYNC_SERVER_URL. If this browser
+      // still has an old localhost/public address saved, migrate it to the deployed server.
+      if (SYNC_SERVER_URL) {
+        const savedServer = initialSync.serverUrl.trim();
+        const staleServer =
+          !savedServer ||
+          /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(savedServer) ||
+          /\.trycloudflare\.com$/i.test(savedServer);
+        if (staleServer) {
+          initialSync = { ...initialSync, serverUrl: SYNC_SERVER_URL };
+          await dbSetKV('syncConfig', initialSync);
+        }
+      }
+
       if (!initialSync.spaceId) {
         initialSync.spaceId = `vault_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
         await dbSetKV('syncConfig', initialSync);
@@ -648,6 +678,51 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setBookmarks(loadedBookmarks.filter((b) => !pendingBmDel.has(b.id)));
       setAnnotations(loadedAnnotations.filter((a) => !pendingAnnDel.has(a.id)));
       setNotes(loadedNotes.filter((n) => !pendingNoteDel.has(n.id)));
+
+      // If accessed by the owner on localhost (:3000, :4123, :5173), LAN, or the deployed server from the owner's network
+      // (and not explicitly logged out or joining a guest room), auto-connect to the owner's primary vault
+      // so the saved custom theme, books, and marcadores display immediately on both localhost:3000 and the tunnel!
+      const hasGuestParam =
+        typeof window !== 'undefined' &&
+        (new URLSearchParams(window.location.search).has('join') ||
+          new URLSearchParams(window.location.search).has('shelf'));
+
+      if (!savedExplicitLogout && !hasGuestParam && !savedSync?.accountEmail) {
+        try {
+          const defaultBase =
+            typeof window !== 'undefined' &&
+            window.location.origin.startsWith('http') &&
+            !/:5173$/.test(window.location.origin)
+              ? window.location.origin.replace(/\/+$/, '')
+              : 'http://localhost:4123';
+          const isLocalOrigin =
+            typeof window !== 'undefined' &&
+            (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+          const health = await checkServerHealth({
+            ...initialSync,
+            serverUrl: initialSync.serverUrl || defaultBase,
+          }).catch(() => null);
+
+          if ((isLocalOrigin || health?.isOwnerNetwork) && health?.ownerSpaceId) {
+            initialSync = {
+              ...initialSync,
+              serverUrl: initialSync.serverUrl || defaultBase,
+              spaceId: health.ownerSpaceId,
+              autoSync: true,
+              liveSync: true,
+            };
+            setSyncConfig(initialSync);
+            await dbSetKV('syncConfig', initialSync);
+            const remote = await fetchRemoteSyncState(initialSync).catch(() => null);
+            if (remote && !cancelled) {
+              await applyRemotePayload(remote, loadedBooks.length === 0);
+            }
+          }
+        } catch {
+          // ignore offline bootstrap check
+        }
+      }
+
       setReady(true);
 
       // Background pass: ensure existing books in IndexedDB extract their original cover
@@ -732,10 +807,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const refreshServerHealth = useCallback(async () => {
     const cfg = stateRef.current.syncConfig;
-    if (!cfg.serverUrl.trim()) {
-      setServerOnline(false);
-      return;
-    }
     try {
       const h = await checkServerHealth(cfg);
       setServerOnline(true);
@@ -743,231 +814,267 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setAiOnline(Boolean(h.aiConfigured));
       setAiModelName(h.aiModel || 'gemini-2.5-flash');
       setServerLanUrl(h.lanUrls?.[0] || '');
-      setServerPublicUrl(h.publicUrl || '');
-      setTunnelUrl(h.tunnelUrl || '');
-      setTunnelRunning(Boolean(h.tunnelRunning));
-      setTunnelAvailable(Boolean(h.tunnelAvailable));
     } catch {
       setServerOnline(false);
       setAiOnline(false);
-      setTunnelRunning(false);
     }
   }, []);
 
-  // Detect server health, LAN/Public URL, tunnel state, and Gemini AI proxy availability
+  // Detect server health, LAN/Public URL, and Gemini AI proxy availability
   useEffect(() => {
     if (!ready) return;
     refreshServerHealth();
   }, [ready, syncConfig.serverUrl, syncConfig.token, refreshServerHealth]);
 
-  const startTunnel = useCallback(async (): Promise<string | null> => {
-    try {
-      const res = await startServerTunnel(stateRef.current.syncConfig);
-      setTunnelUrl(res.tunnelUrl || '');
-      setTunnelRunning(Boolean(res.tunnelRunning));
-      setServerPublicUrl(res.publicUrl || res.tunnelUrl || '');
-      showToast('Túnel de Internet HTTPS activo');
-      return res.tunnelUrl || res.publicUrl || null;
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudo iniciar el túnel');
-      return null;
-    }
-  }, [showToast]);
-
-  const stopTunnel = useCallback(async () => {
-    try {
-      const res = await stopServerTunnel(stateRef.current.syncConfig);
-      setTunnelUrl('');
-      setTunnelRunning(false);
-      setServerPublicUrl(res.publicUrl || '');
-      showToast('Túnel de Internet detenido');
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudo detener el túnel');
-    }
-  }, [showToast]);
-
-  const savePublicUrlToServer = useCallback(
-    async (url: string) => {
-      const clean = url.trim().replace(/\/+$/, '');
-      setSyncConfig((prev) => {
-        const next = { ...prev, publicUrl: clean };
-        dbSetKV('syncConfig', next).catch(console.error);
-        return next;
-      });
+  const applyRemotePayload = useCallback(
+    async (merged: RemoteSyncPayload, forceRestore = false) => {
+      suppressAutoSyncRef.current = true;
       try {
-        const res = await updateServerPublicUrl(stateRef.current.syncConfig, clean);
-        setServerPublicUrl(res.publicUrl || clean);
-        showToast(clean ? 'URL pública de Internet guardada' : 'URL pública restablecida a Wi-Fi local');
-      } catch {
-        // Still kept locally in syncConfig.publicUrl
+        const current = stateRef.current;
+        // ALWAYS union server tombstones with local pending tombstones so a stale pull/sync NEVER resurrects deleted items!
+        const deletedBookSet = new Set([
+          ...(merged.deletedBookIds || []),
+          ...deletedIdsRef.current,
+        ]);
+        const deletedBookmarkSet = new Set([
+          ...(merged.deletedBookmarkIds || []),
+          ...deletedBookmarkIdsRef.current,
+        ]);
+        const deletedAnnotationSet = new Set([
+          ...(merged.deletedAnnotationIds || []),
+          ...deletedAnnotationIdsRef.current,
+        ]);
+        const deletedNoteSet = new Set([
+          ...(merged.deletedNoteIds || []),
+          ...deletedNoteIdsRef.current,
+        ]);
+        const deletedDesignSet = new Set([
+          ...(merged.deletedBookmarkDesignIds || []),
+          ...deletedBookmarkDesignIdsRef.current,
+        ]);
+
+        // Remove tombstoned books from IndexedDB
+        for (const delId of deletedBookSet) {
+          if (current.books.some((b) => b.id === delId)) {
+            await dbDeleteBook(delId).catch(() => undefined);
+          }
+        }
+
+        // Safely merge remote books with local books (preserving unsynced local additions & skipping demo books)
+        const mergedMap = new Map<string, BookItem>();
+        for (const localBook of current.books) {
+          if (!localBook.isDemo && !deletedBookSet.has(localBook.id)) {
+            mergedMap.set(localBook.id, localBook);
+          }
+        }
+        const booksToAutoDownload: BookItem[] = [];
+        for (const remoteBook of Object.values(merged.books || {})) {
+          if (!remoteBook || remoteBook.isDemo || deletedBookSet.has(remoteBook.id)) continue;
+          const local = mergedMap.get(remoteBook.id);
+          const hasFileRec = local?.hasLocalFile ? true : Boolean(await dbGetBookFile(remoteBook.id));
+          if (!local || forceRestore || (remoteBook.updatedAt || 0) >= (local.updatedAt || 0)) {
+            const mergedItem: BookItem = {
+              ...remoteBook,
+              hasLocalFile: hasFileRec,
+            };
+            await dbPutBook(mergedItem);
+            mergedMap.set(remoteBook.id, mergedItem);
+            if (!hasFileRec && remoteBook.hasRemoteFile) {
+              booksToAutoDownload.push(mergedItem);
+            }
+          } else if (remoteBook.hasRemoteFile && !local.hasRemoteFile) {
+            const updatedLocal: BookItem = {
+              ...local,
+              hasRemoteFile: true,
+              remoteFileName: remoteBook.remoteFileName || local.remoteFileName,
+            };
+            await dbPutBook(updatedLocal);
+            mergedMap.set(remoteBook.id, updatedLocal);
+            if (!hasFileRec) {
+              booksToAutoDownload.push(updatedLocal);
+            }
+          }
+        }
+
+        const nextBooks = Array.from(mergedMap.values()).sort(
+          (a, b) => (b.lastReadAt || b.addedAt) - (a.lastReadAt || a.addedAt)
+        );
+        setBooks(nextBooks);
+
+        // Background auto-download book files from user's cloud vault so they are immediately ready to open
+        if (booksToAutoDownload.length > 0) {
+          (async () => {
+            for (const target of booksToAutoDownload) {
+              try {
+                await downloadBookFromServer(stateRef.current.syncConfig, target);
+                const patched: BookItem = { ...target, hasLocalFile: true };
+                await dbPutBook(patched);
+                setBooks((prev) =>
+                  prev.map((x) => (x.id === target.id ? { ...x, hasLocalFile: true } : x))
+                );
+              } catch {
+                // will retry when book is clicked
+              }
+            }
+          })();
+        }
+
+        if (merged.bookmarks) {
+          for (const delId of deletedBookmarkSet) {
+            await dbDeleteBookmark(delId).catch(() => undefined);
+          }
+          const bmMap = new Map<string, BookmarkItem>();
+          for (const bm of current.bookmarks) {
+            if (!deletedBookmarkSet.has(bm.id)) bmMap.set(bm.id, bm);
+          }
+          for (const bm of merged.bookmarks) {
+            if (!deletedBookmarkSet.has(bm.id)) {
+              await dbPutBookmark(bm);
+              bmMap.set(bm.id, bm);
+            }
+          }
+          setBookmarks(Array.from(bmMap.values()).sort((a, b) => b.createdAt - a.createdAt));
+        }
+
+        if (merged.annotations) {
+          for (const delId of deletedAnnotationSet) {
+            await dbDeleteAnnotation(delId).catch(() => undefined);
+          }
+          const annMap = new Map<string, BookAnnotation>();
+          for (const a of current.annotations) {
+            if (!deletedAnnotationSet.has(a.id)) annMap.set(a.id, a);
+          }
+          for (const a of merged.annotations) {
+            if (!deletedAnnotationSet.has(a.id)) {
+              const prev = annMap.get(a.id);
+              if (
+                !prev ||
+                forceRestore ||
+                (a.updatedAt || a.createdAt) >= (prev.updatedAt || prev.createdAt)
+              ) {
+                await dbPutAnnotation(a);
+                annMap.set(a.id, a);
+              }
+            }
+          }
+          setAnnotations(Array.from(annMap.values()).sort((a, b) => b.createdAt - a.createdAt));
+        }
+
+        if (merged.customBookmarkDesigns) {
+          const designMap = new Map<string, BookmarkDesign>();
+          for (const d of current.customBookmarkDesigns) {
+            if (!deletedDesignSet.has(d.id)) designMap.set(d.id, d);
+          }
+          for (const d of merged.customBookmarkDesigns) {
+            if (!deletedDesignSet.has(d.id)) designMap.set(d.id, d);
+          }
+          const mergedDesigns = Array.from(designMap.values());
+          setCustomBookmarkDesigns(mergedDesigns);
+          await dbSetKV('customBookmarkDesigns', mergedDesigns);
+        }
+
+        if (merged.customStationery) {
+          const currSt = current.customStationery;
+          const swMap = new Map<string, CustomSwatchItem>();
+          for (const s of currSt.swatches || []) swMap.set(s.id, s);
+          for (const s of merged.customStationery.swatches || []) swMap.set(s.id, s);
+          const stkMap = new Map<string, CustomStickerItem>();
+          for (const s of currSt.stickers || []) stkMap.set(s.id, s);
+          for (const s of merged.customStationery.stickers || []) stkMap.set(s.id, s);
+          const emSet = new Set([
+            ...(merged.customStationery.emojis || []),
+            ...(currSt.emojis || []),
+          ]);
+          const nextSt: CustomStationeryKit = {
+            swatches: Array.from(swMap.values()),
+            stickers: Array.from(stkMap.values()),
+            emojis: Array.from(emSet),
+          };
+          setCustomStationery(nextSt);
+          await dbSetKV('customStationery', nextSt);
+        }
+
+        if (merged.notes) {
+          for (const delId of deletedNoteSet) {
+            await dbDeleteNote(delId).catch(() => undefined);
+          }
+          const noteMap = new Map<string, NoteItem>();
+          for (const n of current.notes) {
+            if (!deletedNoteSet.has(n.id)) noteMap.set(n.id, n);
+          }
+          for (const n of merged.notes) {
+            if (!deletedNoteSet.has(n.id)) {
+              const prev = noteMap.get(n.id);
+              if (
+                !prev ||
+                forceRestore ||
+                (n.updatedAt || n.createdAt) >= (prev.updatedAt || prev.createdAt)
+              ) {
+                await dbPutNote(n);
+                noteMap.set(n.id, n);
+              }
+            }
+          }
+          setNotes(
+            Array.from(noteMap.values()).sort(
+              (a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)
+            )
+          );
+        }
+
+        if (merged.categories?.length) {
+          setCategories(merged.categories);
+          await dbSetKV('categories', merged.categories);
+        }
+        if (merged.collections?.length) {
+          setCollections(merged.collections);
+          await dbSetKV('collections', merged.collections);
+        }
+        if (merged.readerSettings && (forceRestore || !themeUpdatedAtRef.current)) {
+          const mergedReader = { ...DEFAULT_READER_SETTINGS, ...merged.readerSettings };
+          setReaderSettings(mergedReader);
+          await dbSetKV('readerSettings', mergedReader);
+        }
+        if (
+          merged.theme &&
+          (forceRestore ||
+            !themeUpdatedAtRef.current ||
+            (merged.themeUpdatedAt || 0) >= themeUpdatedAtRef.current)
+        ) {
+          themeUpdatedAtRef.current = merged.themeUpdatedAt || Date.now();
+          const mergedTheme = { ...DEFAULT_THEME, ...merged.theme };
+          setTheme(mergedTheme);
+          await dbSetKV('theme', mergedTheme);
+          await dbSetKV('themeUpdatedAt', themeUpdatedAtRef.current);
+        }
+        if (
+          merged.profile &&
+          (forceRestore ||
+            !profileUpdatedAtRef.current ||
+            (merged.profileUpdatedAt || 0) >= profileUpdatedAtRef.current)
+        ) {
+          profileUpdatedAtRef.current = merged.profileUpdatedAt || Date.now();
+          const mergedProfile = { ...DEFAULT_PROFILE, ...merged.profile };
+          setProfile(mergedProfile);
+          await dbSetKV('profile', mergedProfile);
+          await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
+        }
+        if (
+          merged.lastActiveSession &&
+          merged.lastActiveSession.deviceId !== current.deviceId &&
+          merged.lastActiveSession.updatedAt > (localActiveSessionRef.current?.updatedAt || 0)
+        ) {
+          setRemoteActiveSession(merged.lastActiveSession);
+        }
+        return nextBooks;
+      } finally {
+        window.setTimeout(() => {
+          suppressAutoSyncRef.current = false;
+        }, 300);
       }
     },
-    [showToast]
+    []
   );
-
-  const applyRemotePayload = useCallback(async (merged: RemoteSyncPayload) => {
-    suppressAutoSyncRef.current = true;
-    try {
-      const current = stateRef.current;
-      // ALWAYS union server tombstones with local pending tombstones so a stale pull/sync NEVER resurrects deleted items!
-      const deletedBookSet = new Set([...(merged.deletedBookIds || []), ...deletedIdsRef.current]);
-      const deletedBookmarkSet = new Set([
-        ...(merged.deletedBookmarkIds || []),
-        ...deletedBookmarkIdsRef.current,
-      ]);
-      const deletedAnnotationSet = new Set([
-        ...(merged.deletedAnnotationIds || []),
-        ...deletedAnnotationIdsRef.current,
-      ]);
-      const deletedNoteSet = new Set([
-        ...(merged.deletedNoteIds || []),
-        ...deletedNoteIdsRef.current,
-      ]);
-      const deletedDesignSet = new Set([
-        ...(merged.deletedBookmarkDesignIds || []),
-        ...deletedBookmarkDesignIdsRef.current,
-      ]);
-
-      // Remove tombstoned books from IndexedDB
-      for (const delId of deletedBookSet) {
-        if (current.books.some((b) => b.id === delId)) {
-          await dbDeleteBook(delId).catch(() => undefined);
-        }
-      }
-
-      // Safely merge remote books with local books (preserving unsynced local additions)
-      const mergedMap = new Map<string, BookItem>();
-      for (const localBook of current.books) {
-        if (!deletedBookSet.has(localBook.id)) {
-          mergedMap.set(localBook.id, localBook);
-        }
-      }
-      for (const remoteBook of Object.values(merged.books || {})) {
-        if (deletedBookSet.has(remoteBook.id)) continue;
-        const local = mergedMap.get(remoteBook.id);
-        if (!local || (remoteBook.updatedAt || 0) >= (local.updatedAt || 0)) {
-          const mergedItem: BookItem = {
-            ...remoteBook,
-            hasLocalFile: Boolean(local?.hasLocalFile),
-          };
-          await dbPutBook(mergedItem);
-          mergedMap.set(remoteBook.id, mergedItem);
-        } else if (remoteBook.hasRemoteFile && !local.hasRemoteFile) {
-          const updatedLocal: BookItem = {
-            ...local,
-            hasRemoteFile: true,
-            remoteFileName: remoteBook.remoteFileName || local.remoteFileName,
-          };
-          await dbPutBook(updatedLocal);
-          mergedMap.set(remoteBook.id, updatedLocal);
-        }
-      }
-
-      const nextBooks = Array.from(mergedMap.values()).sort(
-        (a, b) => (b.lastReadAt || b.addedAt) - (a.lastReadAt || a.addedAt)
-      );
-      setBooks(nextBooks);
-
-      if (merged.bookmarks) {
-        for (const delId of deletedBookmarkSet) {
-          await dbDeleteBookmark(delId).catch(() => undefined);
-        }
-        const bmMap = new Map<string, BookmarkItem>();
-        for (const bm of current.bookmarks) {
-          if (!deletedBookmarkSet.has(bm.id)) bmMap.set(bm.id, bm);
-        }
-        for (const bm of merged.bookmarks) {
-          if (!deletedBookmarkSet.has(bm.id)) {
-            await dbPutBookmark(bm);
-            bmMap.set(bm.id, bm);
-          }
-        }
-        setBookmarks(Array.from(bmMap.values()).sort((a, b) => b.createdAt - a.createdAt));
-      }
-
-      if (merged.annotations) {
-        for (const delId of deletedAnnotationSet) {
-          await dbDeleteAnnotation(delId).catch(() => undefined);
-        }
-        const annMap = new Map<string, BookAnnotation>();
-        for (const a of current.annotations) {
-          if (!deletedAnnotationSet.has(a.id)) annMap.set(a.id, a);
-        }
-        for (const a of merged.annotations) {
-          if (!deletedAnnotationSet.has(a.id)) {
-            const prev = annMap.get(a.id);
-            if (!prev || (a.updatedAt || a.createdAt) >= (prev.updatedAt || prev.createdAt)) {
-              await dbPutAnnotation(a);
-              annMap.set(a.id, a);
-            }
-          }
-        }
-        setAnnotations(Array.from(annMap.values()).sort((a, b) => b.createdAt - a.createdAt));
-      }
-
-      if (merged.customBookmarkDesigns) {
-        const designMap = new Map<string, BookmarkDesign>();
-        for (const d of current.customBookmarkDesigns) {
-          if (!deletedDesignSet.has(d.id)) designMap.set(d.id, d);
-        }
-        for (const d of merged.customBookmarkDesigns) {
-          if (!deletedDesignSet.has(d.id)) designMap.set(d.id, d);
-        }
-        const mergedDesigns = Array.from(designMap.values());
-        setCustomBookmarkDesigns(mergedDesigns);
-        await dbSetKV('customBookmarkDesigns', mergedDesigns);
-      }
-
-      if (merged.notes) {
-        for (const delId of deletedNoteSet) {
-          await dbDeleteNote(delId).catch(() => undefined);
-        }
-        const noteMap = new Map<string, NoteItem>();
-        for (const n of current.notes) {
-          if (!deletedNoteSet.has(n.id)) noteMap.set(n.id, n);
-        }
-        for (const n of merged.notes) {
-          if (!deletedNoteSet.has(n.id)) {
-            const prev = noteMap.get(n.id);
-            if (!prev || (n.updatedAt || n.createdAt) >= (prev.updatedAt || prev.createdAt)) {
-              await dbPutNote(n);
-              noteMap.set(n.id, n);
-            }
-          }
-        }
-        setNotes(Array.from(noteMap.values()).sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)));
-      }
-
-      if (merged.categories?.length) {
-        setCategories(merged.categories);
-        await dbSetKV('categories', merged.categories);
-      }
-      if (merged.theme && (merged.themeUpdatedAt || 0) > themeUpdatedAtRef.current) {
-        themeUpdatedAtRef.current = merged.themeUpdatedAt || Date.now();
-        const mergedTheme = { ...DEFAULT_THEME, ...merged.theme };
-        setTheme(mergedTheme);
-        await dbSetKV('theme', mergedTheme);
-      }
-      if (merged.profile && (merged.profileUpdatedAt || 0) > profileUpdatedAtRef.current) {
-        profileUpdatedAtRef.current = merged.profileUpdatedAt || Date.now();
-        const mergedProfile = { ...DEFAULT_PROFILE, ...merged.profile };
-        setProfile(mergedProfile);
-        await dbSetKV('profile', mergedProfile);
-      }
-      if (
-        merged.lastActiveSession &&
-        merged.lastActiveSession.deviceId !== current.deviceId &&
-        merged.lastActiveSession.updatedAt > (localActiveSessionRef.current?.updatedAt || 0)
-      ) {
-        setRemoteActiveSession(merged.lastActiveSession);
-      }
-      return nextBooks;
-    } finally {
-      window.setTimeout(() => {
-        suppressAutoSyncRef.current = false;
-      }, 300);
-    }
-  }, []);
 
   const scheduleAutoSync = useCallback(
     (urgent = false) => {
@@ -996,7 +1103,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               annotations: s.annotations,
               notes: s.notes,
               customBookmarkDesigns: s.customBookmarkDesigns,
+              customStationery: s.customStationery,
               categories: s.categories,
+              collections: s.collections,
+              readerSettings: s.readerSettings,
               theme: s.theme,
               themeUpdatedAt: themeUpdatedAtRef.current,
               profile: s.profile,
@@ -1008,6 +1118,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               deletedNoteIds: sentNotes,
               deletedBookmarkDesignIds: sentDesigns,
             },
+            true,
             true
           );
 
@@ -1057,7 +1168,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const updateTheme = useCallback(
     (patch: Partial<ThemeConfig>) => {
-      themeUpdatedAtRef.current = Date.now();
+      const ts = Date.now();
+      themeUpdatedAtRef.current = ts;
+      dbSetKV('themeUpdatedAt', ts).catch(console.error);
       setTheme((prev) => {
         const next = { ...prev, ...patch };
         if (
@@ -1076,24 +1189,32 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   );
 
   const resetTheme = useCallback(() => {
-    themeUpdatedAtRef.current = Date.now();
+    const ts = Date.now();
+    themeUpdatedAtRef.current = ts;
+    dbSetKV('themeUpdatedAt', ts).catch(console.error);
     setTheme(DEFAULT_THEME);
     dbSetKV('theme', DEFAULT_THEME).catch(console.error);
     showToast('Tema restaurado a Komo Cream');
     scheduleAutoSync();
   }, [scheduleAutoSync, showToast]);
 
-  const updateReaderSettings = useCallback((patch: Partial<ReaderSettings>) => {
-    setReaderSettings((prev) => {
-      const next = { ...prev, ...patch };
-      dbSetKV('readerSettings', next).catch(console.error);
-      return next;
-    });
-  }, []);
+  const updateReaderSettings = useCallback(
+    (patch: Partial<ReaderSettings>) => {
+      setReaderSettings((prev) => {
+        const next = { ...prev, ...patch };
+        dbSetKV('readerSettings', next).catch(console.error);
+        return next;
+      });
+      scheduleAutoSync();
+    },
+    [scheduleAutoSync]
+  );
 
   const updateProfile = useCallback(
     (patch: Partial<UserProfile>) => {
-      profileUpdatedAtRef.current = Date.now();
+      const ts = Date.now();
+      profileUpdatedAtRef.current = ts;
+      dbSetKV('profileUpdatedAt', ts).catch(console.error);
       setProfile((prev) => {
         const next = { ...prev, ...patch };
         dbSetKV('profile', next).catch(console.error);
@@ -1121,26 +1242,35 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return next;
       });
       showToast(`Categoría "${cat.label}" añadida`);
+      scheduleAutoSync();
     },
-    [showToast]
+    [scheduleAutoSync, showToast]
   );
 
-  const deleteCategory = useCallback((id: string) => {
-    setCategories((prev) => {
-      const next = prev.filter((c) => c.id !== id || c.id === 'all');
-      dbSetKV('categories', next).catch(console.error);
-      return next;
-    });
-    setActiveCategory((curr) => (curr === id ? 'all' : curr));
-  }, []);
+  const deleteCategory = useCallback(
+    (id: string) => {
+      setCategories((prev) => {
+        const next = prev.filter((c) => c.id !== id || c.id === 'all');
+        dbSetKV('categories', next).catch(console.error);
+        return next;
+      });
+      setActiveCategory((curr) => (curr === id ? 'all' : curr));
+      scheduleAutoSync();
+    },
+    [scheduleAutoSync]
+  );
 
-  const updateCollection = useCallback((id: string, patch: Partial<CollectionCard>) => {
-    setCollections((prev) => {
-      const next = prev.map((c) => (c.id === id ? { ...c, ...patch } : c));
-      dbSetKV('collections', next).catch(console.error);
-      return next;
-    });
-  }, []);
+  const updateCollection = useCallback(
+    (id: string, patch: Partial<CollectionCard>) => {
+      setCollections((prev) => {
+        const next = prev.map((c) => (c.id === id ? { ...c, ...patch } : c));
+        dbSetKV('collections', next).catch(console.error);
+        return next;
+      });
+      scheduleAutoSync();
+    },
+    [scheduleAutoSync]
+  );
 
   const importFiles = useCallback(
     async (
@@ -1553,13 +1683,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [persistPendingTombstones, scheduleAutoSync, showToast]
   );
 
-  const persistStationery = useCallback((updater: (prev: CustomStationeryKit) => CustomStationeryKit) => {
-    setCustomStationery((prev) => {
-      const next = updater(prev);
-      dbSetKV('customStationery', next).catch(console.error);
-      return next;
-    });
-  }, []);
+  const persistStationery = useCallback(
+    (updater: (prev: CustomStationeryKit) => CustomStationeryKit) => {
+      setCustomStationery((prev) => {
+        const next = updater(prev);
+        dbSetKV('customStationery', next).catch(console.error);
+        return next;
+      });
+      scheduleAutoSync();
+    },
+    [scheduleAutoSync]
+  );
 
   const addCustomSwatch = useCallback(
     (swatch: Omit<CustomSwatchItem, 'id'>) => {
@@ -1775,6 +1909,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             bookTitle: books.find((b) => b.id === n.bookId)?.title || 'Libro',
             text: n.text,
           })),
+          annotations: annotations.slice(0, 15).map((a) => ({
+            bookTitle: books.find((b) => b.id === a.bookId)?.title || 'Libro',
+            chapter: a.chapter,
+            quote: a.quote,
+            note: a.note,
+          })),
           activeBook: activeBook
             ? {
                 id: activeBook.id,
@@ -1783,6 +1923,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 progress: activeBook.progress,
               }
             : null,
+          profileName: profile.name,
         });
         if (aiRes.ok && aiRes.reply) {
           setAiOnline(true);
@@ -1854,7 +1995,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         },
       ]);
     },
-    [activeBook, addNote, books, chatMessages, notes, syncConfig]
+    [activeBook, addNote, annotations, books, chatMessages, notes, profile.name, syncConfig]
   );
 
   const clearChat = useCallback(() => {
@@ -1891,7 +2032,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           annotations: s.annotations,
           notes: s.notes,
           customBookmarkDesigns: s.customBookmarkDesigns,
+          customStationery: s.customStationery,
           categories: s.categories,
+          collections: s.collections,
+          readerSettings: s.readerSettings,
           theme: s.theme,
           themeUpdatedAt: themeUpdatedAtRef.current,
           profile: s.profile,
@@ -1940,6 +2084,312 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     },
     [applyRemotePayload, persistPendingTombstones, showToast, updateSyncConfig]
+  );
+
+  // Cloud Account by Email + Full Backup / Restore
+  const loginWithEmail = useCallback(
+    async (rawEmail: string, rawPin = ''): Promise<boolean> => {
+      const cleanEmail = rawEmail.trim().toLowerCase();
+      if (!cleanEmail || cleanEmail.length < 3) {
+        showToast('Ingresa tu correo electrónico o nombre de usuario');
+        return false;
+      }
+      await dbSetKV('explicitLogout', false);
+
+      const spaceId = deriveEmailSpaceId(cleanEmail, rawPin);
+      const s = stateRef.current;
+      const resolvedServer =
+        s.syncConfig.serverUrl.trim() ||
+        (typeof window !== 'undefined' &&
+        window.location.origin.startsWith('http') &&
+        !/:5173$/.test(window.location.origin)
+          ? window.location.origin.replace(/\/+$/, '')
+          : 'http://localhost:4123');
+
+      const nextCfg: SyncConfig = {
+        ...s.syncConfig,
+        serverUrl: resolvedServer,
+        spaceId,
+        accountEmail: cleanEmail,
+        autoSync: true,
+        liveSync: true,
+      };
+      stateRef.current.syncConfig = nextCfg;
+      updateSyncConfig(nextCfg);
+
+      setSyncStatus('syncing');
+      setSyncMessage(`Conectando cuenta ${cleanEmail}...`);
+
+      try {
+        const remote = await fetchRemoteSyncState(nextCfg);
+        const remoteBooksCount = Object.values(remote.books || {}).filter((b) => b && !b.isDemo).length;
+        const remoteHasData =
+          remoteBooksCount > 0 ||
+          Boolean(remote.bookmarks?.length) ||
+          Boolean(remote.annotations?.length) ||
+          Boolean(remote.notes?.length) ||
+          Boolean(remote.theme) ||
+          Boolean(remote.profile);
+
+        const localIsEmpty =
+          s.books.filter((b) => !b.isDemo).length === 0 &&
+          s.bookmarks.length === 0 &&
+          s.annotations.length === 0 &&
+          s.notes.length === 0;
+
+        if (remoteHasData && localIsEmpty) {
+          // Returning user on a clean / new device: restore 100% of their saved cloud vault!
+          const restoredBooks = await applyRemotePayload(remote, true);
+          const mergedProfile: UserProfile = {
+            ...DEFAULT_PROFILE,
+            ...(remote.profile || s.profile),
+            email: cleanEmail,
+          };
+          setProfile(mergedProfile);
+          await dbSetKV('profile', mergedProfile);
+          const now = Date.now();
+          updateSyncConfig({ lastSyncedAt: now });
+          setServerOnline(true);
+          setSyncStatus('ok');
+          setSyncMessage(`Cuenta restaurada (${restoredBooks.length} títulos)`);
+          showToast(
+            `¡Bienvenido de vuelta! Se restauraron ${restoredBooks.length} libro(s) y tu personalización de ${cleanEmail}`
+          );
+          return true;
+        }
+
+        // First time using this email OR user already added books/customizations locally -> merge & save to email vault!
+        const updatedProfile: UserProfile = {
+          ...s.profile,
+          email: cleanEmail,
+          name:
+            s.profile.name === DEFAULT_PROFILE.name && remote.profile?.name
+              ? remote.profile.name
+              : s.profile.name,
+        };
+        profileUpdatedAtRef.current = Date.now();
+        await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
+        setProfile(updatedProfile);
+        await dbSetKV('profile', updatedProfile);
+
+        const merged = await syncFullState(
+          nextCfg,
+          {
+            deviceId: s.deviceId,
+            books: s.books,
+            bookmarks: s.bookmarks,
+            annotations: s.annotations,
+            notes: s.notes,
+            customBookmarkDesigns: s.customBookmarkDesigns,
+            customStationery: s.customStationery,
+            categories: s.categories,
+            collections: s.collections,
+            readerSettings: s.readerSettings,
+            theme: s.theme,
+            themeUpdatedAt: themeUpdatedAtRef.current,
+            profile: updatedProfile,
+            profileUpdatedAt: profileUpdatedAtRef.current,
+            lastActiveSession: localActiveSessionRef.current,
+            deletedBookIds: deletedIdsRef.current,
+            deletedBookmarkIds: deletedBookmarkIdsRef.current,
+            deletedAnnotationIds: deletedAnnotationIdsRef.current,
+            deletedNoteIds: deletedNoteIdsRef.current,
+            deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
+          },
+          true
+        );
+
+        const finalBooks = await applyRemotePayload(merged, remoteHasData && !themeUpdatedAtRef.current);
+        const now = Date.now();
+        updateSyncConfig({ lastSyncedAt: now });
+        setServerOnline(true);
+        setSyncStatus('ok');
+        setSyncMessage(`Guardado en ${cleanEmail} (${finalBooks.length} títulos)`);
+        showToast(
+          remoteHasData
+            ? `Cuenta ${cleanEmail} sincronizada (${finalBooks.length} títulos)`
+            : `Cuenta ${cleanEmail} vinculada. Todo lo que hagas se guardará automáticamente.`
+        );
+        return true;
+      } catch (err) {
+        setSyncStatus('error');
+        setSyncMessage(err instanceof Error ? err.message : 'Error al conectar con la nube');
+        showToast('Tu correo quedó vinculado localmente; se sincronizará al conectar con el servidor');
+        updateProfile({ email: cleanEmail });
+        return false;
+      }
+    },
+    [applyRemotePayload, showToast, updateProfile, updateSyncConfig]
+  );
+
+  const logoutAccount = useCallback(async () => {
+    // Flush any pending changes to the user's cloud vault before clearing local device
+    const s = stateRef.current;
+    if (s.syncConfig.liveSync && (s.syncConfig.serverUrl.trim() || s.syncConfig.accountEmail)) {
+      try {
+        await syncFullState(
+          s.syncConfig,
+          {
+            deviceId: s.deviceId,
+            books: s.books,
+            bookmarks: s.bookmarks,
+            annotations: s.annotations,
+            notes: s.notes,
+            customBookmarkDesigns: s.customBookmarkDesigns,
+            customStationery: s.customStationery,
+            categories: s.categories,
+            collections: s.collections,
+            readerSettings: s.readerSettings,
+            theme: s.theme,
+            themeUpdatedAt: themeUpdatedAtRef.current,
+            profile: s.profile,
+            profileUpdatedAt: profileUpdatedAtRef.current,
+            lastActiveSession: localActiveSessionRef.current,
+            deletedBookIds: deletedIdsRef.current,
+            deletedBookmarkIds: deletedBookmarkIdsRef.current,
+            deletedAnnotationIds: deletedAnnotationIdsRef.current,
+            deletedNoteIds: deletedNoteIdsRef.current,
+            deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
+          },
+          true
+        );
+      } catch {
+        // ignore offline logout
+      }
+    }
+
+    await dbClearAllUserData();
+
+    const newDeviceId = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const freshSpaceId = `vault_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const freshSync: SyncConfig = {
+      ...DEFAULT_SYNC_CONFIG,
+      spaceId: freshSpaceId,
+      autoSync: false,
+      liveSync: false,
+    };
+
+    deletedIdsRef.current = [];
+    deletedBookmarkIdsRef.current = [];
+    deletedAnnotationIdsRef.current = [];
+    deletedNoteIdsRef.current = [];
+    deletedBookmarkDesignIdsRef.current = [];
+    joinedRoomCodesRef.current = [];
+    joinedShelfCodesRef.current = [];
+    themeUpdatedAtRef.current = 0;
+    profileUpdatedAtRef.current = 0;
+    localActiveSessionRef.current = null;
+
+    await Promise.all([
+      dbSetKV('deviceId', newDeviceId),
+      dbSetKV('seeded', true),
+      dbSetKV('syncConfig', freshSync),
+      dbSetKV('explicitLogout', true),
+    ]);
+
+    setActiveBook(null);
+    setEditingBook(null);
+    setBooks([]);
+    setBookmarks([]);
+    setAnnotations([]);
+    setNotes([]);
+    setCustomBookmarkDesigns([]);
+    setCustomStationery({ swatches: [], stickers: [], emojis: [] });
+    setCategories(DEFAULT_CATEGORIES);
+    setCollections(DEFAULT_COLLECTIONS);
+    setReaderSettings(DEFAULT_READER_SETTINGS);
+    setTheme(DEFAULT_THEME);
+    applyThemeCssVars(DEFAULT_THEME);
+    setProfile(DEFAULT_PROFILE);
+    setChatMessages(INITIAL_CHAT_MESSAGES);
+    setSharedRooms([]);
+    setSharedShelves([]);
+    setDeviceId(newDeviceId);
+    setSyncConfig(freshSync);
+    setSyncStatus('idle');
+    setSyncMessage('');
+    showToast('Sesión cerrada en este dispositivo. Tu copia sigue guardada en tu correo.');
+  }, [showToast]);
+
+  const exportBackupJson = useCallback(() => {
+    const s = stateRef.current;
+    const payload = {
+      komolibBackupVersion: 2,
+      exportedAt: Date.now(),
+      email: s.profile.email || s.syncConfig.accountEmail || '',
+      profile: s.profile,
+      theme: s.theme,
+      readerSettings: s.readerSettings,
+      categories: s.categories,
+      collections: s.collections,
+      customStationery: s.customStationery,
+      customBookmarkDesigns: s.customBookmarkDesigns,
+      books: s.books.filter((b) => !b.isDemo),
+      bookmarks: s.bookmarks,
+      annotations: s.annotations,
+      notes: s.notes,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const dateStr = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `komolib-backup-${s.profile.email || dateStr}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Copia de seguridad descargada (.json)');
+  }, [showToast]);
+
+  const importBackupJson = useCallback(
+    async (file: File): Promise<boolean> => {
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        if (!data || typeof data !== 'object') {
+          throw new Error('Formato de copia no válido');
+        }
+        const booksRecord: Record<string, BookItem> = {};
+        if (Array.isArray(data.books)) {
+          for (const b of data.books) {
+            if (b?.id && !b.isDemo) booksRecord[b.id] = b;
+          }
+        } else if (data.books && typeof data.books === 'object') {
+          for (const [k, b] of Object.entries(data.books)) {
+            if (b && typeof b === 'object' && !(b as BookItem).isDemo) {
+              booksRecord[k] = b as BookItem;
+            }
+          }
+        }
+        await applyRemotePayload(
+          {
+            updatedAt: Date.now(),
+            books: booksRecord,
+            bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks : [],
+            annotations: Array.isArray(data.annotations) ? data.annotations : [],
+            notes: Array.isArray(data.notes) ? data.notes : [],
+            customBookmarkDesigns: Array.isArray(data.customBookmarkDesigns)
+              ? data.customBookmarkDesigns
+              : [],
+            customStationery: data.customStationery || null,
+            categories: Array.isArray(data.categories) ? data.categories : null,
+            collections: Array.isArray(data.collections) ? data.collections : null,
+            readerSettings: data.readerSettings || null,
+            theme: data.theme || null,
+            themeUpdatedAt: Date.now(),
+            profile: data.profile || null,
+            profileUpdatedAt: Date.now(),
+          },
+          true
+        );
+        scheduleAutoSync(true);
+        showToast('Copia de seguridad restaurada correctamente');
+        return true;
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'No se pudo importar la copia de seguridad');
+        return false;
+      }
+    },
+    [applyRemotePayload, scheduleAutoSync, showToast]
   );
 
   // Shared Reading Rooms management
@@ -2211,18 +2661,35 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     async (book: BookItem, marksSelection?: ShareMarksSelection): Promise<SharedRoom | null> => {
       try {
         const s = stateRef.current;
-        const marks = collectSharedMarksForBook(book.id, marksSelection);
+        let readyBook = book;
+        if (book.hasLocalFile && !book.hasRemoteFile) {
+          const up: { ok: boolean; remoteFileName?: string; format?: BookItem['format'] } =
+            await uploadBookToServer(s.syncConfig, book, s.deviceId).catch(() => ({
+              ok: false,
+            }));
+          if (up.ok) {
+            readyBook = {
+              ...book,
+              hasRemoteFile: true,
+              remoteFileName: up.remoteFileName || book.remoteFileName,
+              format: up.format || book.format,
+            };
+            await dbPutBook(readyBook);
+            setBooks((prev) => prev.map((x) => (x.id === readyBook.id ? readyBook : x)));
+          }
+        }
+        const marks = collectSharedMarksForBook(readyBook.id, marksSelection);
         const room = await createSharedRoom(
           s.syncConfig,
-          book,
+          readyBook,
           {
             id: s.deviceId,
             name: s.profile.name,
             avatarEmoji: s.profile.avatarEmoji,
             avatarBg: s.profile.avatarBg,
-            progress: book.progress || 0,
-            currentPage: book.currentPage || 1,
-            readingStatus: book.readingStatus || 'reading',
+            progress: readyBook.progress || 0,
+            currentPage: readyBook.currentPage || 1,
+            readingStatus: readyBook.readingStatus || 'reading',
           },
           marks
         );
@@ -2712,20 +3179,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         liveConnected,
         serverAuthRequired,
         serverLanUrl,
-        serverPublicUrl,
-        tunnelUrl,
-        tunnelRunning,
-        tunnelAvailable,
         refreshServerHealth,
-        startTunnel,
-        stopTunnel,
-        savePublicUrlToServer,
         applyPairingLink,
         remoteActiveSession,
         dismissRemoteSession,
         syncStatus,
         syncMessage,
         triggerSync,
+        loginWithEmail,
+        logoutAccount,
+        exportBackupJson,
+        importBackupJson,
         sharedRooms,
         selectedRoomCode,
         setSelectedRoomCode,

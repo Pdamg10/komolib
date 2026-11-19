@@ -270,6 +270,7 @@ export interface ThemeConfig {
 
 export interface UserProfile {
   name: string;
+  email?: string;
   avatarEmoji: string;
   avatarBg: string;
   avatarImageUrl?: string;
@@ -281,6 +282,7 @@ export interface SyncConfig {
   serverUrl: string;
   publicUrl?: string;
   spaceId?: string; // Private per-user vault ID for isolated personal cloud/server sync
+  accountEmail?: string; // User email linked to cloud backup vault
   token: string;
   autoSync: boolean;
   liveSync?: boolean;

@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "dev:server": "node server/index.js",
-    "dev:tunnel": "node server/index.js --tunnel",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "cap:sync": "npm run build && npx cap sync android",

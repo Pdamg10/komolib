@@ -1,5 +1,5 @@
 import React, { useMemo, useRef } from 'react';
-import { ChevronLeft, ChevronRight, Grid, Plus, Rows3 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Cloud, Grid, Plus, Rows3 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import { BookCard } from './BookCard';
 
@@ -14,6 +14,7 @@ export const BookShelf: React.FC = () => {
     theme,
     updateTheme,
     setImportModalOpen,
+    setProfileModalOpen,
   } = useLibrary();
 
   const shelfRef = useRef<HTMLDivElement>(null);
@@ -118,13 +119,28 @@ export const BookShelf: React.FC = () => {
             gap: 10,
           }}
         >
-          <div style={{ fontSize: 15, fontWeight: 800 }}>No hay títulos en esta vista todavía</div>
-          <div style={{ fontSize: 12.5, color: 'var(--text-muted)', maxWidth: 420 }}>
-            Arrastra aquí tus archivos EPUB, PDF, CBZ, CBR, MOBI, FB2, DOCX, TXT, carpetas de manga/manhwa o audiolibros.
+          <div style={{ fontSize: 15, fontWeight: 800 }}>
+            {books.length === 0 ? 'Tu biblioteca está vacía' : 'No hay títulos en esta vista todavía'}
           </div>
-          <button className="coral-cta-btn" onClick={() => setImportModalOpen(true)}>
-            <Plus size={15} /> Importar archivos
-          </button>
+          <div style={{ fontSize: 12.5, color: 'var(--text-muted)', maxWidth: 460 }}>
+            {books.length === 0
+              ? 'Importa tus primeros libros (EPUB, PDF, CBZ, CBR, MOBI, FB2, DOCX, TXT, carpetas de manga/manhwa o audiolibros) o ingresa tu correo para restaurar tu cuenta y personalización desde la nube.'
+              : 'Arrastra aquí tus archivos o cambia el filtro de categoría/búsqueda.'}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+            <button className="coral-cta-btn" onClick={() => setImportModalOpen(true)}>
+              <Plus size={15} /> Importar archivos
+            </button>
+            {books.length === 0 && (
+              <button
+                className="pill-btn"
+                style={{ height: 36, padding: '0 14px', fontSize: 12, background: 'var(--card-bg)' }}
+                onClick={() => setProfileModalOpen(true)}
+              >
+                <Cloud size={14} /> Restaurar cuenta con mi correo
+              </button>
+            )}
+          </div>
         </div>
       ) : theme.viewMode === 'grid' ? (
         <div className="books-grid">

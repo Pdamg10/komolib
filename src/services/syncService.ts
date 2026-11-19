@@ -6,8 +6,11 @@ import type {
   BookmarkDesign,
   BookmarkItem,
   CategoryItem,
+  CollectionCard,
   ContentKind,
+  CustomStationeryKit,
   NoteItem,
+  ReaderSettings,
   SyncConfig,
   ThemeConfig,
   UserProfile,
@@ -24,14 +27,11 @@ export interface ServerHealth {
   roomsCount?: number;
   updatedAt: number;
   authRequired: boolean;
+  isOwnerNetwork?: boolean;
+  ownerSpaceId?: string;
   aiConfigured?: boolean;
   aiModel?: string;
   publicUrl?: string;
-  tunnelUrl?: string;
-  tunnelRunning?: boolean;
-  tunnelStarting?: boolean;
-  tunnelAvailable?: boolean;
-  tunnelError?: string;
   lanUrls?: string[];
   uploadUrls?: string[];
 }
@@ -63,7 +63,10 @@ export interface RemoteSyncPayload {
   annotations?: BookAnnotation[];
   notes: NoteItem[];
   customBookmarkDesigns?: BookmarkDesign[];
+  customStationery?: CustomStationeryKit | null;
   categories: CategoryItem[] | null;
+  collections?: CollectionCard[] | null;
+  readerSettings?: ReaderSettings | null;
   theme: ThemeConfig | null;
   themeUpdatedAt?: number;
   profile: UserProfile | null;
@@ -74,6 +77,29 @@ export interface RemoteSyncPayload {
   deletedAnnotationIds?: string[];
   deletedNoteIds?: string[];
   deletedBookmarkDesignIds?: string[];
+}
+
+/**
+ * Deterministically derives a private cloud vault ID (`acct_<hex>`) from an email + optional PIN
+ * using dual 32-bit FNV-1a/cyrb hashes so it works identically on HTTP LAN, HTTPS, localhost & APK.
+ */
+export function deriveEmailSpaceId(email: string, pin = ''): string {
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanPin = pin.trim();
+  const key = `komolib_vault_v1::${cleanEmail}::${cleanPin}`;
+  let h1 = 0xdeadbeef ^ key.length;
+  let h2 = 0x41c6ce57 ^ key.length;
+  for (let i = 0; i < key.length; i++) {
+    const ch = key.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  const hex1 = (h1 >>> 0).toString(16).padStart(8, '0');
+  const hex2 = (h2 >>> 0).toString(16).padStart(8, '0');
+  const safePrefix = cleanEmail.replace(/[^a-z0-9]/g, '').slice(0, 10) || 'user';
+  return `acct_${safePrefix}_${hex1}${hex2}`;
 }
 
 export function buildAuthHeaders(config: SyncConfig, isJson = true): HeadersInit {
@@ -103,8 +129,8 @@ export function resolveServerUrl(url: string): string {
     window.location.hostname !== '127.0.0.1' &&
     (window.location.protocol === 'http:' || window.location.protocol === 'https:')
   ) {
-    // When served over HTTPS, standard port (80/443 tunnel/VPS), or directly from the KomoLib server port,
-    // the API lives on the same origin (avoiding broken http://tunnel:4123 URLs!).
+    // When served over HTTPS, standard port (80/443), or directly from the KomoLib server port,
+    // the API lives on the same origin (avoiding broken http://localhost:4123 URLs!).
     const isStandardOrHttps =
       window.location.protocol === 'https:' ||
       window.location.port === '' ||
@@ -178,7 +204,7 @@ export function parsePairingInput(raw: string): ParsedPairingConfig | null {
 }
 
 export function buildStreamUrl(config: SyncConfig, path: string): string {
-  const base = resolveServerUrl(config.serverUrl);
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   if (!base) return '';
   const qs = new URLSearchParams();
   if (config.token.trim()) qs.set('token', config.token.trim());
@@ -192,58 +218,11 @@ export function buildStreamUrl(config: SyncConfig, path: string): string {
 }
 
 export async function checkServerHealth(config: SyncConfig): Promise<ServerHealth> {
-  const base = resolveServerUrl(config.serverUrl);
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const res = await fetch(`${base}/api/health`, {
     headers: buildAuthHeaders(config, false),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
-export async function startServerTunnel(
-  config: SyncConfig
-): Promise<{ ok: boolean; tunnelUrl: string; publicUrl: string; tunnelRunning: boolean }> {
-  const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/network/tunnel/start`, {
-    method: 'POST',
-    headers: buildAuthHeaders(config, true),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data?.error || `No se pudo iniciar el túnel (${res.status})`);
-  }
-  return res.json();
-}
-
-export async function stopServerTunnel(
-  config: SyncConfig
-): Promise<{ ok: boolean; tunnelUrl: string; publicUrl: string; tunnelRunning: boolean }> {
-  const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/network/tunnel/stop`, {
-    method: 'POST',
-    headers: buildAuthHeaders(config, true),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data?.error || `No se pudo detener el túnel (${res.status})`);
-  }
-  return res.json();
-}
-
-export async function updateServerPublicUrl(
-  config: SyncConfig,
-  publicUrl: string
-): Promise<{ ok: boolean; publicUrl: string }> {
-  const base = resolveServerUrl(config.serverUrl);
-  const res = await fetch(`${base}/api/network/public-url`, {
-    method: 'PUT',
-    headers: buildAuthHeaders(config, true),
-    body: JSON.stringify({ publicUrl }),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data?.error || `Error guardando URL pública (${res.status})`);
-  }
   return res.json();
 }
 
@@ -259,7 +238,9 @@ export async function sendAiChatViaServer(
       >
     >;
     notes: Array<{ bookTitle: string; text: string }>;
+    annotations?: Array<{ bookTitle: string; chapter?: string; quote: string; note?: string }>;
     activeBook?: Pick<BookItem, 'id' | 'title' | 'author' | 'progress'> | null;
+    profileName?: string;
   }
 ): Promise<AiChatResponse> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
@@ -370,7 +351,7 @@ export async function uploadBookToServer(
     };
   }
 
-  const base = resolveServerUrl(config.serverUrl);
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const form = new FormData();
   form.append('id', book.id);
   if (deviceId) form.append('deviceId', deviceId);
@@ -392,7 +373,7 @@ export async function uploadBookToServer(
 }
 
 export async function downloadBookFromServer(config: SyncConfig, book: BookItem): Promise<Blob> {
-  const base = resolveServerUrl(config.serverUrl);
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const res = await fetch(`${base}/api/books/${encodeURIComponent(book.id)}/file`, {
     headers: buildAuthHeaders(config, false),
   });
@@ -405,8 +386,8 @@ export async function downloadBookFromServer(config: SyncConfig, book: BookItem)
 }
 
 export async function deleteBookFromServer(config: SyncConfig, bookId: string): Promise<void> {
-  if (!config.serverUrl.trim()) return;
-  const base = resolveServerUrl(config.serverUrl);
+  if (!config.serverUrl.trim() && !config.accountEmail) return;
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   await fetch(`${base}/api/books/${encodeURIComponent(bookId)}`, {
     method: 'DELETE',
     headers: buildAuthHeaders(config, false),
@@ -414,7 +395,7 @@ export async function deleteBookFromServer(config: SyncConfig, bookId: string): 
 }
 
 export async function fetchRemoteSyncState(config: SyncConfig): Promise<RemoteSyncPayload> {
-  const base = resolveServerUrl(config.serverUrl);
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const res = await fetch(`${base}/api/sync/state`, {
     headers: buildAuthHeaders(config, false),
   });
@@ -431,7 +412,10 @@ export async function syncFullState(
     annotations?: BookAnnotation[];
     notes: NoteItem[];
     customBookmarkDesigns?: BookmarkDesign[];
+    customStationery?: CustomStationeryKit;
     categories: CategoryItem[];
+    collections?: CollectionCard[];
+    readerSettings?: ReaderSettings;
     theme: ThemeConfig;
     themeUpdatedAt?: number;
     profile: UserProfile;
@@ -443,13 +427,24 @@ export async function syncFullState(
     deletedNoteIds?: string[];
     deletedBookmarkDesignIds?: string[];
   },
-  uploadMissingFiles = true
+  uploadMissingFiles = true,
+  lightweight = false
 ): Promise<RemoteSyncPayload> {
-  const base = resolveServerUrl(config.serverUrl);
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const booksMap: Record<string, BookItem> = {};
   for (const b of localData.books) {
-    booksMap[b.id] = b;
+    if (!b.isDemo) {
+      booksMap[b.id] =
+        lightweight && b.hasRemoteFile && b.coverDataUrl
+          ? { ...b, coverDataUrl: '__KEEP__' }
+          : b;
+    }
   }
+
+  const themePayload =
+    lightweight && localData.theme?.customWallpaperUrl
+      ? { ...localData.theme, customWallpaperUrl: '__KEEP__' }
+      : localData.theme;
 
   const res = await fetch(`${base}/api/sync/state`, {
     method: 'PUT',
@@ -462,8 +457,11 @@ export async function syncFullState(
       annotations: localData.annotations || [],
       notes: localData.notes,
       customBookmarkDesigns: localData.customBookmarkDesigns || [],
+      customStationery: localData.customStationery || null,
       categories: localData.categories,
-      theme: localData.theme,
+      collections: localData.collections || null,
+      readerSettings: localData.readerSettings || null,
+      theme: themePayload,
       themeUpdatedAt: localData.themeUpdatedAt || 0,
       profile: localData.profile,
       profileUpdatedAt: localData.profileUpdatedAt || 0,

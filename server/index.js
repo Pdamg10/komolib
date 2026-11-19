@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
-import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,150 +38,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 let runtimePublicUrl = (process.env.PUBLIC_URL || '').trim().replace(/\/+$/, '');
 
-// Managed Cloudflare Quick Tunnel state (optional, for instant Internet sharing)
-let tunnelProc = null;
-let activeTunnelUrl = '';
-let tunnelStarting = false;
-let tunnelError = '';
-
-function findCloudflaredBinary() {
-  const candidates = [
-    process.env.CLOUDFLARED_PATH || '',
-    '/tmp/cloudflared',
-    '/usr/local/bin/cloudflared',
-    '/usr/bin/cloudflared',
-    path.join(os.homedir(), '.local', 'bin', 'cloudflared'),
-  ].filter(Boolean);
-
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) {
-        fs.accessSync(c, fs.constants.X_OK);
-        return c;
-      }
-    } catch {
-      // keep searching
-    }
-  }
-
-  try {
-    const cmd = process.platform === 'win32' ? 'where' : 'which';
-    const res = spawnSync(cmd, ['cloudflared'], { encoding: 'utf8', timeout: 2000 });
-    if (res.status === 0 && res.stdout) {
-      const first = res.stdout.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-      if (first) return first;
-    }
-  } catch {
-    // ignore
-  }
-  return '';
-}
-
-function stopQuickTunnel() {
-  if (tunnelProc) {
-    try {
-      tunnelProc.kill('SIGTERM');
-    } catch {
-      // ignore
-    }
-    tunnelProc = null;
-  }
-  activeTunnelUrl = '';
-  tunnelStarting = false;
-}
-
-function startQuickTunnel() {
-  return new Promise((resolve, reject) => {
-    if (activeTunnelUrl && tunnelProc && !tunnelProc.killed) {
-      resolve(activeTunnelUrl);
-      return;
-    }
-    const bin = findCloudflaredBinary();
-    if (!bin) {
-      reject(
-        new Error(
-          'cloudflared no está instalado. Instálalo o ejecuta tu propio túnel (Cloudflare, ngrok, Tailscale, VPS) y pega la URL pública.'
-        )
-      );
-      return;
-    }
-
-    stopQuickTunnel();
-    tunnelStarting = true;
-    tunnelError = '';
-
-    const child = spawn(
-      bin,
-      ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${PORT}`],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    tunnelProc = child;
-
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        tunnelStarting = false;
-        tunnelError = 'Tiempo de espera agotado al crear el túnel Cloudflare';
-        stopQuickTunnel();
-        reject(new Error(tunnelError));
-      }
-    }, 22000);
-
-    const handleChunk = (buf) => {
-      const text = buf.toString('utf8');
-      const match = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
-      if (match && !settled) {
-        settled = true;
-        clearTimeout(timeout);
-        activeTunnelUrl = match[0].replace(/\/+$/, '');
-        tunnelStarting = false;
-        tunnelError = '';
-        console.log(`🌐 Túnel Internet KomoLib activo: ${activeTunnelUrl}`);
-        resolve(activeTunnelUrl);
-      }
-    };
-
-    child.stdout?.on('data', handleChunk);
-    child.stderr?.on('data', handleChunk);
-    child.on('error', (err) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        tunnelStarting = false;
-        tunnelError = err.message;
-        tunnelProc = null;
-        reject(err);
-      }
-    });
-    child.on('exit', () => {
-      if (tunnelProc === child) {
-        tunnelProc = null;
-        activeTunnelUrl = '';
-        tunnelStarting = false;
-      }
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        tunnelError = 'El proceso de cloudflared se cerró inesperadamente';
-        reject(new Error(tunnelError));
-      }
-    });
-  });
-}
-
-process.on('exit', stopQuickTunnel);
-process.on('SIGINT', () => {
-  stopQuickTunnel();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  stopQuickTunnel();
-  process.exit(0);
-});
-
 function getEffectivePublicUrl(req) {
-  if (activeTunnelUrl) return activeTunnelUrl;
   if (runtimePublicUrl) return runtimePublicUrl;
   if (req) {
     const fwdHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
@@ -194,6 +50,20 @@ function getEffectivePublicUrl(req) {
   return '';
 }
 
+let hostPublicIp = '';
+async function refreshHostPublicIp() {
+  try {
+    const res = await fetch('https://api.ipify.org?format=json');
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.ip) hostPublicIp = String(data.ip).trim();
+    }
+  } catch {
+    // ignore offline
+  }
+}
+refreshHostPublicIp();
+
 function isLocalOrLanRequest(req) {
   const ip = String(req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
   return (
@@ -203,6 +73,14 @@ function isLocalOrLanRequest(req) {
     ip.startsWith('10.') ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
   );
+}
+
+function isOwnerNetworkRequest(req) {
+  const cfIp = String(req?.headers?.['cf-connecting-ip'] || '').trim();
+  if (cfIp) {
+    return Boolean(hostPublicIp && cfIp === hostPublicIp);
+  }
+  return isLocalOrLanRequest(req);
 }
 
 const STORAGE_DIR = process.env.KOMOLIB_STORAGE_DIR
@@ -220,9 +98,22 @@ fs.mkdirSync(SPACES_DIR, { recursive: true });
 fs.mkdirSync(FILES_DIR, { recursive: true });
 fs.mkdirSync(INBOX_DIR, { recursive: true });
 
+const OWNER_PRIMARY_SPACE = 'vault_mwmcjg7d_1au9m1';
+const OWNER_SPACE_ALIASES = new Set([
+  'default',
+  'vault_mwmcjg7d_1au9m1',
+  'acct_phamelamor_2765b2076c8c9d03',
+  'acct_sakura_84ba1a81c0a341e1',
+]);
+
 function normalizeSpaceId(raw) {
   const clean = String(raw || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
-  return clean.length >= 4 ? clean : 'default';
+  const id = clean.length >= 4 ? clean : 'default';
+  const ownerVaultFile = path.join(SPACES_DIR, OWNER_PRIMARY_SPACE, 'state.json');
+  if (OWNER_SPACE_ALIASES.has(id) && fs.existsSync(ownerVaultFile)) {
+    return OWNER_PRIMARY_SPACE;
+  }
+  return id;
 }
 
 function getRequestSpaceId(req) {
@@ -266,7 +157,10 @@ function emptyState() {
     annotations: [],
     notes: [],
     customBookmarkDesigns: [],
+    customStationery: null,
     categories: null,
+    collections: null,
+    readerSettings: null,
     theme: null,
     profile: null,
     deletedBookIds: [],
@@ -540,14 +434,13 @@ app.get('/api/health', (req, res) => {
     roomsCount: Object.keys(rooms).length,
     updatedAt: state.updatedAt || 0,
     authRequired: Boolean(AUTH_TOKEN),
+    isOwnerNetwork: isOwnerNetworkRequest(req),
+    ownerSpaceId: fs.existsSync(path.join(SPACES_DIR, OWNER_PRIMARY_SPACE, 'state.json'))
+      ? OWNER_PRIMARY_SPACE
+      : 'default',
     aiConfigured: Boolean(GEMINI_API_KEY),
     aiModel: GEMINI_MODEL,
     publicUrl,
-    tunnelUrl: activeTunnelUrl,
-    tunnelRunning: Boolean(tunnelProc && !tunnelProc.killed && activeTunnelUrl),
-    tunnelStarting,
-    tunnelAvailable: Boolean(findCloudflaredBinary()),
-    tunnelError,
     lanUrls,
     uploadUrls,
   });
@@ -560,7 +453,15 @@ app.post('/api/ai/chat', async (req, res) => {
     return res.status(503).json({ error: 'GEMINI_API_KEY no configurada en .env' });
   }
 
-  const { message, history = [], books = [], notes = [], activeBook = null } = req.body || {};
+  const {
+    message,
+    history = [],
+    books = [],
+    notes = [],
+    annotations = [],
+    activeBook = null,
+    profileName = '',
+  } = req.body || {};
   const userMessage = typeof message === 'string' ? message.trim() : '';
   if (!userMessage) {
     return res.status(400).json({ error: 'Mensaje vacío' });
@@ -576,7 +477,7 @@ app.post('/api/ai/chat', async (req, res) => {
           return `- "${b.title}" de ${b.author} (${b.kind}, ${b.format}, progreso ${b.progress || 0}%${statusTxt}${ratingTxt}${reviewTxt})`;
         })
         .join('\n')
-    : 'La biblioteca está vacía todavía.';
+    : 'La biblioteca está vacía todavía (0 libros).';
 
   const notesSummary = Array.isArray(notes) && notes.length
     ? notes
@@ -585,16 +486,32 @@ app.post('/api/ai/chat', async (req, res) => {
         .join('\n')
     : 'Sin notas recientes.';
 
+  const annotationsSummary = Array.isArray(annotations) && annotations.length
+    ? annotations
+        .slice(0, 15)
+        .map(
+          (a) =>
+            `- [${a.bookTitle || 'Libro'}${a.chapter ? ` · ${a.chapter}` : ''}] "${String(a.quote || '').slice(0, 140)}"${
+              a.note ? ` (Nota: ${String(a.note).slice(0, 80)})` : ''
+            }`
+        )
+        .join('\n')
+    : 'Sin frases resaltadas aún.';
+
   const activeInfo = activeBook
     ? `\nLibro abierto actualmente: "${activeBook.title}" de ${activeBook.author} (${activeBook.progress || 0}%).`
     : '';
+  const readerInfo = profileName ? `\nNombre del lector: ${String(profileName).slice(0, 40)}.` : '';
 
-  const systemPrompt = `Eres el asistente literario inteligente de KomoLib. Responde siempre en español de forma cálida, útil y concisa.
-Puedes recomendar lecturas, resumir ideas, sugerir libros de la estantería del usuario, ayudar con metas de lectura, reseñas o responder preguntas sobre libros, mangas y manhwas.
+  const systemPrompt = `Eres el asistente literario inteligente de KomoLib. Responde siempre en español de forma cálida, útil y concisa.${readerInfo}
+Puedes recomendar lecturas, resumir ideas, analizar citas o post-its que el usuario haya marcado, sugerir libros de su estantería, ayudar con metas de lectura, reseñas o responder preguntas sobre libros, mangas y manhwas.
 No inventes títulos que no existan si te preguntan específicamente qué hay en su biblioteca.${activeInfo}
 
 Biblioteca actual del usuario:
 ${catalogSummary}
+
+Frases marcadas / Post-its del usuario:
+${annotationsSummary}
 
 Notas recientes del usuario:
 ${notesSummary}`;
@@ -679,59 +596,11 @@ app.get('/api/network-info', (req, res) => {
     lanIps,
     lanUrls,
     publicUrl,
-    tunnelUrl: activeTunnelUrl,
-    tunnelRunning: Boolean(tunnelProc && !tunnelProc.killed && activeTunnelUrl),
-    tunnelStarting,
-    tunnelAvailable: Boolean(findCloudflaredBinary()),
     uploadUrls: [
       ...(publicUrl ? [`${publicUrl}/upload`] : []),
       ...lanUrls.map((u) => `${u}/upload`),
     ],
     authRequired: Boolean(AUTH_TOKEN),
-  });
-});
-
-app.put('/api/network/public-url', (req, res) => {
-  if (!isLocalOrLanRequest(req) && !AUTH_TOKEN) {
-    return res.status(403).json({ error: 'Solo editable desde la red local o con token' });
-  }
-  const raw = typeof req.body?.publicUrl === 'string' ? req.body.publicUrl.trim().replace(/\/+$/, '') : '';
-  if (raw && !/^https?:\/\/.+/i.test(raw)) {
-    return res.status(400).json({ error: 'La URL pública debe empezar con http:// o https://' });
-  }
-  runtimePublicUrl = raw;
-  res.json({ ok: true, publicUrl: getEffectivePublicUrl(req) });
-});
-
-app.post('/api/network/tunnel/start', async (req, res) => {
-  if (!isLocalOrLanRequest(req)) {
-    return res.status(403).json({ error: 'El túnel solo puede iniciarse desde tu red local' });
-  }
-  try {
-    const url = await startQuickTunnel();
-    res.json({
-      ok: true,
-      tunnelUrl: url,
-      publicUrl: getEffectivePublicUrl(req),
-      tunnelRunning: true,
-    });
-  } catch (err) {
-    res.status(503).json({
-      error: err instanceof Error ? err.message : 'No se pudo iniciar el túnel de Internet',
-    });
-  }
-});
-
-app.post('/api/network/tunnel/stop', (req, res) => {
-  if (!isLocalOrLanRequest(req)) {
-    return res.status(403).json({ error: 'El túnel solo puede detenerse desde tu red local' });
-  }
-  stopQuickTunnel();
-  res.json({
-    ok: true,
-    tunnelUrl: '',
-    publicUrl: getEffectivePublicUrl(req),
-    tunnelRunning: false,
   });
 });
 
@@ -784,18 +653,27 @@ app.put('/api/sync/state', (req, res) => {
   const deletedNotesSet = new Set(deletedNoteIds);
   const deletedBookmarkDesignsSet = new Set(deletedBookmarkDesignIds);
 
-  const mergedBooks = { ...(current.books || {}) };
+  const mergedBooks = {};
+  for (const [id, book] of Object.entries(current.books || {})) {
+    if (!book?.isDemo) mergedBooks[id] = book;
+  }
   if (incoming.books && typeof incoming.books === 'object') {
     for (const [id, book] of Object.entries(incoming.books)) {
+      if (!book || book.isDemo) continue;
       if (incomingDeletedBooksSet.has(id)) continue;
       if (deletedBooksSet.has(id) && !current.books?.[id]) {
         continue;
       }
       const prev = mergedBooks[id];
       if (!prev || (book.updatedAt || 0) >= (prev.updatedAt || 0)) {
+        const resolvedCover =
+          book.coverDataUrl === '__KEEP__'
+            ? prev?.coverDataUrl || ''
+            : book.coverDataUrl || prev?.coverDataUrl || '';
         mergedBooks[id] = {
           ...prev,
           ...book,
+          coverDataUrl: resolvedCover,
           hasRemoteFile: prev?.hasRemoteFile || book.hasRemoteFile || false,
           remoteFileName: prev?.remoteFileName || book.remoteFileName,
         };
@@ -840,6 +718,13 @@ app.put('/api/sync/state', (req, res) => {
   const incomingThemeTs = Number(incoming.themeUpdatedAt || 0);
   const currentThemeTs = Number(current.themeUpdatedAt || 0);
   const useIncomingTheme = incoming.theme && (!current.theme || incomingThemeTs >= currentThemeTs);
+  const resolvedIncomingTheme =
+    incoming.theme && incoming.theme.customWallpaperUrl === '__KEEP__'
+      ? {
+          ...incoming.theme,
+          customWallpaperUrl: current.theme?.customWallpaperUrl || '',
+        }
+      : incoming.theme;
 
   const incomingProfileTs = Number(incoming.profileUpdatedAt || 0);
   const currentProfileTs = Number(current.profileUpdatedAt || 0);
@@ -865,8 +750,11 @@ app.put('/api/sync/state', (req, res) => {
           deletedBookmarkDesignsSet
         )
       : (current.customBookmarkDesigns || []).filter((x) => !deletedBookmarkDesignsSet.has(x.id)),
+    customStationery: incoming.customStationery || current.customStationery || null,
     categories: incoming.categories || current.categories,
-    theme: useIncomingTheme ? incoming.theme : current.theme,
+    collections: incoming.collections || current.collections || null,
+    readerSettings: incoming.readerSettings || current.readerSettings || null,
+    theme: useIncomingTheme ? resolvedIncomingTheme : current.theme,
     themeUpdatedAt: useIncomingTheme ? incomingThemeTs || now : currentThemeTs,
     profile: useIncomingProfile ? incoming.profile : current.profile,
     profileUpdatedAt: useIncomingProfile ? incomingProfileTs || now : currentProfileTs,
@@ -939,7 +827,8 @@ app.post('/api/rooms', (req, res) => {
     return res.status(400).json({ error: 'Faltan los datos del libro para crear la sala' });
   }
   const rooms = readRooms();
-  const state = readState(getRequestSpaceId(req));
+  const hostSpaceId = getRequestSpaceId(req);
+  const state = readState(hostSpaceId);
   const storedBook = state.books?.[book.id];
   const code = generateRoomCode(rooms);
   const now = Date.now();
@@ -947,6 +836,7 @@ app.post('/api/rooms', (req, res) => {
   const pId = String(participant?.id || `user_${now}`).slice(0, 64);
   const room = {
     code,
+    hostSpaceId,
     bookId: book.id,
     bookMeta: {
       id: book.id,
@@ -1137,8 +1027,9 @@ app.get('/api/rooms/:code/file', (req, res) => {
   if (!room) {
     return res.status(404).json({ error: 'Sala no encontrada' });
   }
-  const state = readState();
-  const stateBook = state.books?.[room.bookId];
+  const hostState = room.hostSpaceId ? readState(room.hostSpaceId) : null;
+  const defaultState = readState();
+  const stateBook = hostState?.books?.[room.bookId] || defaultState.books?.[room.bookId];
   const remoteFileName = room.bookMeta?.remoteFileName || stateBook?.remoteFileName;
   if (!remoteFileName) {
     return res.status(404).json({ error: 'Archivo del libro aún no disponible en el servidor' });
@@ -1446,12 +1337,19 @@ app.get('/api/books/:id/file', (req, res) => {
   const spaceId = getRequestSpaceId(req);
   const id = req.params.id.replace(/[^a-zA-Z0-9_-]/g, '');
   const state = readState(spaceId);
-  const entry = state.books?.[id];
+  const entry = state.books?.[id] || readState('default').books?.[id];
   if (!entry || !entry.remoteFileName) {
     return res.status(404).json({ error: 'Archivo no encontrado en el servidor' });
   }
-  const filePath = path.join(FILES_DIR, path.basename(entry.remoteFileName));
-  if (!fs.existsSync(filePath)) {
+  const baseName = path.basename(entry.remoteFileName);
+  const unprefixed = baseName.includes('__') ? baseName.split('__').slice(1).join('__') : baseName;
+  const candidates = [
+    path.join(FILES_DIR, baseName),
+    path.join(FILES_DIR, unprefixed),
+    path.join(FILES_DIR, `${id}.${entry.format || 'epub'}`),
+  ];
+  const filePath = candidates.find((p) => fs.existsSync(p));
+  if (!filePath) {
     return res.status(404).json({ error: 'Archivo ausente en disco' });
   }
   res.sendFile(filePath);
@@ -1822,22 +1720,62 @@ app.get(['/upload', '/send'], (_req, res) => {
 });
 
 // Return JSON 404 for unknown API routes instead of SPA HTML
-app.all('/api/{*splat}', (_req, res) => {
+app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Endpoint de API no encontrado' });
 });
 
-// Serve built web app if dist/ exists
+// Serve built web app if dist/ exists (with stale-asset hash fallback so cached mobile browsers never hit 404!)
 const DIST_DIR = path.join(__dirname, '..', 'dist');
 if (fs.existsSync(DIST_DIR)) {
-  app.use(express.static(DIST_DIR));
-  app.get('/{*splat}', (_req, res) => {
-    res.sendFile(path.join(DIST_DIR, 'index.html'));
+  app.use(
+    express.static(DIST_DIR, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('index.html')) {
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        }
+      },
+    })
+  );
+
+  // If a device has a cached index.html referencing an older Vite bundle hash (/assets/index-OLD.js or .css),
+  // automatically serve the latest built bundle instead of returning 404!
+  app.use('/assets', (req, res, next) => {
+    const reqBase = path.basename(req.path || '');
+    const assetsDir = path.join(DIST_DIR, 'assets');
+    if (!fs.existsSync(assetsDir)) return next();
+    const isMainJs = /^index-[A-Za-z0-9_-]+\.js$/.test(reqBase);
+    const isMainCss = /^index-[A-Za-z0-9_-]+\.css$/.test(reqBase);
+    if (isMainJs || isMainCss) {
+      const ext = isMainJs ? '.js' : '.css';
+      const files = fs.readdirSync(assetsDir);
+      const match = files.find(
+        (f) => f.startsWith('index-') && f.endsWith(ext) && !f.includes('.esm-')
+      );
+      if (match) {
+        res.setHeader('Cache-Control', 'no-cache');
+        return res.sendFile(path.join(assetsDir, match));
+      }
+    }
+    return next();
+  });
+
+  // Universal SPA fallback for all GET/HEAD routes (invite links, paths, query strings)
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    const indexFile = path.join(DIST_DIR, 'index.html');
+    if (!fs.existsSync(indexFile)) return next();
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.sendFile(indexFile);
   });
 }
 
-const AUTO_TUNNEL =
-  process.argv.includes('--tunnel') ||
-  /^(1|true|yes)$/i.test(String(process.env.AUTO_TUNNEL || ''));
+// Gracefully ignore client-aborted uploads/syncs without crashing or printing noisy stack traces
+app.use((err, _req, res, next) => {
+  if (err && (err.type === 'request.aborted' || err.code === 'ECONNABORTED')) {
+    return res.status(499).end();
+  }
+  return next(err);
+});
 
 app.listen(PORT, '0.0.0.0', () => {
   const lanIps = getLanIps();
@@ -1854,10 +1792,14 @@ app.listen(PORT, '0.0.0.0', () => {
       ? `✨ Asistente IA Gemini activo (${GEMINI_MODEL})`
       : 'ℹ️  Asistente IA sin GEMINI_API_KEY en .env'
   );
-  if (AUTO_TUNNEL) {
-    console.log('🌐 Iniciando túnel de Internet automático (Cloudflare Quick Tunnel)...');
-    startQuickTunnel().catch((err) => {
-      console.warn(`⚠️  No se pudo iniciar el túnel automático: ${err.message}`);
-    });
-  }
 });
+
+// Also listen on port 3000 when running the primary server (4123) so http://localhost:3000 works seamlessly!
+if (Number(PORT) === 4123) {
+  const mirrorServer = app.listen(3000, '0.0.0.0', () => {
+    console.log('📚 KomoLib también disponible en http://localhost:3000');
+  });
+  mirrorServer.on('error', () => {
+    // ignore if port 3000 is already in use
+  });
+}

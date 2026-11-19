@@ -182,6 +182,23 @@ export async function dbSetKV<T>(key: string, value: T): Promise<void> {
   await db.put('kv', value, key);
 }
 
+export async function dbClearAllUserData(): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(
+    ['books', 'files', 'bookmarks', 'annotations', 'notes', 'kv'],
+    'readwrite'
+  );
+  await Promise.all([
+    tx.objectStore('books').clear(),
+    tx.objectStore('files').clear(),
+    tx.objectStore('bookmarks').clear(),
+    tx.objectStore('annotations').clear(),
+    tx.objectStore('notes').clear(),
+    tx.objectStore('kv').clear(),
+  ]);
+  await tx.done;
+}
+
 export type PersistedKvMap = {
   theme: ThemeConfig;
   categories: CategoryItem[];
