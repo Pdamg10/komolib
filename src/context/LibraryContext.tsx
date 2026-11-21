@@ -427,7 +427,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const toastTimerRef = useRef<number | null>(null);
   const themeUpdatedAtRef = useRef<number>(0);
   const profileUpdatedAtRef = useRef<number>(0);
-  const wallpaperDirtyRef = useRef<boolean>(false);
+  const lastSyncedWallpaperRef = useRef<string>('');
+  const lastResumeSyncAtRef = useRef<number>(0);
   const localActiveSessionRef = useRef<ActiveReadingSession | null>(null);
   const suppressAutoSyncRef = useRef<boolean>(false);
   const autoSyncTimerRef = useRef<number | null>(null);
@@ -1159,6 +1160,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setReaderSettings(mergedReader);
           await dbSetKV('readerSettings', mergedReader);
         }
+        if (merged.theme && merged.theme.customWallpaperUrl !== '__KEEP__') {
+          lastSyncedWallpaperRef.current = merged.theme.customWallpaperUrl || '';
+        }
         if (
           merged.theme &&
           (forceRestore ||
@@ -1226,7 +1230,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         try {
           const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
           const pushProfile = profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile);
-          const keepWallpaper = !wallpaperDirtyRef.current;
+          const keepWallpaper = Boolean(
+            s.theme.customWallpaperUrl &&
+              s.theme.customWallpaperUrl === lastSyncedWallpaperRef.current
+          );
 
           const merged = await syncFullState(
             s.syncConfig,
@@ -1256,9 +1263,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             true,
             keepWallpaper
           );
-          if (!keepWallpaper) {
-            wallpaperDirtyRef.current = false;
-          }
 
           const sentBookSet = new Set(sentBooks);
           const sentBmSet = new Set(sentBookmarks);
@@ -1308,9 +1312,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     (patch: Partial<ThemeConfig>) => {
       const ts = Date.now();
       themeUpdatedAtRef.current = ts;
-      if ('customWallpaperUrl' in patch) {
-        wallpaperDirtyRef.current = true;
-      }
       dbSetKV('themeUpdatedAt', ts).catch(console.error);
       setTheme((prev) => {
         const next = { ...prev, ...patch };
@@ -1332,7 +1333,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const resetTheme = useCallback(() => {
     const ts = Date.now();
     themeUpdatedAtRef.current = ts;
-    wallpaperDirtyRef.current = true;
     dbSetKV('themeUpdatedAt', ts).catch(console.error);
     setTheme(DEFAULT_THEME);
     dbSetKV('theme', DEFAULT_THEME).catch(console.error);
@@ -2198,7 +2198,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           false,
           false
         );
-        wallpaperDirtyRef.current = false;
 
         const sentBookSet = new Set(sentBooks);
         const sentBmSet = new Set(sentBookmarks);
@@ -2387,7 +2386,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           false,
           false
         );
-        wallpaperDirtyRef.current = false;
 
         const finalBooks = await applyRemotePayload(merged, remoteHasData && !localThemeCustom);
         const now = Date.now();
@@ -2726,9 +2724,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     );
 
-    // Mobile APK / Tab resume & network reconnect recovery
+    // Mobile APK / Tab resume & network reconnect recovery (throttled so file pickers don't race uploads)
     const handleResume = () => {
       if (document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastResumeSyncAtRef.current < 8000) return;
+      lastResumeSyncAtRef.current = now;
       refreshServerHealth();
       triggerSync(true).catch(() => undefined);
       refreshSharedRooms();

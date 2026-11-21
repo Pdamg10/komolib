@@ -79,12 +79,54 @@ export const StudioModal: React.FC = () => {
     e.target.value = '';
   };
 
-  const handleWallpaperUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const compressWallpaperImage = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('No se pudo leer la imagen'));
+      reader.onload = () => {
+        const rawUrl = String(reader.result || '');
+        if (!rawUrl) {
+          resolve('');
+          return;
+        }
+        const img = new window.Image();
+        img.onerror = () => resolve(rawUrl);
+        img.onload = () => {
+          const maxSide = 1920;
+          const scale = Math.min(1, maxSide / Math.max(img.width || 1, img.height || 1));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(rawUrl);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          try {
+            const webp = canvas.toDataURL('image/webp', 0.82);
+            if (webp.startsWith('data:image/webp')) {
+              resolve(webp);
+              return;
+            }
+          } catch {
+            // fallback to jpeg
+          }
+          resolve(canvas.toDataURL('image/jpeg', 0.82));
+        };
+        img.src = rawUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+
+  const handleWallpaperUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = String(reader.result || '');
+    try {
+      const dataUrl = await compressWallpaperImage(file);
       if (!dataUrl) return;
       const adaptedPalette = await extractWallpaperTheme(dataUrl);
       updateTheme({
@@ -92,9 +134,9 @@ export const StudioModal: React.FC = () => {
         customWallpaperUrl: dataUrl,
       });
       showToast('Fondo aplicado y colores adaptados automáticamente');
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    } catch {
+      showToast('No se pudo procesar la imagen de fondo');
+    }
   };
 
   const handleReAdaptWallpaper = async () => {
