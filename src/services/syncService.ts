@@ -529,9 +529,9 @@ export async function syncFullState(
     categories: CategoryItem[];
     collections?: CollectionCard[];
     readerSettings?: ReaderSettings;
-    theme: ThemeConfig;
+    theme: ThemeConfig | null;
     themeUpdatedAt?: number;
-    profile: UserProfile;
+    profile: UserProfile | null;
     profileUpdatedAt?: number;
     lastActiveSession?: ActiveReadingSession | null;
     deletedBookIds?: string[];
@@ -541,7 +541,8 @@ export async function syncFullState(
     deletedBookmarkDesignIds?: string[];
   },
   uploadMissingFiles = true,
-  lightweight = false
+  lightweight = false,
+  keepWallpaper = lightweight
 ): Promise<RemoteSyncPayload> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const booksMap: Record<string, BookItem> = {};
@@ -555,7 +556,7 @@ export async function syncFullState(
   }
 
   const themePayload =
-    lightweight && localData.theme?.customWallpaperUrl
+    localData.theme && keepWallpaper && localData.theme.customWallpaperUrl
       ? { ...localData.theme, customWallpaperUrl: '__KEEP__' }
       : localData.theme;
 

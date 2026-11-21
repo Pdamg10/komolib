@@ -274,6 +274,42 @@ function getContrastColor(bgHex: string): string {
   return hexToLuminance(bgHex) > 0.45 ? '#231f1c' : '#ffffff';
 }
 
+function isThemeCustomized(t: ThemeConfig | null | undefined): boolean {
+  if (!t) return false;
+  return (
+    t.presetId !== DEFAULT_THEME.presetId ||
+    t.appName !== DEFAULT_THEME.appName ||
+    t.outerBg !== DEFAULT_THEME.outerBg ||
+    t.shellBg !== DEFAULT_THEME.shellBg ||
+    t.sidebarBg !== DEFAULT_THEME.sidebarBg ||
+    t.panelBg !== DEFAULT_THEME.panelBg ||
+    t.cardBg !== DEFAULT_THEME.cardBg ||
+    t.accentPrimary !== DEFAULT_THEME.accentPrimary ||
+    t.accentSecondary !== DEFAULT_THEME.accentSecondary ||
+    t.fontFamily !== DEFAULT_THEME.fontFamily ||
+    Boolean(t.customWallpaperUrl) ||
+    t.bannerTitle !== DEFAULT_THEME.bannerTitle ||
+    t.bannerSubtitle !== DEFAULT_THEME.bannerSubtitle ||
+    t.viewMode !== DEFAULT_THEME.viewMode ||
+    t.compactSidebar !== DEFAULT_THEME.compactSidebar ||
+    t.showRightPanel !== DEFAULT_THEME.showRightPanel ||
+    t.showBanner !== DEFAULT_THEME.showBanner ||
+    t.showCategories !== DEFAULT_THEME.showCategories
+  );
+}
+
+function isProfileCustomized(p: UserProfile | null | undefined): boolean {
+  if (!p) return false;
+  return (
+    (Boolean(p.name?.trim()) && p.name.trim() !== DEFAULT_PROFILE.name) ||
+    Boolean(p.avatarImageUrl) ||
+    p.avatarEmoji !== DEFAULT_PROFILE.avatarEmoji ||
+    p.avatarBg !== DEFAULT_PROFILE.avatarBg ||
+    (p.booksGoalPerYear !== undefined && p.booksGoalPerYear !== DEFAULT_PROFILE.booksGoalPerYear) ||
+    (p.pagesGoalPerYear !== undefined && p.pagesGoalPerYear !== DEFAULT_PROFILE.pagesGoalPerYear)
+  );
+}
+
 function applyThemeCssVars(t: ThemeConfig) {
   const root = document.documentElement;
   const isDark = hexToLuminance(t.shellBg) < 0.28;
@@ -391,6 +427,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const toastTimerRef = useRef<number | null>(null);
   const themeUpdatedAtRef = useRef<number>(0);
   const profileUpdatedAtRef = useRef<number>(0);
+  const wallpaperDirtyRef = useRef<boolean>(false);
   const localActiveSessionRef = useRef<ActiveReadingSession | null>(null);
   const suppressAutoSyncRef = useRef<boolean>(false);
   const autoSyncTimerRef = useRef<number | null>(null);
@@ -510,6 +547,26 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       if (typeof savedThemeTs === 'number') themeUpdatedAtRef.current = savedThemeTs;
       if (typeof savedProfileTs === 'number') profileUpdatedAtRef.current = savedProfileTs;
+
+      const effectiveStartupTheme = { ...DEFAULT_THEME, ...(savedTheme || {}) };
+      if (isThemeCustomized(effectiveStartupTheme)) {
+        if (!themeUpdatedAtRef.current) {
+          themeUpdatedAtRef.current = Date.now();
+          await dbSetKV('themeUpdatedAt', themeUpdatedAtRef.current);
+        }
+      } else {
+        themeUpdatedAtRef.current = 0;
+      }
+
+      const effectiveStartupProfile = { ...DEFAULT_PROFILE, ...(savedProfile || {}) };
+      if (isProfileCustomized(effectiveStartupProfile)) {
+        if (!profileUpdatedAtRef.current) {
+          profileUpdatedAtRef.current = Date.now();
+          await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
+        }
+      } else {
+        profileUpdatedAtRef.current = 0;
+      }
 
       if (savedPendingTombstones) {
         if (Array.isArray(savedPendingTombstones.books)) {
@@ -1106,11 +1163,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           merged.theme &&
           (forceRestore ||
             !themeUpdatedAtRef.current ||
+            !isThemeCustomized(current.theme) ||
             (merged.themeUpdatedAt || 0) >= themeUpdatedAtRef.current)
         ) {
-          themeUpdatedAtRef.current = merged.themeUpdatedAt || Date.now();
+          const nextThemeTs = merged.themeUpdatedAt || (isThemeCustomized(merged.theme) ? themeUpdatedAtRef.current : 0);
+          themeUpdatedAtRef.current = nextThemeTs;
           const mergedTheme = { ...DEFAULT_THEME, ...merged.theme };
           setTheme(mergedTheme);
+          applyThemeCssVars(mergedTheme);
           await dbSetKV('theme', mergedTheme);
           await dbSetKV('themeUpdatedAt', themeUpdatedAtRef.current);
         }
@@ -1118,9 +1178,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           merged.profile &&
           (forceRestore ||
             !profileUpdatedAtRef.current ||
+            !isProfileCustomized(current.profile) ||
             (merged.profileUpdatedAt || 0) >= profileUpdatedAtRef.current)
         ) {
-          profileUpdatedAtRef.current = merged.profileUpdatedAt || Date.now();
+          const nextProfileTs =
+            merged.profileUpdatedAt || (isProfileCustomized(merged.profile) ? profileUpdatedAtRef.current : 0);
+          profileUpdatedAtRef.current = nextProfileTs;
           const mergedProfile = { ...DEFAULT_PROFILE, ...merged.profile };
           setProfile(mergedProfile);
           await dbSetKV('profile', mergedProfile);
@@ -1161,6 +1224,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const sentDesigns = [...deletedBookmarkDesignIdsRef.current];
 
         try {
+          const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
+          const pushProfile = profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile);
+          const keepWallpaper = !wallpaperDirtyRef.current;
+
           const merged = await syncFullState(
             s.syncConfig,
             {
@@ -1174,10 +1241,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               categories: s.categories,
               collections: s.collections,
               readerSettings: s.readerSettings,
-              theme: s.theme,
-              themeUpdatedAt: themeUpdatedAtRef.current,
-              profile: s.profile,
-              profileUpdatedAt: profileUpdatedAtRef.current,
+              theme: pushTheme ? s.theme : null,
+              themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
+              profile: pushProfile ? s.profile : null,
+              profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
               lastActiveSession: localActiveSessionRef.current,
               deletedBookIds: sentBooks,
               deletedBookmarkIds: sentBookmarks,
@@ -1186,8 +1253,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               deletedBookmarkDesignIds: sentDesigns,
             },
             true,
-            true
+            true,
+            keepWallpaper
           );
+          if (!keepWallpaper) {
+            wallpaperDirtyRef.current = false;
+          }
 
           const sentBookSet = new Set(sentBooks);
           const sentBmSet = new Set(sentBookmarks);
@@ -1237,6 +1308,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     (patch: Partial<ThemeConfig>) => {
       const ts = Date.now();
       themeUpdatedAtRef.current = ts;
+      if ('customWallpaperUrl' in patch) {
+        wallpaperDirtyRef.current = true;
+      }
       dbSetKV('themeUpdatedAt', ts).catch(console.error);
       setTheme((prev) => {
         const next = { ...prev, ...patch };
@@ -1258,6 +1332,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const resetTheme = useCallback(() => {
     const ts = Date.now();
     themeUpdatedAtRef.current = ts;
+    wallpaperDirtyRef.current = true;
     dbSetKV('themeUpdatedAt', ts).catch(console.error);
     setTheme(DEFAULT_THEME);
     dbSetKV('theme', DEFAULT_THEME).catch(console.error);
@@ -2092,28 +2167,38 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const sentNotes = [...deletedNoteIdsRef.current];
         const sentDesigns = [...deletedBookmarkDesignIdsRef.current];
 
-        const merged = await syncFullState(cfg, {
-          deviceId: s.deviceId,
-          books: s.books,
-          bookmarks: s.bookmarks,
-          annotations: s.annotations,
-          notes: s.notes,
-          customBookmarkDesigns: s.customBookmarkDesigns,
-          customStationery: s.customStationery,
-          categories: s.categories,
-          collections: s.collections,
-          readerSettings: s.readerSettings,
-          theme: s.theme,
-          themeUpdatedAt: themeUpdatedAtRef.current,
-          profile: s.profile,
-          profileUpdatedAt: profileUpdatedAtRef.current,
-          lastActiveSession: localActiveSessionRef.current,
-          deletedBookIds: sentBooks,
-          deletedBookmarkIds: sentBookmarks,
-          deletedAnnotationIds: sentAnnotations,
-          deletedNoteIds: sentNotes,
-          deletedBookmarkDesignIds: sentDesigns,
-        });
+        const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
+        const pushProfile = profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile);
+
+        const merged = await syncFullState(
+          cfg,
+          {
+            deviceId: s.deviceId,
+            books: s.books,
+            bookmarks: s.bookmarks,
+            annotations: s.annotations,
+            notes: s.notes,
+            customBookmarkDesigns: s.customBookmarkDesigns,
+            customStationery: s.customStationery,
+            categories: s.categories,
+            collections: s.collections,
+            readerSettings: s.readerSettings,
+            theme: pushTheme ? s.theme : null,
+            themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
+            profile: pushProfile ? s.profile : null,
+            profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
+            lastActiveSession: localActiveSessionRef.current,
+            deletedBookIds: sentBooks,
+            deletedBookmarkIds: sentBookmarks,
+            deletedAnnotationIds: sentAnnotations,
+            deletedNoteIds: sentNotes,
+            deletedBookmarkDesignIds: sentDesigns,
+          },
+          true,
+          false,
+          false
+        );
+        wallpaperDirtyRef.current = false;
 
         const sentBookSet = new Set(sentBooks);
         const sentBmSet = new Set(sentBookmarks);
@@ -2215,7 +2300,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           s.books.filter((b) => !b.isDemo).length === 0 &&
           s.bookmarks.length === 0 &&
           s.annotations.length === 0 &&
-          s.notes.length === 0;
+          s.notes.length === 0 &&
+          !isThemeCustomized(s.theme) &&
+          !isProfileCustomized(s.profile);
 
         if (remoteHasData && localIsEmpty) {
           // Returning user on a clean / new device: restore 100% of their saved cloud vault!
@@ -2239,18 +2326,38 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
 
         // First time using this email OR user already added books/customizations locally -> merge & save to email vault!
-        const updatedProfile: UserProfile = {
-          ...s.profile,
-          email: cleanEmail,
-          name:
-            s.profile.name === DEFAULT_PROFILE.name && remote.profile?.name
-              ? remote.profile.name
-              : s.profile.name,
-        };
-        profileUpdatedAtRef.current = Date.now();
+        const localThemeCustom = isThemeCustomized(s.theme);
+        const localProfileCustom = isProfileCustomized(s.profile);
+        const remoteProfileWins =
+          Boolean(remote.profile) &&
+          (!localProfileCustom || (remote.profileUpdatedAt || 0) > profileUpdatedAtRef.current);
+
+        const updatedProfile: UserProfile = remoteProfileWins
+          ? {
+              ...DEFAULT_PROFILE,
+              ...remote.profile,
+              email: cleanEmail,
+            }
+          : {
+              ...s.profile,
+              email: cleanEmail,
+            };
+
+        if (remoteProfileWins) {
+          profileUpdatedAtRef.current = remote.profileUpdatedAt || profileUpdatedAtRef.current;
+        } else if (localProfileCustom) {
+          profileUpdatedAtRef.current = profileUpdatedAtRef.current || Date.now();
+        } else {
+          profileUpdatedAtRef.current = 0;
+        }
         await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
         setProfile(updatedProfile);
         await dbSetKV('profile', updatedProfile);
+
+        const pushTheme = localThemeCustom || themeUpdatedAtRef.current > 0;
+        const pushProfile = !remoteProfileWins && (localProfileCustom || profileUpdatedAtRef.current > 0);
+        const themeTsToSend = pushTheme ? themeUpdatedAtRef.current || Date.now() : 0;
+        const profileTsToSend = pushProfile ? profileUpdatedAtRef.current || Date.now() : 0;
 
         const merged = await syncFullState(
           nextCfg,
@@ -2265,10 +2372,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             categories: s.categories,
             collections: s.collections,
             readerSettings: s.readerSettings,
-            theme: s.theme,
-            themeUpdatedAt: themeUpdatedAtRef.current,
-            profile: updatedProfile,
-            profileUpdatedAt: profileUpdatedAtRef.current,
+            theme: pushTheme ? s.theme : null,
+            themeUpdatedAt: themeTsToSend,
+            profile: pushProfile ? updatedProfile : null,
+            profileUpdatedAt: profileTsToSend,
             lastActiveSession: localActiveSessionRef.current,
             deletedBookIds: deletedIdsRef.current,
             deletedBookmarkIds: deletedBookmarkIdsRef.current,
@@ -2276,10 +2383,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedNoteIds: deletedNoteIdsRef.current,
             deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
           },
-          true
+          true,
+          false,
+          false
         );
+        wallpaperDirtyRef.current = false;
 
-        const finalBooks = await applyRemotePayload(merged, remoteHasData && !themeUpdatedAtRef.current);
+        const finalBooks = await applyRemotePayload(merged, remoteHasData && !localThemeCustom);
         const now = Date.now();
         updateSyncConfig({ lastSyncedAt: now });
         setServerOnline(true);
@@ -2296,7 +2406,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setSyncStatus('error');
         setSyncMessage(message);
         showToast('No se pudo guardar en la nube. Revisa la URL del servidor de sync.');
-        updateProfile({ email: cleanEmail });
         return false;
       }
     },
@@ -2308,6 +2417,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const s = stateRef.current;
     if (s.syncConfig.liveSync && (s.syncConfig.serverUrl.trim() || s.syncConfig.accountEmail)) {
       try {
+        const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
+        const pushProfile = profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile);
         await syncFullState(
           s.syncConfig,
           {
@@ -2321,10 +2432,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             categories: s.categories,
             collections: s.collections,
             readerSettings: s.readerSettings,
-            theme: s.theme,
-            themeUpdatedAt: themeUpdatedAtRef.current,
-            profile: s.profile,
-            profileUpdatedAt: profileUpdatedAtRef.current,
+            theme: pushTheme ? s.theme : null,
+            themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
+            profile: pushProfile ? s.profile : null,
+            profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
             lastActiveSession: localActiveSessionRef.current,
             deletedBookIds: deletedIdsRef.current,
             deletedBookmarkIds: deletedBookmarkIdsRef.current,
@@ -2332,7 +2443,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedNoteIds: deletedNoteIdsRef.current,
             deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
           },
-          true
+          true,
+          false,
+          false
         );
       } catch {
         // ignore offline logout

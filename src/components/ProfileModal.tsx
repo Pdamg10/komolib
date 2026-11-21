@@ -55,12 +55,55 @@ export const ProfileModal: React.FC = () => {
 
   if (!profileModalOpen) return null;
 
-  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const compressAvatarImage = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('No se pudo leer la imagen'));
+      reader.onload = () => {
+        const rawUrl = String(reader.result || '');
+        const img = new Image();
+        img.onerror = () => resolve(rawUrl);
+        img.onload = () => {
+          const maxSide = 256;
+          const scale = Math.min(1, maxSide / Math.max(img.width || 1, img.height || 1));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(rawUrl);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          try {
+            const webp = canvas.toDataURL('image/webp', 0.82);
+            if (webp.startsWith('data:image/webp')) {
+              resolve(webp);
+              return;
+            }
+          } catch {
+            // fallback to jpeg
+          }
+          resolve(canvas.toDataURL('image/jpeg', 0.82));
+        };
+        img.src = rawUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => updateProfile({ avatarImageUrl: String(reader.result || '') });
-    reader.readAsDataURL(file);
+    try {
+      const optimized = await compressAvatarImage(file);
+      updateProfile({ avatarImageUrl: optimized });
+    } catch {
+      // ignore invalid file
+    } finally {
+      e.target.value = '';
+    }
   };
 
   const handleConnectEmail = async (e: React.FormEvent) => {
@@ -300,34 +343,19 @@ export const ProfileModal: React.FC = () => {
             </div>
           )}
 
-          {(savedServer || SYNC_SERVER_URL) && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 6,
-                flexWrap: 'wrap',
-                fontSize: 10.5,
-                color: 'var(--text-muted)',
-              }}
-            >
-              <span style={{ wordBreak: 'break-all' }}>
-                API: <code>{savedServer || SYNC_SERVER_URL}</code>
-              </span>
-              {SYNC_SERVER_URL && savedServer && savedServer !== SYNC_SERVER_URL && (
-                <button
-                  type="button"
-                  className="pill-btn"
-                  style={{ height: 24, fontSize: 10, padding: '0 8px', background: 'var(--card-bg)' }}
-                  onClick={async () => {
-                    updateSyncConfig({ serverUrl: SYNC_SERVER_URL });
-                    await refreshServerHealth();
-                  }}
-                >
-                  Usar servidor oficial
-                </button>
-              )}
+          {syncStatus === 'error' && SYNC_SERVER_URL && savedServer && savedServer !== SYNC_SERVER_URL && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="pill-btn"
+                style={{ height: 24, fontSize: 10.5, padding: '0 9px', background: 'var(--card-bg)' }}
+                onClick={async () => {
+                  updateSyncConfig({ serverUrl: SYNC_SERVER_URL });
+                  await refreshServerHealth();
+                }}
+              >
+                Restablecer servidor oficial
+              </button>
             </div>
           )}
 

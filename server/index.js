@@ -717,7 +717,11 @@ app.put('/api/sync/state', (req, res) => {
 
   const incomingThemeTs = Number(incoming.themeUpdatedAt || 0);
   const currentThemeTs = Number(current.themeUpdatedAt || 0);
-  const useIncomingTheme = incoming.theme && (!current.theme || incomingThemeTs >= currentThemeTs);
+  const useIncomingTheme = Boolean(
+    incoming.theme &&
+      (!current.theme ||
+        (incomingThemeTs > 0 && incomingThemeTs >= currentThemeTs))
+  );
   const resolvedIncomingTheme =
     incoming.theme && incoming.theme.customWallpaperUrl === '__KEEP__'
       ? {
@@ -728,7 +732,11 @@ app.put('/api/sync/state', (req, res) => {
 
   const incomingProfileTs = Number(incoming.profileUpdatedAt || 0);
   const currentProfileTs = Number(current.profileUpdatedAt || 0);
-  const useIncomingProfile = incoming.profile && (!current.profile || incomingProfileTs >= currentProfileTs);
+  const useIncomingProfile = Boolean(
+    incoming.profile &&
+      (!current.profile ||
+        (incomingProfileTs > 0 && incomingProfileTs >= currentProfileTs))
+  );
 
   const now = Date.now();
   const nextState = {
@@ -755,9 +763,9 @@ app.put('/api/sync/state', (req, res) => {
     collections: incoming.collections || current.collections || null,
     readerSettings: incoming.readerSettings || current.readerSettings || null,
     theme: useIncomingTheme ? resolvedIncomingTheme : current.theme,
-    themeUpdatedAt: useIncomingTheme ? incomingThemeTs || now : currentThemeTs,
+    themeUpdatedAt: useIncomingTheme ? incomingThemeTs : currentThemeTs,
     profile: useIncomingProfile ? incoming.profile : current.profile,
-    profileUpdatedAt: useIncomingProfile ? incomingProfileTs || now : currentProfileTs,
+    profileUpdatedAt: useIncomingProfile ? incomingProfileTs : currentProfileTs,
     lastActiveSession: mergedSession,
     deletedBookIds,
     deletedBookmarkIds,
