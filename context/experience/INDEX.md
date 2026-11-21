@@ -1,0 +1,18 @@
+# Experience Index
+
+> Searchable index of lessons, pitfalls, and reusable patterns for KomoLib.
+> Format: keyword | file | summary
+
+## By Domain
+
+| Keywords | File | Summary |
+|----------|------|---------|
+| netlify, spa, json, fetch, api, unexpected-token | lessons/netlify-spa-api-guard.md | Route all sync/room API requests through `fetchApi`/`parseJsonResponse` to catch Netlify SPA HTML fallbacks cleanly. |
+| vite, env, wasm, unrar, cbr, build | lessons/vite-build-time-env-and-unrar.md | `VITE_*` vars are baked at build time and `node-unrar-js` must stay excluded from Vite `optimizeDeps`. |
+| render, netlify, indexeddb, mobile, sync-url, cold-start | lessons/stale-indexeddb-sync-url-migration.md | Auto-migrate outdated `*.onrender.com` / LAN / HTTP URLs cached in IndexedDB to `SYNC_SERVER_URL` and retry Render cold starts. |
+
+## Recent Reports
+
+| Date | File | Topic |
+|------|------|-------|
+| 2026-11 | reports/2026-11-aief-adoption.md | Initial AIEF L3 activation and knowledge-base bootstrap for KomoLib. |

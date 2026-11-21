@@ -1,0 +1,7 @@
+---
+description: AIEF L3 entry rule for KomoLib
+globs:
+alwaysApply: true
+---
+
+Always start every session by reading `AGENTS.md` at the project root and follow the AIEF L3 context-loading, phase-routing, and experience-management patterns referenced there.

@@ -1,0 +1,35 @@
+name: komolib
+display_name: KomoLib
+aief:
+  level: L3
+  locale: en
+  communication_locale: es
+  entry: AGENTS.md
+  context_index: context/INDEX.md
+  validator: scripts/aief.mjs
+architecture:
+  type: fullstack-local-first-hybrid
+  pieces:
+    - name: frontend
+      path: src
+      stack: [React 19, TypeScript 5.8, Vite 6, IndexedDB (idb), epubjs, pdfjs-dist, jszip, node-unrar-js, marked]
+      deploy_target: Netlify (static SPA)
+    - name: sync-server
+      path: server
+      stack: [Node.js 22, Express 5, Multer 2, CORS, SSE, Gemini API]
+      deploy_target: Render / Railway / Fly.io / VPS (persistent disk)
+    - name: android-app
+      path: android
+      stack: [Capacitor 7, Android Gradle]
+      app_id: com.komolib.reader
+commands:
+  dev_web: npm run dev
+  dev_server: npm run dev:server
+  build: npm run build
+  cap_sync: npm run cap:sync
+  aief_doctor: npm run aief:doctor
+  aief_validate: npm run aief:validate
+adapters:
+  native: [AGENTS.md]
+  cursor: .cursor/rules/aief.mdc
+  copilot: .github/copilot-instructions.md
