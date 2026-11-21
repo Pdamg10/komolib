@@ -31,7 +31,7 @@ import {
   DEFAULT_THEME,
 } from '../data/presets';
 import { INITIAL_CHAT_MESSAGES } from '../data/seedLibrary';
-import { SYNC_SERVER_URL } from '../config';
+import { normalizeServerUrl, SYNC_SERVER_URL } from '../config';
 import {
   extractOriginalCoverFromBlob,
   importImageBundle,
@@ -571,22 +571,36 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       };
 
       // Netlify builds receive the API URL via VITE_SYNC_SERVER_URL. If this browser
-      // still has an old localhost, temporary tunnel or the Netlify domain saved as
-      // the API, migrate it to the deployed sync server.
+      // still has an old localhost, LAN IP, HTTP URL on HTTPS, temporary tunnel,
+      // Netlify origin, or outdated Render subdomain saved in IndexedDB, migrate it
+      // automatically to the deployed sync server.
       if (SYNC_SERVER_URL) {
-        const savedServer = initialSync.serverUrl.trim().replace(/\/+$/, '');
+        const savedServer = normalizeServerUrl(initialSync.serverUrl);
+        const isHttpsPage =
+          typeof window !== 'undefined' && window.location.protocol === 'https:';
         const appOrigin =
           typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)
             ? window.location.origin.replace(/\/+$/, '')
             : '';
+        const isPrivateLan =
+          /^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(savedServer);
+        const isMixedHttp = isHttpsPage && /^http:\/\//i.test(savedServer);
+        const isOutdatedRender =
+          /\.onrender\.com$/i.test(savedServer) && savedServer !== SYNC_SERVER_URL;
         const staleServer =
           !savedServer ||
           /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(savedServer) ||
+          (isHttpsPage && isPrivateLan) ||
+          isMixedHttp ||
+          isOutdatedRender ||
           /\.trycloudflare\.com$/i.test(savedServer) ||
           /\.netlify\.app$/i.test(savedServer) ||
           (appOrigin && savedServer === appOrigin);
-        if (staleServer) {
-          initialSync = { ...initialSync, serverUrl: SYNC_SERVER_URL };
+        if (staleServer || savedServer !== initialSync.serverUrl) {
+          initialSync = {
+            ...initialSync,
+            serverUrl: staleServer ? SYNC_SERVER_URL : savedServer,
+          };
           await dbSetKV('syncConfig', initialSync);
         }
       }
@@ -827,11 +841,57 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, []);
 
-  // Detect server health, LAN/Public URL, and Gemini AI proxy availability
+  // Detect server health, LAN/Public URL, and Gemini AI proxy availability.
+  // Retry briefly on hosted Render backends so mobile browsers recover cleanly after a cold start.
   useEffect(() => {
     if (!ready) return;
-    refreshServerHealth();
-  }, [ready, syncConfig.serverUrl, syncConfig.token, refreshServerHealth]);
+    let cancelled = false;
+    const timers: number[] = [];
+
+    const probe = async () => {
+      const cfg = stateRef.current.syncConfig;
+      try {
+        const h = await checkServerHealth(cfg);
+        if (cancelled) return;
+        setServerOnline(true);
+        setServerAuthRequired(Boolean(h.authRequired));
+        setAiOnline(Boolean(h.aiConfigured));
+        setAiModelName(h.aiModel || 'gemini-2.5-flash');
+        setServerLanUrl(h.lanUrls?.[0] || '');
+        return true;
+      } catch {
+        if (cancelled) return false;
+        setServerOnline(false);
+        setAiOnline(false);
+        return false;
+      }
+    };
+
+    (async () => {
+      const ok = await probe();
+      if (cancelled || ok) return;
+      const targetUrl = stateRef.current.syncConfig.serverUrl || SYNC_SERVER_URL;
+      if (/\.onrender\.com\b/i.test(targetUrl)) {
+        timers.push(
+          window.setTimeout(async () => {
+            if (cancelled) return;
+            const retryOk = await probe();
+            if (cancelled || retryOk) return;
+            timers.push(
+              window.setTimeout(() => {
+                if (!cancelled) void probe();
+              }, 10000)
+            );
+          }, 5000)
+        );
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      for (const t of timers) window.clearTimeout(t);
+    };
+  }, [ready, syncConfig.serverUrl, syncConfig.token]);
 
   const applyRemotePayload = useCallback(
     async (merged: RemoteSyncPayload, forceRestore = false) => {
@@ -2105,19 +2165,26 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       const spaceId = deriveEmailSpaceId(cleanEmail, rawPin);
       const s = stateRef.current;
-      const savedServer = s.syncConfig.serverUrl.trim().replace(/\/+$/, '');
+      const savedServer = normalizeServerUrl(s.syncConfig.serverUrl);
+      const isHttpsPage =
+        typeof window !== 'undefined' && window.location.protocol === 'https:';
       const appOrigin =
         typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)
           ? window.location.origin.replace(/\/+$/, '')
           : '';
+      const savedIsStale =
+        !savedServer ||
+        savedServer === appOrigin ||
+        /\.netlify\.app$/i.test(savedServer) ||
+        /\.trycloudflare\.com$/i.test(savedServer) ||
+        (isHttpsPage && /^http:\/\//i.test(savedServer)) ||
+        (SYNC_SERVER_URL && /\.onrender\.com$/i.test(savedServer) && savedServer !== SYNC_SERVER_URL);
       const resolvedServer =
-        (savedServer &&
-        savedServer !== appOrigin &&
-        !/\.netlify\.app$/i.test(savedServer)
-          ? savedServer
-          : '') ||
+        (!savedIsStale ? savedServer : '') ||
         SYNC_SERVER_URL ||
-        (appOrigin && !/:5173$/.test(appOrigin) ? appOrigin : 'http://localhost:4123');
+        (appOrigin && !/:5173$/.test(appOrigin) && !/\.netlify\.app$/i.test(appOrigin)
+          ? appOrigin
+          : 'http://localhost:4123');
 
       const nextCfg: SyncConfig = {
         ...s.syncConfig,

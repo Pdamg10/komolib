@@ -10,11 +10,21 @@ function trimUrl(value: string | undefined): string {
 }
 
 /**
+ * Normalizes a KomoLib API base URL: trims whitespace/quotes, strips accidental
+ * trailing `/api` segments, and removes trailing slashes.
+ */
+export function normalizeServerUrl(value: string | undefined): string {
+  return trimUrl(value)
+    .replace(/\/api\/?$/i, '')
+    .replace(/\/+$/, '');
+}
+
+/**
  * URL pública del servidor de sincronización / salas compartidas.
  * En Netlify debe configurarse como variable de entorno `VITE_SYNC_SERVER_URL`
  * (por ejemplo https://komolib-api.onrender.com).
  */
-export const SYNC_SERVER_URL = trimUrl(import.meta.env.VITE_SYNC_SERVER_URL);
+export const SYNC_SERVER_URL = normalizeServerUrl(import.meta.env.VITE_SYNC_SERVER_URL);
 
 /**
  * URL pública de la app web, usada en los enlaces y QR de invitación.

@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import { normalizeServerUrl, SYNC_SERVER_URL } from '../config';
 import type {
   ActiveReadingSession,
   BookAnnotation,
@@ -154,42 +155,55 @@ export async function parseJsonResponse<T>(res: Response, url: string): Promise<
 /**
  * Fetch wrapper that replaces the browser's generic "Failed to fetch" with a
  * message that explains what to check (URL, HTTPS, localhost, CORS, server down).
+ * Retries idempotent GET requests once on Render to absorb cold-start hiccups.
  */
 export async function fetchApi(url: string, init?: RequestInit): Promise<Response> {
-  try {
-    return await fetch(url, init);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : 'Error de red';
-    const appOrigin =
-      typeof window !== 'undefined' ? window.location.origin : 'el navegador';
-    let hint = '';
+  const method = (init?.method || 'GET').toUpperCase();
+  const canRetryColdStart = method === 'GET' && /\.onrender\.com\b/i.test(url);
 
+  let lastError: unknown;
+  for (let attempt = 0; attempt < (canRetryColdStart ? 2 : 1); attempt++) {
     try {
-      const target = new URL(url);
-      if (typeof window !== 'undefined' && window.location.protocol === 'https:' && target.protocol === 'http:') {
-        hint =
-          'La página está en HTTPS y el API en HTTP, así que el navegador bloquea la conexión. Usa la URL HTTPS del API.';
-      } else if (
-        typeof window !== 'undefined' &&
-        /^(localhost|127\.0\.0\.1)$/i.test(target.hostname) &&
-        !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
-      ) {
-        hint =
-          'La URL apunta a localhost; desde Netlify eso es tu propio navegador, no el servidor. Usa la URL pública del API.';
+      return await fetch(url, init);
+    } catch (error) {
+      lastError = error;
+      if (canRetryColdStart && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        continue;
       }
-    } catch {
-      // ignore malformed URL
     }
-
-    if (!hint) {
-      hint =
-        `Verifica que el API esté desplegado y en línea, que la URL sea correcta ` +
-        `(sin /api al final) y que permita CORS desde ${appOrigin}. ` +
-        `Si está en Render, usa su URL pública y espera unos segundos si estaba dormido.`;
-    }
-
-    throw new Error(`No se pudo conectar con ${endpointLabel(url)}. ${hint} Detalle: ${detail}`);
   }
+
+  const detail = lastError instanceof Error ? lastError.message : 'Error de red';
+  const appOrigin =
+    typeof window !== 'undefined' ? window.location.origin : 'el navegador';
+  let hint = '';
+
+  try {
+    const target = new URL(url);
+    if (typeof window !== 'undefined' && window.location.protocol === 'https:' && target.protocol === 'http:') {
+      hint =
+        'La página está en HTTPS y el API en HTTP, así que el navegador bloquea la conexión. Usa la URL HTTPS del API.';
+    } else if (
+      typeof window !== 'undefined' &&
+      /^(localhost|127\.0\.0\.1)$/i.test(target.hostname) &&
+      !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
+    ) {
+      hint =
+        'La URL apunta a localhost; desde Netlify eso es tu propio navegador, no el servidor. Usa la URL pública del API.';
+    }
+  } catch {
+    // ignore malformed URL
+  }
+
+  if (!hint) {
+    hint =
+      `Verifica que el API esté desplegado y en línea, que la URL sea correcta ` +
+      `(sin /api al final) y que permita CORS desde ${appOrigin}. ` +
+      `Si está en Render, confirma que el subdominio coincida exactamente con tu servicio y espera unos segundos si estaba dormido.`;
+  }
+
+  throw new Error(`No se pudo conectar con ${endpointLabel(url)}. ${hint} Detalle: ${detail}`);
 }
 
 export function buildAuthHeaders(config: SyncConfig, isJson = true): HeadersInit {
@@ -209,8 +223,8 @@ export function buildAuthHeaders(config: SyncConfig, isJson = true): HeadersInit
 }
 
 export function resolveServerUrl(url: string): string {
-  const trimmed = url.trim().replace(/\/+$/, '');
-  if (!trimmed) return '';
+  const trimmed = normalizeServerUrl(url);
+  if (!trimmed) return SYNC_SERVER_URL;
   if (
     typeof window !== 'undefined' &&
     /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(trimmed) &&
@@ -219,6 +233,14 @@ export function resolveServerUrl(url: string): string {
     window.location.hostname !== '127.0.0.1' &&
     (window.location.protocol === 'http:' || window.location.protocol === 'https:')
   ) {
+    // If a dedicated sync server URL was compiled into the build, always prefer it over localhost.
+    if (SYNC_SERVER_URL) {
+      return SYNC_SERVER_URL;
+    }
+    // Never rewrite localhost to Netlify's static origin (Netlify cannot run the Node API).
+    if (/\.netlify\.app$/i.test(window.location.hostname)) {
+      return trimmed;
+    }
     // When served over HTTPS, standard port (80/443), or directly from the KomoLib server port,
     // the API lives on the same origin (avoiding broken http://localhost:4123 URLs!).
     const isStandardOrHttps =

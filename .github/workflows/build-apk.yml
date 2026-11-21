@@ -24,6 +24,9 @@ jobs:
           java-version: '21'
 
       - name: Install dependencies & build Web
+        env:
+          VITE_SYNC_SERVER_URL: ${{ vars.VITE_SYNC_SERVER_URL || secrets.VITE_SYNC_SERVER_URL }}
+          VITE_PUBLIC_APP_URL: ${{ vars.VITE_PUBLIC_APP_URL || secrets.VITE_PUBLIC_APP_URL }}
         run: |
           npm ci
           npm run build

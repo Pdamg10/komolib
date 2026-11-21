@@ -26,9 +26,11 @@ export const ProfileModal: React.FC = () => {
     profile,
     updateProfile,
     syncConfig,
+    updateSyncConfig,
     syncStatus,
     syncMessage,
     triggerSync,
+    refreshServerHealth,
     loginWithEmail,
     logoutAccount,
     exportBackupJson,
@@ -285,8 +287,47 @@ export const ProfileModal: React.FC = () => {
           </form>
 
           {syncMessage && (
-            <div style={{ fontSize: 11, fontWeight: 700, color: syncStatus === 'error' ? '#d9534f' : 'var(--accent-primary)' }}>
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: syncStatus === 'error' ? '#d9534f' : 'var(--accent-primary)',
+                lineHeight: 1.45,
+                wordBreak: 'break-word',
+              }}
+            >
               {syncMessage}
+            </div>
+          )}
+
+          {(savedServer || SYNC_SERVER_URL) && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 6,
+                flexWrap: 'wrap',
+                fontSize: 10.5,
+                color: 'var(--text-muted)',
+              }}
+            >
+              <span style={{ wordBreak: 'break-all' }}>
+                API: <code>{savedServer || SYNC_SERVER_URL}</code>
+              </span>
+              {SYNC_SERVER_URL && savedServer && savedServer !== SYNC_SERVER_URL && (
+                <button
+                  type="button"
+                  className="pill-btn"
+                  style={{ height: 24, fontSize: 10, padding: '0 8px', background: 'var(--card-bg)' }}
+                  onClick={async () => {
+                    updateSyncConfig({ serverUrl: SYNC_SERVER_URL });
+                    await refreshServerHealth();
+                  }}
+                >
+                  Usar servidor oficial
+                </button>
+              )}
             </div>
           )}
 
