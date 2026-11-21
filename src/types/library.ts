@@ -212,6 +212,14 @@ export interface ChatMessage {
   createdAt: number;
 }
 
+export interface ChatSession {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ReaderSettings {
   theme: 'cream' | 'paper' | 'sepia' | 'dark' | 'oled';
   fontFamily: 'Lora' | 'Nunito' | 'Quicksand' | 'Inter' | 'Georgia' | 'monospace';

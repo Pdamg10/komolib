@@ -156,6 +156,7 @@ function emptyState() {
     bookmarks: [],
     annotations: [],
     notes: [],
+    chatSessions: [],
     customBookmarkDesigns: [],
     customStationery: null,
     categories: null,
@@ -168,6 +169,7 @@ function emptyState() {
     deletedAnnotationIds: [],
     deletedNoteIds: [],
     deletedBookmarkDesignIds: [],
+    deletedChatSessionIds: [],
   };
 }
 
@@ -646,12 +648,17 @@ app.put('/api/sync/state', (req, res) => {
     current.deletedBookmarkDesignIds,
     incoming.deletedBookmarkDesignIds
   );
+  const deletedChatSessionIds = mergeTombstones(
+    current.deletedChatSessionIds,
+    incoming.deletedChatSessionIds
+  );
   const incomingDeletedBooksSet = new Set(Array.isArray(incoming.deletedBookIds) ? incoming.deletedBookIds : []);
   const deletedBooksSet = new Set(deletedBookIds);
   const deletedBookmarksSet = new Set(deletedBookmarkIds);
   const deletedAnnotationsSet = new Set(deletedAnnotationIds);
   const deletedNotesSet = new Set(deletedNoteIds);
   const deletedBookmarkDesignsSet = new Set(deletedBookmarkDesignIds);
+  const deletedChatSessionsSet = new Set(deletedChatSessionIds);
 
   const mergedBooks = {};
   for (const [id, book] of Object.entries(current.books || {})) {
@@ -751,6 +758,11 @@ app.put('/api/sync/state', (req, res) => {
     notes: incoming.notes
       ? mergeById(current.notes, incoming.notes, deletedNotesSet)
       : (current.notes || []).filter((x) => !deletedNotesSet.has(x.id)),
+    chatSessions: Array.isArray(incoming.chatSessions)
+      ? mergeById(current.chatSessions, incoming.chatSessions, deletedChatSessionsSet)
+          .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+          .slice(0, 60)
+      : (current.chatSessions || []).filter((x) => !deletedChatSessionsSet.has(x.id)),
     customBookmarkDesigns: incoming.customBookmarkDesigns
       ? mergeById(
           current.customBookmarkDesigns,
@@ -772,6 +784,7 @@ app.put('/api/sync/state', (req, res) => {
     deletedAnnotationIds,
     deletedNoteIds,
     deletedBookmarkDesignIds,
+    deletedChatSessionIds,
   };
 
   writeState(nextState, spaceId);

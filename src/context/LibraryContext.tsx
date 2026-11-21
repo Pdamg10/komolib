@@ -83,6 +83,7 @@ import type {
   BookmarkItem,
   CategoryItem,
   ChatMessage,
+  ChatSession,
   CollectionCard,
   ContentKind,
   CustomStationeryKit,
@@ -125,6 +126,8 @@ interface LibraryContextValue {
   readerSettings: ReaderSettings;
   syncConfig: SyncConfig;
   chatMessages: ChatMessage[];
+  chatSessions: ChatSession[];
+  activeChatSessionId: string;
   // UI Navigation
   navSection: NavSection;
   setNavSection: (s: NavSection) => void;
@@ -181,6 +184,9 @@ interface LibraryContextValue {
   updateCollection: (id: string, patch: Partial<CollectionCard>) => void;
   sendChatMessage: (text: string) => Promise<void>;
   clearChat: () => void;
+  startNewChatSession: () => void;
+  selectChatSession: (id: string) => void;
+  deleteChatSession: (id: string) => void;
   aiOnline: boolean;
   aiModelName: string;
   // Sync & Live Continuity (Web <-> APK)
@@ -310,6 +316,28 @@ function isProfileCustomized(p: UserProfile | null | undefined): boolean {
   );
 }
 
+function deriveChatSessionTitle(messages: ChatMessage[]): string {
+  const firstUser = messages.find((m) => m.sender === 'user' && m.text.trim());
+  if (!firstUser) return 'Nueva conversación';
+  const clean = firstUser.text.replace(/\s+/g, ' ').trim();
+  return clean.length > 44 ? `${clean.slice(0, 44)}…` : clean;
+}
+
+function createFreshChatSession(messages: ChatMessage[] = INITIAL_CHAT_MESSAGES): ChatSession {
+  const now = Date.now();
+  const cloned = messages.map((m, idx) => ({
+    ...m,
+    createdAt: m.createdAt || now - (messages.length - idx) * 1000,
+  }));
+  return {
+    id: `chat_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    title: deriveChatSessionTitle(cloned),
+    messages: cloned,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 function applyThemeCssVars(t: ThemeConfig) {
   const root = document.documentElement;
   const isDark = hexToLuminance(t.shellBg) < 0.28;
@@ -383,7 +411,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [profile, setProfile] = useState<UserProfile>(DEFAULT_PROFILE);
   const [readerSettings, setReaderSettings] = useState<ReaderSettings>(DEFAULT_READER_SETTINGS);
   const [syncConfig, setSyncConfig] = useState<SyncConfig>(DEFAULT_SYNC_CONFIG);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT_MESSAGES);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>(() => [
+    createFreshChatSession(INITIAL_CHAT_MESSAGES),
+  ]);
+  const [activeChatSessionId, setActiveChatSessionId] = useState<string>('');
+  const chatMessages = React.useMemo(() => {
+    const active =
+      chatSessions.find((s) => s.id === activeChatSessionId) || chatSessions[0];
+    return active ? active.messages : INITIAL_CHAT_MESSAGES;
+  }, [chatSessions, activeChatSessionId]);
 
   const [navSection, setNavSection] = useState<NavSection>('home');
   const [activeCategory, setActiveCategory] = useState<string>('all');
@@ -422,6 +458,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const deletedAnnotationIdsRef = useRef<string[]>([]);
   const deletedNoteIdsRef = useRef<string[]>([]);
   const deletedBookmarkDesignIdsRef = useRef<string[]>([]);
+  const deletedChatSessionIdsRef = useRef<string[]>([]);
   const joinedRoomCodesRef = useRef<string[]>([]);
   const joinedShelfCodesRef = useRef<string[]>([]);
   const toastTimerRef = useRef<number | null>(null);
@@ -441,6 +478,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       annotations: Array.from(new Set(deletedAnnotationIdsRef.current)).slice(-500),
       notes: Array.from(new Set(deletedNoteIdsRef.current)).slice(-300),
       customBookmarkDesigns: Array.from(new Set(deletedBookmarkDesignIdsRef.current)).slice(-200),
+      chatSessions: Array.from(new Set(deletedChatSessionIdsRef.current)).slice(-200),
     }).catch(console.error);
   }, []);
   const stateRef = useRef({
@@ -450,6 +488,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     customBookmarkDesigns,
     customStationery,
     notes,
+    chatSessions,
+    activeChatSessionId,
     categories,
     collections,
     readerSettings,
@@ -467,6 +507,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     customBookmarkDesigns,
     customStationery,
     notes,
+    chatSessions,
+    activeChatSessionId,
     categories,
     collections,
     readerSettings,
@@ -510,6 +552,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         savedReader,
         savedSync,
         savedChat,
+        savedChatSessions,
+        savedActiveChatId,
         seeded,
         savedDeviceId,
         savedJoinedCodes,
@@ -528,6 +572,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dbGetKV<ReaderSettings>('readerSettings'),
         dbGetKV<SyncConfig>('syncConfig'),
         dbGetKV<ChatMessage[]>('chatMessages'),
+        dbGetKV<ChatSession[]>('chatSessions'),
+        dbGetKV<string>('activeChatSessionId'),
         dbGetKV<boolean>('seeded'),
         dbGetKV<string>('deviceId'),
         dbGetKV<string[]>('joinedRoomCodes'),
@@ -540,6 +586,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           annotations?: string[];
           notes?: string[];
           customBookmarkDesigns?: string[];
+          chatSessions?: string[];
         }>('pendingTombstones'),
         dbGetKV<number>('themeUpdatedAt'),
         dbGetKV<number>('profileUpdatedAt'),
@@ -584,6 +631,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
         if (Array.isArray(savedPendingTombstones.customBookmarkDesigns)) {
           deletedBookmarkDesignIdsRef.current = savedPendingTombstones.customBookmarkDesigns;
+        }
+        if (Array.isArray(savedPendingTombstones.chatSessions)) {
+          deletedChatSessionIdsRef.current = savedPendingTombstones.chatSessions;
         }
       }
 
@@ -735,7 +785,29 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (savedProfile) setProfile({ ...DEFAULT_PROFILE, ...savedProfile });
       if (savedReader) setReaderSettings({ ...DEFAULT_READER_SETTINGS, ...savedReader });
       setSyncConfig(initialSync);
-      if (savedChat?.length) setChatMessages(savedChat);
+      const pendingChatDel = new Set(deletedChatSessionIdsRef.current);
+      let initialSessions: ChatSession[] = [];
+      if (Array.isArray(savedChatSessions) && savedChatSessions.length > 0) {
+        initialSessions = savedChatSessions
+          .filter((cs) => cs?.id && Array.isArray(cs.messages) && !pendingChatDel.has(cs.id))
+          .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+      } else if (Array.isArray(savedChat) && savedChat.some((m) => m.sender === 'user')) {
+        const migrated = createFreshChatSession(savedChat);
+        const lastMsgTs = savedChat[savedChat.length - 1]?.createdAt || Date.now();
+        migrated.createdAt = savedChat[0]?.createdAt || lastMsgTs;
+        migrated.updatedAt = lastMsgTs;
+        initialSessions = [migrated];
+        await dbSetKV('chatSessions', initialSessions);
+      }
+      if (initialSessions.length === 0) {
+        initialSessions = [createFreshChatSession(INITIAL_CHAT_MESSAGES)];
+      }
+      const resolvedActiveChatId =
+        savedActiveChatId && initialSessions.some((cs) => cs.id === savedActiveChatId)
+          ? savedActiveChatId
+          : initialSessions[0].id;
+      setChatSessions(initialSessions);
+      setActiveChatSessionId(resolvedActiveChatId);
       const pendingBookDel = new Set(deletedIdsRef.current);
       const pendingBmDel = new Set(deletedBookmarkIdsRef.current);
       const pendingAnnDel = new Set(deletedAnnotationIdsRef.current);
@@ -977,6 +1049,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           ...(merged.deletedBookmarkDesignIds || []),
           ...deletedBookmarkDesignIdsRef.current,
         ]);
+        const deletedChatSessionSet = new Set([
+          ...(merged.deletedChatSessionIds || []),
+          ...deletedChatSessionIdsRef.current,
+        ]);
 
         // Remove tombstoned books from IndexedDB
         for (const delId of deletedBookSet) {
@@ -1147,6 +1223,38 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           );
         }
 
+        if (Array.isArray(merged.chatSessions)) {
+          const sessionMap = new Map<string, ChatSession>();
+          for (const cs of current.chatSessions) {
+            if (cs?.id && !deletedChatSessionSet.has(cs.id)) {
+              sessionMap.set(cs.id, cs);
+            }
+          }
+          for (const cs of merged.chatSessions) {
+            if (!cs?.id || deletedChatSessionSet.has(cs.id) || !Array.isArray(cs.messages)) continue;
+            const prev = sessionMap.get(cs.id);
+            if (
+              !prev ||
+              forceRestore ||
+              (cs.updatedAt || cs.createdAt) >= (prev.updatedAt || prev.createdAt)
+            ) {
+              sessionMap.set(cs.id, cs);
+            }
+          }
+          let mergedSessions = Array.from(sessionMap.values())
+            .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt))
+            .slice(0, 60);
+          if (mergedSessions.length === 0) {
+            mergedSessions = [createFreshChatSession(INITIAL_CHAT_MESSAGES)];
+          }
+          setChatSessions(mergedSessions);
+          await dbSetKV('chatSessions', mergedSessions);
+          if (!mergedSessions.some((cs) => cs.id === current.activeChatSessionId)) {
+            setActiveChatSessionId(mergedSessions[0].id);
+            await dbSetKV('activeChatSessionId', mergedSessions[0].id);
+          }
+        }
+
         if (merged.categories?.length) {
           setCategories(merged.categories);
           await dbSetKV('categories', merged.categories);
@@ -1226,6 +1334,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const sentAnnotations = [...deletedAnnotationIdsRef.current];
         const sentNotes = [...deletedNoteIdsRef.current];
         const sentDesigns = [...deletedBookmarkDesignIdsRef.current];
+        const sentChats = [...deletedChatSessionIdsRef.current];
 
         try {
           const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
@@ -1233,6 +1342,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const keepWallpaper = Boolean(
             s.theme.customWallpaperUrl &&
               s.theme.customWallpaperUrl === lastSyncedWallpaperRef.current
+          );
+          const syncableChats = s.chatSessions.filter((cs) =>
+            cs.messages.some((m) => m.sender === 'user')
           );
 
           const merged = await syncFullState(
@@ -1243,6 +1355,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               bookmarks: s.bookmarks,
               annotations: s.annotations,
               notes: s.notes,
+              chatSessions: syncableChats,
               customBookmarkDesigns: s.customBookmarkDesigns,
               customStationery: s.customStationery,
               categories: s.categories,
@@ -1258,6 +1371,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               deletedAnnotationIds: sentAnnotations,
               deletedNoteIds: sentNotes,
               deletedBookmarkDesignIds: sentDesigns,
+              deletedChatSessionIds: sentChats,
             },
             true,
             true,
@@ -1269,6 +1383,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const sentAnnSet = new Set(sentAnnotations);
           const sentNoteSet = new Set(sentNotes);
           const sentDesignSet = new Set(sentDesigns);
+          const sentChatSet = new Set(sentChats);
 
           deletedIdsRef.current = deletedIdsRef.current.filter((x) => !sentBookSet.has(x));
           deletedBookmarkIdsRef.current = deletedBookmarkIdsRef.current.filter(
@@ -1283,6 +1398,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           deletedBookmarkDesignIdsRef.current = deletedBookmarkDesignIdsRef.current.filter(
             (x) => !sentDesignSet.has(x)
           );
+          deletedChatSessionIdsRef.current = deletedChatSessionIdsRef.current.filter(
+            (x) => !sentChatSet.has(x)
+          );
           persistPendingTombstones();
 
           await applyRemotePayload(merged);
@@ -1296,7 +1414,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedBookmarkIdsRef.current.length ||
             deletedAnnotationIdsRef.current.length ||
             deletedNoteIdsRef.current.length ||
-            deletedBookmarkDesignIdsRef.current.length
+            deletedBookmarkDesignIdsRef.current.length ||
+            deletedChatSessionIdsRef.current.length
           ) {
             scheduleAutoSync(true);
           }
@@ -1943,22 +2062,63 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const text = rawText.trim();
       if (!text) return;
 
+      const now = Date.now();
       const userMsg: ChatMessage = {
-        id: `msg_${Date.now()}_u`,
+        id: `msg_${now}_u`,
         sender: 'user',
         text,
-        createdAt: Date.now(),
+        createdAt: now,
       };
 
-      const appendMessages = (msgs: ChatMessage[]) => {
-        setChatMessages((prev) => {
-          const next = [...prev, ...msgs].slice(-80);
-          dbSetKV('chatMessages', next).catch(console.error);
-          return next;
+      const targetSessionId =
+        stateRef.current.activeChatSessionId || stateRef.current.chatSessions[0]?.id || '';
+      const activeSessionSnapshot =
+        stateRef.current.chatSessions.find((s) => s.id === targetSessionId) ||
+        stateRef.current.chatSessions[0];
+      const historyBefore = activeSessionSnapshot ? activeSessionSnapshot.messages : chatMessages;
+
+      const appendMessages = (msgs: ChatMessage[], syncAfter = false) => {
+        setChatSessions((prev) => {
+          const ts = Date.now();
+          let found = false;
+          const updated = prev.map((session) => {
+            if (session.id !== targetSessionId && !(prev.length === 1 && !targetSessionId)) {
+              return session;
+            }
+            found = true;
+            const nextMsgs = [...session.messages, ...msgs].slice(-120);
+            return {
+              ...session,
+              title: deriveChatSessionTitle(nextMsgs),
+              messages: nextMsgs,
+              updatedAt: ts,
+            };
+          });
+
+          let nextSessions = updated;
+          if (!found) {
+            const created = createFreshChatSession([...INITIAL_CHAT_MESSAGES, ...msgs]);
+            nextSessions = [created, ...prev];
+            setActiveChatSessionId(created.id);
+            dbSetKV('activeChatSessionId', created.id).catch(console.error);
+          }
+
+          const sorted = [...nextSessions]
+            .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt))
+            .slice(0, 60);
+          dbSetKV('chatSessions', sorted).catch(console.error);
+          const activeNow = sorted.find((cs) => cs.id === targetSessionId) || sorted[0];
+          if (activeNow) {
+            dbSetKV('chatMessages', activeNow.messages).catch(console.error);
+          }
+          return sorted;
         });
+        if (syncAfter) {
+          scheduleAutoSync();
+        }
       };
 
-      appendMessages([userMsg]);
+      appendMessages([userMsg], false);
 
       // Quick command: /nota <texto>
       if (text.toLowerCase().startsWith('/nota ')) {
@@ -1971,15 +2131,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             page: targetBook.currentPage,
             color: '#f5b855',
           });
-          appendMessages([
-            {
-              id: `msg_${Date.now()}_a`,
-              sender: 'assistant',
-              text: `Listo ✨ Guardé tu nota en "${targetBook.title}". Puedes verla en la pestaña Notas.`,
-              bookIds: [targetBook.id],
-              createdAt: Date.now(),
-            },
-          ]);
+          appendMessages(
+            [
+              {
+                id: `msg_${Date.now()}_a`,
+                sender: 'assistant',
+                text: `Listo ✨ Guardé tu nota en "${targetBook.title}". Puedes verla en la pestaña Notas.`,
+                bookIds: [targetBook.id],
+                createdAt: Date.now(),
+              },
+            ],
+            true
+          );
           return;
         }
       }
@@ -2016,14 +2179,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               json?.choices?.[0]?.message?.content ||
               json?.message?.content ||
               'Recibido.';
-            appendMessages([
-              {
-                id: `msg_${Date.now()}_a`,
-                sender: 'assistant',
-                text: String(reply),
-                createdAt: Date.now(),
-              },
-            ]);
+            appendMessages(
+              [
+                {
+                  id: `msg_${Date.now()}_a`,
+                  sender: 'assistant',
+                  text: String(reply),
+                  createdAt: Date.now(),
+                },
+              ],
+              true
+            );
             return;
           }
         } catch {
@@ -2035,7 +2201,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       try {
         const aiRes = await sendAiChatViaServer(syncConfig, {
           message: text,
-          history: chatMessages.slice(-8).map((m) => ({ sender: m.sender, text: m.text })),
+          history: historyBefore.slice(-8).map((m) => ({ sender: m.sender, text: m.text })),
           books: books.slice(0, 40).map((b) => ({
             id: b.id,
             title: b.title,
@@ -2070,15 +2236,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (aiRes.ok && aiRes.reply) {
           setAiOnline(true);
           if (aiRes.model) setAiModelName(aiRes.model);
-          appendMessages([
-            {
-              id: `msg_${Date.now()}_a`,
-              sender: 'assistant',
-              text: aiRes.reply,
-              bookIds: aiRes.matchedBookIds?.length ? aiRes.matchedBookIds : undefined,
-              createdAt: Date.now(),
-            },
-          ]);
+          appendMessages(
+            [
+              {
+                id: `msg_${Date.now()}_a`,
+                sender: 'assistant',
+                text: aiRes.reply,
+                bookIds: aiRes.matchedBookIds?.length ? aiRes.matchedBookIds : undefined,
+                createdAt: Date.now(),
+              },
+            ],
+            true
+          );
           return;
         }
       } catch {
@@ -2127,23 +2296,76 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
-      appendMessages([
-        {
-          id: `msg_${Date.now()}_a`,
-          sender: 'assistant',
-          text: replyText,
-          bookIds: matched.slice(0, 4).map((b) => b.id),
-          createdAt: Date.now(),
-        },
-      ]);
+      appendMessages(
+        [
+          {
+            id: `msg_${Date.now()}_a`,
+            sender: 'assistant',
+            text: replyText,
+            bookIds: matched.slice(0, 4).map((b) => b.id),
+            createdAt: Date.now(),
+          },
+        ],
+        true
+      );
     },
-    [activeBook, addNote, annotations, books, chatMessages, notes, profile.name, syncConfig]
+    [activeBook, addNote, annotations, books, chatMessages, notes, profile.name, scheduleAutoSync, syncConfig]
+  );
+
+  const startNewChatSession = useCallback(() => {
+    const current = stateRef.current.chatSessions;
+    const active =
+      current.find((s) => s.id === stateRef.current.activeChatSessionId) || current[0];
+    if (active && !active.messages.some((m) => m.sender === 'user')) {
+      return;
+    }
+    const fresh = createFreshChatSession(INITIAL_CHAT_MESSAGES);
+    const next = [fresh, ...current].slice(0, 60);
+    setChatSessions(next);
+    setActiveChatSessionId(fresh.id);
+    dbSetKV('chatSessions', next).catch(console.error);
+    dbSetKV('activeChatSessionId', fresh.id).catch(console.error);
+    dbSetKV('chatMessages', fresh.messages).catch(console.error);
+  }, []);
+
+  const selectChatSession = useCallback((id: string) => {
+    const found = stateRef.current.chatSessions.find((s) => s.id === id);
+    if (!found) return;
+    setActiveChatSessionId(found.id);
+    dbSetKV('activeChatSessionId', found.id).catch(console.error);
+    dbSetKV('chatMessages', found.messages).catch(console.error);
+  }, []);
+
+  const deleteChatSession = useCallback(
+    (id: string) => {
+      if (!deletedChatSessionIdsRef.current.includes(id)) {
+        deletedChatSessionIdsRef.current.push(id);
+      }
+      persistPendingTombstones();
+      setChatSessions((prev) => {
+        const remaining = prev.filter((s) => s.id !== id);
+        const next =
+          remaining.length > 0 ? remaining : [createFreshChatSession(INITIAL_CHAT_MESSAGES)];
+        if (stateRef.current.activeChatSessionId === id || !next.some((s) => s.id === stateRef.current.activeChatSessionId)) {
+          const nextActive = next[0];
+          setActiveChatSessionId(nextActive.id);
+          dbSetKV('activeChatSessionId', nextActive.id).catch(console.error);
+          dbSetKV('chatMessages', nextActive.messages).catch(console.error);
+        }
+        dbSetKV('chatSessions', next).catch(console.error);
+        return next;
+      });
+      scheduleAutoSync(true);
+    },
+    [persistPendingTombstones, scheduleAutoSync]
   );
 
   const clearChat = useCallback(() => {
-    setChatMessages(INITIAL_CHAT_MESSAGES);
-    dbSetKV('chatMessages', INITIAL_CHAT_MESSAGES).catch(console.error);
-  }, []);
+    const activeId =
+      stateRef.current.activeChatSessionId || stateRef.current.chatSessions[0]?.id;
+    if (!activeId) return;
+    deleteChatSession(activeId);
+  }, [deleteChatSession]);
 
   const triggerSync = useCallback(
     async (silent = false) => {
@@ -2166,9 +2388,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const sentAnnotations = [...deletedAnnotationIdsRef.current];
         const sentNotes = [...deletedNoteIdsRef.current];
         const sentDesigns = [...deletedBookmarkDesignIdsRef.current];
+        const sentChats = [...deletedChatSessionIdsRef.current];
 
         const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
         const pushProfile = profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile);
+        const syncableChats = s.chatSessions.filter((cs) =>
+          cs.messages.some((m) => m.sender === 'user')
+        );
 
         const merged = await syncFullState(
           cfg,
@@ -2178,6 +2404,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             bookmarks: s.bookmarks,
             annotations: s.annotations,
             notes: s.notes,
+            chatSessions: syncableChats,
             customBookmarkDesigns: s.customBookmarkDesigns,
             customStationery: s.customStationery,
             categories: s.categories,
@@ -2193,6 +2420,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedAnnotationIds: sentAnnotations,
             deletedNoteIds: sentNotes,
             deletedBookmarkDesignIds: sentDesigns,
+            deletedChatSessionIds: sentChats,
           },
           true,
           false,
@@ -2204,6 +2432,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const sentAnnSet = new Set(sentAnnotations);
         const sentNoteSet = new Set(sentNotes);
         const sentDesignSet = new Set(sentDesigns);
+        const sentChatSet = new Set(sentChats);
 
         deletedIdsRef.current = deletedIdsRef.current.filter((x) => !sentBookSet.has(x));
         deletedBookmarkIdsRef.current = deletedBookmarkIdsRef.current.filter(
@@ -2217,6 +2446,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         );
         deletedBookmarkDesignIdsRef.current = deletedBookmarkDesignIdsRef.current.filter(
           (x) => !sentDesignSet.has(x)
+        );
+        deletedChatSessionIdsRef.current = deletedChatSessionIdsRef.current.filter(
+          (x) => !sentChatSet.has(x)
         );
         persistPendingTombstones();
 
@@ -2366,6 +2598,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             bookmarks: s.bookmarks,
             annotations: s.annotations,
             notes: s.notes,
+            chatSessions: s.chatSessions.filter((cs) => cs.messages.some((m) => m.sender === 'user')),
             customBookmarkDesigns: s.customBookmarkDesigns,
             customStationery: s.customStationery,
             categories: s.categories,
@@ -2381,6 +2614,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedAnnotationIds: deletedAnnotationIdsRef.current,
             deletedNoteIds: deletedNoteIdsRef.current,
             deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
+            deletedChatSessionIds: deletedChatSessionIdsRef.current,
           },
           true,
           false,
@@ -2425,6 +2659,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             bookmarks: s.bookmarks,
             annotations: s.annotations,
             notes: s.notes,
+            chatSessions: s.chatSessions.filter((cs) => cs.messages.some((m) => m.sender === 'user')),
             customBookmarkDesigns: s.customBookmarkDesigns,
             customStationery: s.customStationery,
             categories: s.categories,
@@ -2440,6 +2675,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedAnnotationIds: deletedAnnotationIdsRef.current,
             deletedNoteIds: deletedNoteIdsRef.current,
             deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
+            deletedChatSessionIds: deletedChatSessionIdsRef.current,
           },
           true,
           false,
@@ -2466,10 +2702,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     deletedAnnotationIdsRef.current = [];
     deletedNoteIdsRef.current = [];
     deletedBookmarkDesignIdsRef.current = [];
+    deletedChatSessionIdsRef.current = [];
     joinedRoomCodesRef.current = [];
     joinedShelfCodesRef.current = [];
     themeUpdatedAtRef.current = 0;
     profileUpdatedAtRef.current = 0;
+    lastSyncedWallpaperRef.current = '';
     localActiveSessionRef.current = null;
 
     await Promise.all([
@@ -2479,6 +2717,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       dbSetKV('explicitLogout', true),
     ]);
 
+    const freshSession = createFreshChatSession(INITIAL_CHAT_MESSAGES);
     setActiveBook(null);
     setEditingBook(null);
     setBooks([]);
@@ -2493,7 +2732,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setTheme(DEFAULT_THEME);
     applyThemeCssVars(DEFAULT_THEME);
     setProfile(DEFAULT_PROFILE);
-    setChatMessages(INITIAL_CHAT_MESSAGES);
+    setChatSessions([freshSession]);
+    setActiveChatSessionId(freshSession.id);
     setSharedRooms([]);
     setSharedShelves([]);
     setDeviceId(newDeviceId);
@@ -2520,6 +2760,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       bookmarks: s.bookmarks,
       annotations: s.annotations,
       notes: s.notes,
+      chatSessions: s.chatSessions.filter((cs) => cs.messages.some((m) => m.sender === 'user')),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -2559,6 +2800,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks : [],
             annotations: Array.isArray(data.annotations) ? data.annotations : [],
             notes: Array.isArray(data.notes) ? data.notes : [],
+            chatSessions: Array.isArray(data.chatSessions) ? data.chatSessions : undefined,
             customBookmarkDesigns: Array.isArray(data.customBookmarkDesigns)
               ? data.customBookmarkDesigns
               : [],
@@ -3317,6 +3559,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         readerSettings,
         syncConfig,
         chatMessages,
+        chatSessions,
+        activeChatSessionId,
         navSection,
         setNavSection,
         activeCategory,
@@ -3367,6 +3611,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         updateCollection,
         sendChatMessage,
         clearChat,
+        startNewChatSession,
+        selectChatSession,
+        deleteChatSession,
         aiOnline,
         aiModelName,
         deviceId,

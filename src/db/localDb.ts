@@ -6,6 +6,7 @@ import type {
   BookmarkItem,
   CategoryItem,
   ChatMessage,
+  ChatSession,
   CollectionCard,
   NoteItem,
   ReaderSettings,
@@ -207,6 +208,8 @@ export type PersistedKvMap = {
   readerSettings: ReaderSettings;
   syncConfig: SyncConfig;
   chatMessages: ChatMessage[];
+  chatSessions: ChatSession[];
+  activeChatSessionId: string;
   customBookmarkDesigns: BookmarkDesign[];
   seeded: boolean;
 };

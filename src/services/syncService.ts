@@ -7,6 +7,7 @@ import type {
   BookmarkDesign,
   BookmarkItem,
   CategoryItem,
+  ChatSession,
   CollectionCard,
   ContentKind,
   CustomStationeryKit,
@@ -63,6 +64,7 @@ export interface RemoteSyncPayload {
   bookmarks: BookmarkItem[];
   annotations?: BookAnnotation[];
   notes: NoteItem[];
+  chatSessions?: ChatSession[];
   customBookmarkDesigns?: BookmarkDesign[];
   customStationery?: CustomStationeryKit | null;
   categories: CategoryItem[] | null;
@@ -78,6 +80,7 @@ export interface RemoteSyncPayload {
   deletedAnnotationIds?: string[];
   deletedNoteIds?: string[];
   deletedBookmarkDesignIds?: string[];
+  deletedChatSessionIds?: string[];
 }
 
 /**
@@ -524,6 +527,7 @@ export async function syncFullState(
     bookmarks: BookmarkItem[];
     annotations?: BookAnnotation[];
     notes: NoteItem[];
+    chatSessions?: ChatSession[];
     customBookmarkDesigns?: BookmarkDesign[];
     customStationery?: CustomStationeryKit;
     categories: CategoryItem[];
@@ -539,6 +543,7 @@ export async function syncFullState(
     deletedAnnotationIds?: string[];
     deletedNoteIds?: string[];
     deletedBookmarkDesignIds?: string[];
+    deletedChatSessionIds?: string[];
   },
   uploadMissingFiles = true,
   lightweight = false,
@@ -571,6 +576,7 @@ export async function syncFullState(
       bookmarks: localData.bookmarks,
       annotations: localData.annotations || [],
       notes: localData.notes,
+      chatSessions: localData.chatSessions || [],
       customBookmarkDesigns: localData.customBookmarkDesigns || [],
       customStationery: localData.customStationery || null,
       categories: localData.categories,
@@ -586,6 +592,7 @@ export async function syncFullState(
       deletedAnnotationIds: localData.deletedAnnotationIds || [],
       deletedNoteIds: localData.deletedNoteIds || [],
       deletedBookmarkDesignIds: localData.deletedBookmarkDesignIds || [],
+      deletedChatSessionIds: localData.deletedChatSessionIds || [],
     }),
   });
 
