@@ -95,6 +95,7 @@ const BookCoverVisualInner: React.FC<BookCoverVisualProps> = ({ book, compact = 
       <img
         src={book.coverDataUrl}
         alt={book.title}
+        loading="lazy"
         decoding="async"
         className="book-cover-img cover-fit"
         onError={() => setImgError(true)}

@@ -88,6 +88,13 @@ export const AnnotationsView: React.FC = () => {
       .catch(() => undefined);
   }, [books.length, bookmarks.length, annotations.length, allBookmarkDesigns.length]);
 
+  const booksWithMarks = useMemo(() => {
+    const ids = new Set<string>();
+    for (const a of annotations) ids.add(a.bookId);
+    for (const bm of bookmarks) ids.add(bm.bookId);
+    return books.filter((b) => ids.has(b.id));
+  }, [annotations, bookmarks, books]);
+
   const booksMap = useMemo(() => new Map(books.map((b) => [b.id, b])), [books]);
 
   const filteredAnnotations = useMemo(() => {
@@ -510,8 +517,8 @@ export const AnnotationsView: React.FC = () => {
             value={selectedBookId}
             onChange={(e) => setSelectedBookId(e.target.value)}
           >
-            <option value="all">Todos los libros</option>
-            {books.map((b) => (
+            <option value="all">Todos los libros ({booksWithMarks.length})</option>
+            {booksWithMarks.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.title}
               </option>

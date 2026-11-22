@@ -561,13 +561,13 @@ export async function syncFullState(
   localData: {
     deviceId?: string;
     books: BookItem[];
-    bookmarks: BookmarkItem[];
+    bookmarks?: BookmarkItem[];
     annotations?: BookAnnotation[];
-    notes: NoteItem[];
+    notes?: NoteItem[];
     chatSessions?: ChatSession[];
     customBookmarkDesigns?: BookmarkDesign[];
     customStationery?: CustomStationeryKit;
-    categories: CategoryItem[];
+    categories?: CategoryItem[];
     collections?: CollectionCard[];
     readerSettings?: ReaderSettings;
     theme: ThemeConfig | null;
@@ -673,14 +673,14 @@ export async function syncFullState(
       sinceUpdatedAt: sinceUpdatedAt > 0 ? sinceUpdatedAt : undefined,
       books: finalBooksChunk,
       bookmarks: localData.bookmarks,
-      annotations: localData.annotations || [],
+      annotations: localData.annotations,
       notes: localData.notes,
-      chatSessions: localData.chatSessions || [],
-      customBookmarkDesigns: localData.customBookmarkDesigns || [],
-      customStationery: localData.customStationery || null,
+      chatSessions: localData.chatSessions,
+      customBookmarkDesigns: localData.customBookmarkDesigns,
+      customStationery: localData.customStationery ?? null,
       categories: localData.categories,
-      collections: localData.collections || null,
-      readerSettings: localData.readerSettings || null,
+      collections: localData.collections ?? null,
+      readerSettings: localData.readerSettings ?? null,
       theme: themePayload,
       themeUpdatedAt: localData.themeUpdatedAt || 0,
       profile: localData.profile,

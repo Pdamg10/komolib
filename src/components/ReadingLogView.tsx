@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   BookOpen,
   Check,
@@ -29,6 +29,7 @@ export const ReadingLogView: React.FC = () => {
   const { books, categories, updateBook, openBook, addNote, showToast } = useLibrary();
 
   const [statusFilter, setStatusFilter] = useState<ReadingStatus | 'all'>('all');
+  const [visibleLimit, setVisibleLimit] = useState(40);
   const [selectedBookId, setSelectedBookId] = useState<string>(books[0]?.id || '');
   const [reviewDraft, setReviewDraft] = useState<string | null>(null);
   const [seriesDraft, setSeriesDraft] = useState<string | null>(null);
@@ -98,6 +99,15 @@ export const ReadingLogView: React.FC = () => {
     setSeriesDraft(null);
   };
 
+  useEffect(() => {
+    setVisibleLimit(40);
+  }, [statusFilter, books.length]);
+
+  const visibleLogBooks = useMemo(
+    () => filteredBooks.slice(0, visibleLimit),
+    [filteredBooks, visibleLimit]
+  );
+
   return (
     <section className="tracker-page" aria-label="Reading Log y Reseñas">
       {/* Top Bar */}
@@ -154,7 +164,7 @@ export const ReadingLogView: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {filteredBooks.map((book, idx) => {
+                {visibleLogBooks.map((book, idx) => {
                   const st = getEffectiveStatus(book);
                   const genre = getPrimaryGenreLabel(book, categories);
                   const isSelected = selectedBook?.id === book.id;
@@ -258,6 +268,17 @@ export const ReadingLogView: React.FC = () => {
               </tbody>
             </table>
           </div>
+          {visibleLogBooks.length < filteredBooks.length && (
+            <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 10 }}>
+              <button
+                type="button"
+                className="pill-btn"
+                onClick={() => setVisibleLimit((n) => n + 50)}
+              >
+                Mostrar más ({visibleLogBooks.length} de {filteredBooks.length})
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Book Review Spotlight Card (inspired by "Book Reviews" panel in reference!) */}

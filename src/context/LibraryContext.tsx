@@ -527,6 +527,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const syncedCoverSigRef = useRef<Map<string, string>>(new Map());
   const syncedBookUpdatedAtRef = useRef<Map<string, number>>(new Map());
   const lastRemoteUpdatedAtRef = useRef<number>(0);
+  const dirtyScopesRef = useRef<Set<'books' | 'personalization' | 'marks' | 'notes' | 'chat'>>(new Set());
   const lastResumeSyncAtRef = useRef<number>(0);
   const localActiveSessionRef = useRef<ActiveReadingSession | null>(null);
   const suppressAutoSyncRef = useRef<boolean>(false);
@@ -1461,8 +1462,20 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   );
 
   const scheduleAutoSync = useCallback(
-    (urgent = false) => {
+    (
+      urgent = false,
+      scope: 'books' | 'personalization' | 'marks' | 'notes' | 'chat' | 'all' = 'all'
+    ) => {
       if (suppressAutoSyncRef.current && !urgent) return;
+      if (scope === 'all') {
+        dirtyScopesRef.current.add('books');
+        dirtyScopesRef.current.add('personalization');
+        dirtyScopesRef.current.add('marks');
+        dirtyScopesRef.current.add('notes');
+        dirtyScopesRef.current.add('chat');
+      } else {
+        dirtyScopesRef.current.add(scope);
+      }
       const cfg = stateRef.current.syncConfig;
       if (cfg.liveSync === false || !cfg.serverUrl.trim()) return;
       if (autoSyncTimerRef.current) window.clearTimeout(autoSyncTimerRef.current);
@@ -1470,37 +1483,52 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const s = stateRef.current;
         if (s.syncConfig.liveSync === false || !s.syncConfig.serverUrl.trim()) return;
 
-        // Snapshot tombstones before network call so deletions made during flight are NEVER lost!
+        // Snapshot tombstones & dirty scopes before network call so mutations made during flight are NEVER lost!
         const sentBooks = [...deletedIdsRef.current];
         const sentBookmarks = [...deletedBookmarkIdsRef.current];
         const sentAnnotations = [...deletedAnnotationIdsRef.current];
         const sentNotes = [...deletedNoteIdsRef.current];
         const sentDesigns = [...deletedBookmarkDesignIdsRef.current];
         const sentChats = [...deletedChatSessionIdsRef.current];
+        const scopes = new Set(dirtyScopesRef.current);
 
         try {
-          const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
-          const pushProfile = profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile);
+          const hasBaseline = syncedBookUpdatedAtRef.current.size > 0;
+          const sendPersonalization = !hasBaseline || scopes.has('personalization');
+          const sendMarks =
+            !hasBaseline ||
+            scopes.has('marks') ||
+            sentBookmarks.length > 0 ||
+            sentAnnotations.length > 0 ||
+            sentDesigns.length > 0;
+          const sendNotes = !hasBaseline || scopes.has('notes') || sentNotes.length > 0;
+          const sendChat = !hasBaseline || scopes.has('chat') || sentChats.length > 0;
+
+          const pushTheme =
+            sendPersonalization && (themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme));
+          const pushProfile =
+            sendPersonalization && (profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile));
           const keepWallpaper = Boolean(
             s.theme.customWallpaperUrl &&
               s.theme.customWallpaperUrl === lastSyncedWallpaperRef.current
           );
-          const syncableChats = s.chatSessions.filter((cs) =>
-            cs.messages.some((m) => m.sender === 'user')
-          );
+          const syncableChats = sendChat
+            ? s.chatSessions.filter((cs) => cs.messages.some((m) => m.sender === 'user'))
+            : undefined;
 
-          const hasBaseline = syncedBookUpdatedAtRef.current.size > 0;
           const booksToSend = hasBaseline
-            ? s.books.filter((b) => {
-                if (b.isDemo) return false;
-                const syncedTs = syncedBookUpdatedAtRef.current.get(b.id);
-                if (syncedTs === undefined || (b.updatedAt || 0) > syncedTs) return true;
-                if (b.coverDataUrl) {
-                  const confirmedSig = syncedCoverSigRef.current.get(b.id);
-                  if (!confirmedSig || confirmedSig !== getCoverSignature(b.coverDataUrl)) return true;
-                }
-                return false;
-              })
+            ? scopes.has('books')
+              ? s.books.filter((b) => {
+                  if (b.isDemo) return false;
+                  const syncedTs = syncedBookUpdatedAtRef.current.get(b.id);
+                  if (syncedTs === undefined || (b.updatedAt || 0) > syncedTs) return true;
+                  if (b.coverDataUrl) {
+                    const confirmedSig = syncedCoverSigRef.current.get(b.id);
+                    if (!confirmedSig || confirmedSig !== getCoverSignature(b.coverDataUrl)) return true;
+                  }
+                  return false;
+                })
+              : []
             : s.books;
 
           const keepCoverIds = new Set<string>();
@@ -1517,15 +1545,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             {
               deviceId: s.deviceId,
               books: booksToSend,
-              bookmarks: s.bookmarks,
-              annotations: s.annotations,
-              notes: s.notes,
+              bookmarks: sendMarks ? s.bookmarks : undefined,
+              annotations: sendMarks ? s.annotations : undefined,
+              notes: sendNotes ? s.notes : undefined,
               chatSessions: syncableChats,
-              customBookmarkDesigns: s.customBookmarkDesigns,
-              customStationery: s.customStationery,
-              categories: s.categories,
-              collections: s.collections,
-              readerSettings: s.readerSettings,
+              customBookmarkDesigns: sendMarks ? s.customBookmarkDesigns : undefined,
+              customStationery: sendMarks ? s.customStationery : undefined,
+              categories: sendPersonalization ? s.categories : undefined,
+              collections: sendPersonalization ? s.collections : undefined,
+              readerSettings: sendPersonalization ? s.readerSettings : undefined,
               theme: pushTheme ? s.theme : null,
               themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
               profile: pushProfile ? s.profile : null,
@@ -1544,6 +1572,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             keepCoverIds,
             lastRemoteUpdatedAtRef.current
           );
+
+          for (const sc of scopes) dirtyScopesRef.current.delete(sc);
 
           const sentBookSet = new Set(sentBooks);
           const sentBmSet = new Set(sentBookmarks);
@@ -1573,7 +1603,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           await applyRemotePayload(merged);
           setServerOnline(true);
           setSyncStatus('ok');
-          setSyncMessage(`Sync en vivo (${Object.keys(merged.books || {}).length} títulos)`);
+          const syncLabel =
+            booksToSend.length > 0 && sendPersonalization
+              ? `Libros (${booksToSend.length}) y personalización sincronizados`
+              : sendPersonalization && booksToSend.length === 0 && !sentBooks.length
+              ? 'Personalización sincronizada'
+              : booksToSend.length > 0 || sentBooks.length > 0
+              ? `Libros sincronizados (${booksToSend.length + sentBooks.length})`
+              : `Sync en vivo (${Object.keys(merged.books || {}).length} títulos)`;
+          setSyncMessage(syncLabel);
 
           // If new deletions arrived while this sync was in flight, flush them right away!
           if (
@@ -1611,7 +1649,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dbSetKV('theme', next).catch(console.error);
         return next;
       });
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'personalization');
     },
     [scheduleAutoSync]
   );
@@ -1623,7 +1661,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setTheme(DEFAULT_THEME);
     dbSetKV('theme', DEFAULT_THEME).catch(console.error);
     showToast('Tema restaurado a Komo Cream');
-    scheduleAutoSync();
+    scheduleAutoSync(false, 'personalization');
   }, [scheduleAutoSync, showToast]);
 
   const updateReaderSettings = useCallback(
@@ -1633,7 +1671,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dbSetKV('readerSettings', next).catch(console.error);
         return next;
       });
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'personalization');
     },
     [scheduleAutoSync]
   );
@@ -1648,7 +1686,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dbSetKV('profile', next).catch(console.error);
         return next;
       });
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'personalization');
     },
     [scheduleAutoSync]
   );
@@ -1670,7 +1708,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return next;
       });
       showToast(`Categoría "${cat.label}" añadida`);
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'personalization');
     },
     [scheduleAutoSync, showToast]
   );
@@ -1683,7 +1721,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return next;
       });
       setActiveCategory((curr) => (curr === id ? 'all' : curr));
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'personalization');
     },
     [scheduleAutoSync]
   );
@@ -1695,7 +1733,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dbSetKV('collections', next).catch(console.error);
         return next;
       });
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'personalization');
     },
     [scheduleAutoSync]
   );
@@ -2459,7 +2497,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'books');
     },
     [scheduleAutoSync]
   );
@@ -2526,7 +2564,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         deleteBookFromServer(syncConfig, id).catch(() => undefined);
       }
       showToast('Título eliminado');
-      scheduleAutoSync(true);
+      scheduleAutoSync(true, 'books');
     },
     [activeBook, editingBook, persistPendingTombstones, scheduleAutoSync, showToast, syncConfig]
   );
@@ -2604,7 +2642,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           .catch(() => undefined);
       }
 
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'books');
       showToast(`"${updated.title}" guardado offline en este dispositivo`);
       return updated;
     },
@@ -3305,14 +3343,27 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const sentNotes = [...deletedNoteIdsRef.current];
         const sentDesigns = [...deletedBookmarkDesignIdsRef.current];
         const sentChats = [...deletedChatSessionIdsRef.current];
-
-        const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
-        const pushProfile = profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile);
-        const syncableChats = s.chatSessions.filter((cs) =>
-          cs.messages.some((m) => m.sender === 'user')
-        );
+        const scopes = new Set(dirtyScopesRef.current);
 
         const hasBaseline = syncedBookUpdatedAtRef.current.size > 0;
+        const sendPersonalization = !hasBaseline || scopes.has('personalization');
+        const sendMarks =
+          !hasBaseline ||
+          scopes.has('marks') ||
+          sentBookmarks.length > 0 ||
+          sentAnnotations.length > 0 ||
+          sentDesigns.length > 0;
+        const sendNotes = !hasBaseline || scopes.has('notes') || sentNotes.length > 0;
+        const sendChat = !hasBaseline || scopes.has('chat') || sentChats.length > 0;
+
+        const pushTheme =
+          sendPersonalization && (themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme));
+        const pushProfile =
+          sendPersonalization && (profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile));
+        const syncableChats = sendChat
+          ? s.chatSessions.filter((cs) => cs.messages.some((m) => m.sender === 'user'))
+          : undefined;
+
         const booksToSend = hasBaseline
           ? s.books.filter((b) => {
               if (b.isDemo) return false;
@@ -3325,6 +3376,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               return false;
             })
           : s.books;
+
+        if (!silent) {
+          const progressLabel =
+            booksToSend.length > 0 && sendPersonalization
+              ? `Guardando ${booksToSend.length} libro(s) y personalización...`
+              : sendPersonalization && booksToSend.length === 0 && !sentBooks.length
+              ? 'Guardando personalización...'
+              : booksToSend.length > 0 || sentBooks.length > 0
+              ? `Guardando cambios de ${booksToSend.length + sentBooks.length} libro(s)...`
+              : 'Sincronizando cambios...';
+          setSyncMessage(progressLabel);
+        }
 
         const keepCoverIds = new Set<string>();
         for (const b of booksToSend) {
@@ -3343,15 +3406,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           {
             deviceId: s.deviceId,
             books: booksToSend,
-            bookmarks: s.bookmarks,
-            annotations: s.annotations,
-            notes: s.notes,
+            bookmarks: sendMarks ? s.bookmarks : undefined,
+            annotations: sendMarks ? s.annotations : undefined,
+            notes: sendNotes ? s.notes : undefined,
             chatSessions: syncableChats,
-            customBookmarkDesigns: s.customBookmarkDesigns,
-            customStationery: s.customStationery,
-            categories: s.categories,
-            collections: s.collections,
-            readerSettings: s.readerSettings,
+            customBookmarkDesigns: sendMarks ? s.customBookmarkDesigns : undefined,
+            customStationery: sendMarks ? s.customStationery : undefined,
+            categories: sendPersonalization ? s.categories : undefined,
+            collections: sendPersonalization ? s.collections : undefined,
+            readerSettings: sendPersonalization ? s.readerSettings : undefined,
             theme: pushTheme ? s.theme : null,
             themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
             profile: pushProfile ? s.profile : null,
@@ -3370,6 +3433,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           keepCoverIds,
           lastRemoteUpdatedAtRef.current
         );
+
+        for (const sc of scopes) dirtyScopesRef.current.delete(sc);
 
         const sentBookSet = new Set(sentBooks);
         const sentBmSet = new Set(sentBookmarks);
@@ -3781,6 +3846,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     syncedCoverSigRef.current.clear();
     syncedBookUpdatedAtRef.current.clear();
     lastRemoteUpdatedAtRef.current = 0;
+    dirtyScopesRef.current.clear();
     localActiveSessionRef.current = null;
 
     await Promise.all([

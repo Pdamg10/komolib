@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Bookmark,
@@ -100,6 +100,8 @@ export const ReaderShell: React.FC = () => {
   const [marksTab, setMarksTab] = useState<'separadores' | 'anotaciones' | 'marcadores'>('anotaciones');
   const [annFilter, setAnnFilter] = useState<AnnotationTool | 'all'>('all');
   const [showHangingBookmark, setShowHangingBookmark] = useState(true);
+  const [bookmarkTucked, setBookmarkTucked] = useState(false);
+  const bookmarkHideTimerRef = useRef<number | null>(null);
   const [pinMode, setPinMode] = useState(false);
 
   // Active text/page selection annotation composer
@@ -164,6 +166,40 @@ export const ReaderShell: React.FC = () => {
     }
     return allBookmarkDesigns[0] || null;
   }, [activeBook?.activeBookmarkDesignId, allBookmarkDesigns]);
+
+  // Auto-tuck the hanging bookmark smoothly after entering the book (or closing the separadores drawer)
+  // so it never blocks text while reading, while keeping a tiny non-invasive ribbon peek at the top edge.
+  useEffect(() => {
+    if (bookmarkHideTimerRef.current !== null) {
+      window.clearTimeout(bookmarkHideTimerRef.current);
+      bookmarkHideTimerRef.current = null;
+    }
+    if (!activeBook || !activeBookmarkDesign) return;
+    if (drawer === 'marks' && marksTab === 'separadores') {
+      setBookmarkTucked(false);
+      return;
+    }
+    setBookmarkTucked(false);
+    bookmarkHideTimerRef.current = window.setTimeout(() => {
+      setBookmarkTucked(true);
+      bookmarkHideTimerRef.current = null;
+    }, 2200);
+    return () => {
+      if (bookmarkHideTimerRef.current !== null) {
+        window.clearTimeout(bookmarkHideTimerRef.current);
+        bookmarkHideTimerRef.current = null;
+      }
+    };
+  }, [activeBook?.id, activeBookmarkDesign?.id, drawer, marksTab]);
+
+  const tuckBookmarkNow = useCallback(() => {
+    if (drawer === 'marks' && marksTab === 'separadores') return;
+    if (bookmarkHideTimerRef.current !== null) {
+      window.clearTimeout(bookmarkHideTimerRef.current);
+      bookmarkHideTimerRef.current = null;
+    }
+    setBookmarkTucked(true);
+  }, [drawer, marksTab]);
 
   const effectiveJumpTarget = localJumpTarget || (readerJumpTarget?.bookId === activeBook?.id ? readerJumpTarget : null);
 
@@ -615,13 +651,19 @@ export const ReaderShell: React.FC = () => {
       </header>
 
       {/* Main Reader Stage */}
-      <main className="reader-stage">
+      <main
+        className="reader-stage"
+        onPointerDown={tuckBookmarkNow}
+        onWheel={tuckBookmarkNow}
+      >
         {/* Visual Hanging Physical Bookmark (Separador de Libro) */}
         {showHangingBookmark && activeBookmarkDesign && (
           <button
             type="button"
-            className="reader-hanging-bookmark"
+            className={`reader-hanging-bookmark ${bookmarkTucked ? 'reading-tucked' : ''}`}
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={() => {
+              setBookmarkTucked(false);
               setMarksTab('separadores');
               setDrawer('marks');
             }}

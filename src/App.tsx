@@ -307,13 +307,13 @@ const AppWorkspace: React.FC = () => {
       {/* Fullscreen Universal Reader */}
       <ReaderShell />
 
-      {/* Modals & Floating Audio Player */}
-      <ImportModal />
-      <StudioModal />
+      {/* Modals & Floating Audio Player (mounted lazily only when open for instant UI responsiveness) */}
+      {importModalOpen && <ImportModal />}
+      {studioModalOpen && <StudioModal />}
       <BookOptionsSheet />
-      <BookDetailModal />
-      <MissingFileModal />
-      <ProfileModal />
+      {editingBook && <BookDetailModal />}
+      {missingFileBook && <MissingFileModal />}
+      {profileModalOpen && <ProfileModal />}
       <AudioPlayerBar />
 
       {/* Toast */}

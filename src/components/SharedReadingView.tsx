@@ -239,6 +239,42 @@ export const SharedReadingView: React.FC = () => {
     );
   }, [activeShelf?.code, syncConfig, deviceId, updateLocalShelf, removeLocalShelf, showToast]);
 
+  const [shareBookSearch, setShareBookSearch] = useState('');
+  const [shelfBookSearch, setShelfBookSearch] = useState('');
+
+  // Precompute marks count once O(M) instead of O(N*M) per book on render
+  const marksCountByBook = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const a of annotations) map.set(a.bookId, (map.get(a.bookId) || 0) + 1);
+    for (const bm of bookmarks) map.set(bm.bookId, (map.get(bm.bookId) || 0) + 1);
+    return map;
+  }, [annotations, bookmarks]);
+
+  const filteredShareBooks = useMemo(() => {
+    const q = shareBookSearch.trim().toLowerCase();
+    const list = q
+      ? books.filter(
+          (b) =>
+            b.title.toLowerCase().includes(q) ||
+            (b.author || '').toLowerCase().includes(q) ||
+            (b.folderPath || '').toLowerCase().includes(q)
+        )
+      : books;
+    return list.slice(0, 80);
+  }, [books, shareBookSearch]);
+
+  const filteredShelfPickerBooks = useMemo(() => {
+    const q = shelfBookSearch.trim().toLowerCase();
+    const list = q
+      ? books.filter(
+          (b) =>
+            b.title.toLowerCase().includes(q) ||
+            (b.author || '').toLowerCase().includes(q)
+        )
+      : books;
+    return list.slice(0, 80);
+  }, [books, shelfBookSearch]);
+
   // Compute which book IDs are currently targeted by the Sharing Studio
   const targetBookIdsForShare = useMemo(() => {
     if (shareScope === 'single') {
@@ -654,12 +690,20 @@ export const SharedReadingView: React.FC = () => {
           {/* Step 2: Dynamic Content based on Selected Scope */}
           {shareScope === 'single' ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+              {books.length > 40 && (
+                <input
+                  className="studio-input"
+                  placeholder={`Buscar entre ${books.length} libros...`}
+                  value={shareBookSearch}
+                  onChange={(e) => setShareBookSearch(e.target.value)}
+                />
+              )}
               <select
                 className="studio-input"
                 value={selectedBookId}
                 onChange={(e) => setSelectedBookId(e.target.value)}
               >
-                {books.map((b) => (
+                {filteredShareBooks.map((b) => (
                   <option key={b.id} value={b.id}>
                     {b.title} ({b.format.toUpperCase()})
                   </option>
@@ -709,12 +753,19 @@ export const SharedReadingView: React.FC = () => {
                 </button>
               </div>
 
+              {books.length > 40 && (
+                <input
+                  className="studio-input"
+                  placeholder={`Filtrar libros (${books.length} en biblioteca)...`}
+                  value={shareBookSearch}
+                  onChange={(e) => setShareBookSearch(e.target.value)}
+                />
+              )}
+
               <div className="share-book-checklist">
-                {books.map((b) => {
+                {filteredShareBooks.map((b) => {
                   const checked = multiSelectedIds.includes(b.id);
-                  const bMarks =
-                    annotations.filter((a) => a.bookId === b.id).length +
-                    bookmarks.filter((bm) => bm.bookId === b.id).length;
+                  const bMarks = marksCountByBook.get(b.id) || 0;
                   return (
                     <button
                       key={b.id}
@@ -734,6 +785,11 @@ export const SharedReadingView: React.FC = () => {
                     </button>
                   );
                 })}
+                {books.length > filteredShareBooks.length && !shareBookSearch.trim() && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 6px' }}>
+                    Mostrando los primeros {filteredShareBooks.length} de {books.length}. Usa el buscador arriba para encontrar cualquier título.
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -1110,13 +1166,22 @@ export const SharedReadingView: React.FC = () => {
                 )}
 
                 <form onSubmit={handleAddBookToActiveShelf} style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                  {books.length > 40 && (
+                    <input
+                      className="studio-input"
+                      style={{ flex: '1 1 140px', minWidth: 0 }}
+                      placeholder="Buscar libro para añadir..."
+                      value={shelfBookSearch}
+                      onChange={(e) => setShelfBookSearch(e.target.value)}
+                    />
+                  )}
                   <select
                     className="studio-input"
                     style={{ flex: '1 1 160px', minWidth: 0 }}
                     value={addingBookToShelfId}
                     onChange={(e) => setAddingBookToShelfId(e.target.value)}
                   >
-                    {books.map((b) => (
+                    {filteredShelfPickerBooks.map((b) => (
                       <option key={b.id} value={b.id}>
                         Añadir libro: {b.title} ({b.format.toUpperCase()})
                       </option>
