@@ -161,16 +161,27 @@ export async function parseJsonResponse<T>(res: Response, url: string): Promise<
  */
 export async function fetchApi(url: string, init?: RequestInit): Promise<Response> {
   const method = (init?.method || 'GET').toUpperCase();
-  const canRetryColdStart = method === 'GET' && /\.onrender\.com\b/i.test(url);
+  const isRender = /\.onrender\.com\b/i.test(url);
+  const canRetryColdStart = isRender && (method === 'GET' || method === 'PUT');
+  const maxAttempts = canRetryColdStart ? 3 : 1;
 
   let lastError: unknown;
-  for (let attempt = 0; attempt < (canRetryColdStart ? 2 : 1); attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       return await fetch(url, init);
     } catch (error) {
       lastError = error;
-      if (canRetryColdStart && attempt === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 2500));
+      if (canRetryColdStart && attempt < maxAttempts - 1) {
+        // Wake Render cold-start service gently before retrying an idempotent GET/PUT
+        if (method === 'PUT') {
+          try {
+            const origin = new URL(url).origin;
+            await fetch(`${origin}/api/health`).catch(() => undefined);
+          } catch {
+            // ignore wake-up probe errors
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 3000));
         continue;
       }
     }
@@ -595,13 +606,66 @@ export async function syncFullState(
       : localData.theme;
 
   const url = `${base}/api/sync/state`;
+
+  // Split large book libraries into safe <= 1.8 MB chunks so Cloudflare / Render Free never drops
+  // a huge single PUT payload with "Failed to fetch" (OOM / proxy body limit / mobile timeout).
+  const MAX_CHUNK_CHARS = 1_800_000;
+  const MAX_CHUNK_BOOKS = 120;
+  const bookEntries = Object.entries(booksMap);
+  const bookChunks: Array<Record<string, BookItem>> = [];
+
+  if (bookEntries.length === 0) {
+    bookChunks.push({});
+  } else {
+    let currentChunk: Record<string, BookItem> = {};
+    let currentChars = 0;
+    let currentCount = 0;
+    for (const [id, item] of bookEntries) {
+      const approxChars = JSON.stringify(item).length + id.length + 12;
+      if (
+        currentCount > 0 &&
+        (currentChars + approxChars > MAX_CHUNK_CHARS || currentCount >= MAX_CHUNK_BOOKS)
+      ) {
+        bookChunks.push(currentChunk);
+        currentChunk = {};
+        currentChars = 0;
+        currentCount = 0;
+      }
+      currentChunk[id] = item;
+      currentChars += approxChars;
+      currentCount += 1;
+    }
+    if (currentCount > 0 || bookChunks.length === 0) {
+      bookChunks.push(currentChunk);
+    }
+  }
+
+  // Upload intermediate chunks first with ?partial=1
+  for (let i = 0; i < bookChunks.length - 1; i++) {
+    const partialUrl = `${url}?partial=1`;
+    const partialRes = await fetchApi(partialUrl, {
+      method: 'PUT',
+      headers: buildAuthHeaders(config, true),
+      body: JSON.stringify({
+        deviceId: localData.deviceId,
+        spaceId: config.spaceId || undefined,
+        books: bookChunks[i],
+      }),
+    });
+    if (!partialRes.ok) {
+      const errText = await partialRes.text().catch(() => '');
+      throw new Error(errText || `Error de sincronización en lote ${i + 1} (${partialRes.status})`);
+    }
+  }
+
+  const finalBooksChunk = bookChunks[bookChunks.length - 1] || {};
   const res = await fetchApi(url, {
     method: 'PUT',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({
       deviceId: localData.deviceId,
       spaceId: config.spaceId || undefined,
-      books: booksMap,
+      books: finalBooksChunk,
       bookmarks: localData.bookmarks,
       annotations: localData.annotations || [],
       notes: localData.notes,
@@ -633,21 +697,33 @@ export async function syncFullState(
   const merged = await parseJsonResponse<RemoteSyncPayload>(res, url);
 
   if (uploadMissingFiles) {
-    for (const book of localData.books) {
-      const remoteEntry = merged.books[book.id];
-      if (book.hasLocalFile && !book.isDemo && !remoteEntry?.hasRemoteFile) {
-        const up: { ok: boolean; remoteFileName?: string; format?: BookItem['format'] } =
-          await uploadBookToServer(config, book, localData.deviceId).catch(() => ({
-            ok: false,
-          }));
-        if (up.ok && merged.books[book.id]) {
-          merged.books[book.id] = {
-            ...merged.books[book.id],
-            hasRemoteFile: true,
-            remoteFileName: up.remoteFileName || merged.books[book.id].remoteFileName,
-            format: up.format || merged.books[book.id].format,
-          };
-        }
+    // Upload up to 5 missing small/recent files during quick state sync so large 1,000+ libraries
+    // never stall "Guardar ahora" (bulk offline sync & live SSE relay handle the rest).
+    const candidates = localData.books
+      .filter((book) => {
+        const remoteEntry = merged.books[book.id];
+        return (
+          book.hasLocalFile &&
+          !book.isDemo &&
+          !remoteEntry?.hasRemoteFile &&
+          (!book.fileSize || book.fileSize <= 25 * 1024 * 1024)
+        );
+      })
+      .sort((a, b) => (b.lastReadAt || b.addedAt || 0) - (a.lastReadAt || a.addedAt || 0))
+      .slice(0, 5);
+
+    for (const book of candidates) {
+      const up: { ok: boolean; remoteFileName?: string; format?: BookItem['format'] } =
+        await uploadBookToServer(config, book, localData.deviceId).catch(() => ({
+          ok: false,
+        }));
+      if (up.ok && merged.books[book.id]) {
+        merged.books[book.id] = {
+          ...merged.books[book.id],
+          hasRemoteFile: true,
+          remoteFileName: up.remoteFileName || merged.books[book.id].remoteFileName,
+          format: up.format || merged.books[book.id].format,
+        };
       }
     }
   }

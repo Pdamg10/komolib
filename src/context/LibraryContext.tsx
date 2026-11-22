@@ -3263,6 +3263,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           cs.messages.some((m) => m.sender === 'user')
         );
 
+        const keepCoverIds = new Set<string>();
+        for (const b of s.books) {
+          if (b.isDemo || !b.coverDataUrl) continue;
+          const confirmedSig = syncedCoverSigRef.current.get(b.id);
+          if (confirmedSig && confirmedSig === getCoverSignature(b.coverDataUrl)) {
+            keepCoverIds.add(b.id);
+          }
+        }
+        const keepWallpaper =
+          Boolean(s.theme.customWallpaperUrl) &&
+          s.theme.customWallpaperUrl === lastSyncedWallpaperRef.current;
+
         const merged = await syncFullState(
           cfg,
           {
@@ -3290,8 +3302,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedChatSessionIds: sentChats,
           },
           true,
-          false,
-          false
+          keepCoverIds.size > 0,
+          keepWallpaper,
+          keepCoverIds
         );
 
         const sentBookSet = new Set(sentBooks);
@@ -3555,6 +3568,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const themeTsToSend = pushTheme ? themeUpdatedAtRef.current || Date.now() : 0;
         const profileTsToSend = pushProfile ? profileUpdatedAtRef.current || Date.now() : 0;
 
+        const loginKeepCovers = new Set<string>();
+        for (const b of s.books) {
+          if (b.isDemo || !b.coverDataUrl) continue;
+          const remoteCover = remote.books?.[b.id]?.coverDataUrl;
+          if (remoteCover && getCoverSignature(remoteCover) === getCoverSignature(b.coverDataUrl)) {
+            loginKeepCovers.add(b.id);
+          }
+        }
+        const loginKeepWallpaper =
+          Boolean(s.theme.customWallpaperUrl) &&
+          remote.theme?.customWallpaperUrl === s.theme.customWallpaperUrl;
+
         const merged = await syncFullState(
           nextCfg,
           {
@@ -3582,8 +3607,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedChatSessionIds: deletedChatSessionIdsRef.current,
           },
           true,
-          false,
-          false
+          loginKeepCovers.size > 0,
+          loginKeepWallpaper,
+          loginKeepCovers
         );
 
         const finalBooks = await applyRemotePayload(merged, remoteHasData && !localThemeCustom);

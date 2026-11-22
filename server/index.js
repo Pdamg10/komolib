@@ -824,6 +824,9 @@ app.put('/api/sync/state', (req, res) => {
   };
 
   writeState(nextState, spaceId);
+  if (req.query.partial === '1') {
+    return res.json({ ok: true, partial: true, updatedAt: now });
+  }
   broadcastSyncUpdate(incoming.deviceId, nextState.updatedAt, spaceId);
   res.json(nextState);
 });
