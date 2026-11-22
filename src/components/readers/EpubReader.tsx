@@ -288,6 +288,15 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
       getComputedStyle(document.documentElement).getPropertyValue('--accent-secondary').trim() ||
       '#8d7ec7';
     r.themes.default({
+      'html, body, *': {
+        'scrollbar-width': 'none !important',
+        '-ms-overflow-style': 'none !important',
+      },
+      '*::-webkit-scrollbar': {
+        display: 'none !important',
+        width: '0 !important',
+        height: '0 !important',
+      },
       body: {
         background: `${pal.bg} !important`,
         color: `${pal.fg} !important`,

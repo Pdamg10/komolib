@@ -602,10 +602,44 @@ app.get('/api/network-info', (req, res) => {
   });
 });
 
+function buildSlimSyncResponse(state, sinceUpdatedAt = 0, incomingBookIds = null) {
+  const since = Number(sinceUpdatedAt) || 0;
+  if (since <= 0) return state;
+
+  const slimBooks = {};
+  for (const [id, book] of Object.entries(state.books || {})) {
+    if (!book) continue;
+    const isUnchanged =
+      (book.updatedAt || 0) <= since &&
+      (!incomingBookIds || !incomingBookIds.has(id));
+    if (isUnchanged && book.coverDataUrl) {
+      slimBooks[id] = { ...book, coverDataUrl: '__KEEP__' };
+    } else {
+      slimBooks[id] = book;
+    }
+  }
+
+  let slimTheme = state.theme;
+  if (
+    slimTheme &&
+    slimTheme.customWallpaperUrl &&
+    (state.themeUpdatedAt || 0) <= since
+  ) {
+    slimTheme = { ...slimTheme, customWallpaperUrl: '__KEEP__' };
+  }
+
+  return {
+    ...state,
+    books: slimBooks,
+    theme: slimTheme,
+  };
+}
+
 app.get('/api/sync/state', (req, res) => {
   const spaceId = getRequestSpaceId(req);
   const state = readState(spaceId);
-  res.json(state);
+  const since = Number(req.query.since || 0) || 0;
+  res.json(buildSlimSyncResponse(state, since));
 });
 
 app.get('/api/sync/stream', (req, res) => {
@@ -828,7 +862,12 @@ app.put('/api/sync/state', (req, res) => {
     return res.json({ ok: true, partial: true, updatedAt: now });
   }
   broadcastSyncUpdate(incoming.deviceId, nextState.updatedAt, spaceId);
-  res.json(nextState);
+  const sinceUpdatedAt = Number(incoming.sinceUpdatedAt || 0) || 0;
+  const incomingBookIds =
+    incoming.books && typeof incoming.books === 'object'
+      ? new Set(Object.keys(incoming.books))
+      : null;
+  res.json(buildSlimSyncResponse(nextState, sinceUpdatedAt, incomingBookIds));
 });
 
 app.post('/api/books/upload', upload.single('file'), (req, res) => {

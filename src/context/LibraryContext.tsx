@@ -525,6 +525,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const profileUpdatedAtRef = useRef<number>(0);
   const lastSyncedWallpaperRef = useRef<string>('');
   const syncedCoverSigRef = useRef<Map<string, string>>(new Map());
+  const syncedBookUpdatedAtRef = useRef<Map<string, number>>(new Map());
+  const lastRemoteUpdatedAtRef = useRef<number>(0);
   const lastResumeSyncAtRef = useRef<number>(0);
   const localActiveSessionRef = useRef<ActiveReadingSession | null>(null);
   const suppressAutoSyncRef = useRef<boolean>(false);
@@ -1108,19 +1110,39 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             mergedMap.set(localBook.id, localBook);
           }
         }
+        if (merged.updatedAt && merged.updatedAt > lastRemoteUpdatedAtRef.current) {
+          lastRemoteUpdatedAtRef.current = merged.updatedAt;
+        }
         const booksToAutoDownload: BookItem[] = [];
+        let booksStateChanged = deletedBookSet.size > 0;
         for (const remoteBook of Object.values(merged.books || {})) {
           if (!remoteBook || remoteBook.isDemo || deletedBookSet.has(remoteBook.id)) continue;
           const local = mergedMap.get(remoteBook.id);
-          const hasFileRec = local?.hasLocalFile ? true : Boolean(await dbGetBookFile(remoteBook.id));
 
-          // Track confirmed server cover so future lightweight syncs only omit unchanged covers
+          // Record confirmed server state for ultra-fast future delta syncs
+          syncedBookUpdatedAtRef.current.set(remoteBook.id, remoteBook.updatedAt || 0);
           if (remoteBook.coverDataUrl && remoteBook.coverDataUrl !== '__KEEP__') {
             syncedCoverSigRef.current.set(remoteBook.id, getCoverSignature(remoteBook.coverDataUrl));
+          } else if (remoteBook.coverDataUrl === '__KEEP__' && local?.coverDataUrl) {
+            syncedCoverSigRef.current.set(remoteBook.id, getCoverSignature(local.coverDataUrl));
           }
 
           const remoteHasRaster = isRasterCoverDataUrl(remoteBook.coverDataUrl);
           const localHasRaster = isRasterCoverDataUrl(local?.coverDataUrl);
+
+          // Fast path: unchanged book already persisted locally -> skip expensive IndexedDB write!
+          if (
+            local &&
+            !forceRestore &&
+            (remoteBook.updatedAt || 0) === (local.updatedAt || 0) &&
+            Boolean(remoteBook.hasRemoteFile) === Boolean(local.hasRemoteFile) &&
+            (remoteBook.remoteFileName || '') === (local.remoteFileName || '') &&
+            (!remoteHasRaster || localHasRaster)
+          ) {
+            continue;
+          }
+
+          const hasFileRec = local?.hasLocalFile ? true : Boolean(await dbGetBookFile(remoteBook.id));
 
           if (!local || forceRestore || (remoteBook.updatedAt || 0) >= (local.updatedAt || 0)) {
             let safeCover =
@@ -1166,6 +1188,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             };
             await dbPutBook(mergedItem);
             mergedMap.set(remoteBook.id, mergedItem);
+            booksStateChanged = true;
             if (!hasFileRec && remoteBook.hasRemoteFile) {
               booksToAutoDownload.push(mergedItem);
             }
@@ -1189,6 +1212,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               };
               await dbPutBook(updatedLocal);
               mergedMap.set(remoteBook.id, updatedLocal);
+              booksStateChanged = true;
               if (!hasFileRec && updatedLocal.hasRemoteFile) {
                 booksToAutoDownload.push(updatedLocal);
               }
@@ -1199,7 +1223,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const nextBooks = Array.from(mergedMap.values()).sort(
           (a, b) => (b.lastReadAt || b.addedAt) - (a.lastReadAt || a.addedAt)
         );
-        setBooks(nextBooks);
+        if (booksStateChanged || nextBooks.length !== current.books.length) {
+          setBooks(nextBooks);
+        }
 
         // Background auto-download book files from user's cloud vault so they are immediately ready offline!
         if (booksToAutoDownload.length > 0) {
@@ -1388,7 +1414,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ) {
           const nextThemeTs = merged.themeUpdatedAt || (isThemeCustomized(merged.theme) ? themeUpdatedAtRef.current : 0);
           themeUpdatedAtRef.current = nextThemeTs;
-          const mergedTheme = { ...DEFAULT_THEME, ...merged.theme };
+          const resolvedWallpaper =
+            merged.theme.customWallpaperUrl === '__KEEP__'
+              ? current.theme.customWallpaperUrl || ''
+              : merged.theme.customWallpaperUrl || '';
+          const mergedTheme = {
+            ...DEFAULT_THEME,
+            ...merged.theme,
+            customWallpaperUrl: resolvedWallpaper,
+          };
           setTheme(mergedTheme);
           applyThemeCssVars(mergedTheme);
           await dbSetKV('theme', mergedTheme);
@@ -1455,8 +1489,22 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             cs.messages.some((m) => m.sender === 'user')
           );
 
+          const hasBaseline = syncedBookUpdatedAtRef.current.size > 0;
+          const booksToSend = hasBaseline
+            ? s.books.filter((b) => {
+                if (b.isDemo) return false;
+                const syncedTs = syncedBookUpdatedAtRef.current.get(b.id);
+                if (syncedTs === undefined || (b.updatedAt || 0) > syncedTs) return true;
+                if (b.coverDataUrl) {
+                  const confirmedSig = syncedCoverSigRef.current.get(b.id);
+                  if (!confirmedSig || confirmedSig !== getCoverSignature(b.coverDataUrl)) return true;
+                }
+                return false;
+              })
+            : s.books;
+
           const keepCoverIds = new Set<string>();
-          for (const b of s.books) {
+          for (const b of booksToSend) {
             if (b.isDemo || !b.coverDataUrl) continue;
             const confirmedSig = syncedCoverSigRef.current.get(b.id);
             if (confirmedSig && confirmedSig === getCoverSignature(b.coverDataUrl)) {
@@ -1468,7 +1516,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             s.syncConfig,
             {
               deviceId: s.deviceId,
-              books: s.books,
+              books: booksToSend,
               bookmarks: s.bookmarks,
               annotations: s.annotations,
               notes: s.notes,
@@ -1490,10 +1538,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               deletedBookmarkDesignIds: sentDesigns,
               deletedChatSessionIds: sentChats,
             },
-            true,
+            false,
             true,
             keepWallpaper,
-            keepCoverIds
+            keepCoverIds,
+            lastRemoteUpdatedAtRef.current
           );
 
           const sentBookSet = new Set(sentBooks);
@@ -3263,8 +3312,22 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           cs.messages.some((m) => m.sender === 'user')
         );
 
+        const hasBaseline = syncedBookUpdatedAtRef.current.size > 0;
+        const booksToSend = hasBaseline
+          ? s.books.filter((b) => {
+              if (b.isDemo) return false;
+              const syncedTs = syncedBookUpdatedAtRef.current.get(b.id);
+              if (syncedTs === undefined || (b.updatedAt || 0) > syncedTs) return true;
+              if (b.coverDataUrl) {
+                const confirmedSig = syncedCoverSigRef.current.get(b.id);
+                if (!confirmedSig || confirmedSig !== getCoverSignature(b.coverDataUrl)) return true;
+              }
+              return false;
+            })
+          : s.books;
+
         const keepCoverIds = new Set<string>();
-        for (const b of s.books) {
+        for (const b of booksToSend) {
           if (b.isDemo || !b.coverDataUrl) continue;
           const confirmedSig = syncedCoverSigRef.current.get(b.id);
           if (confirmedSig && confirmedSig === getCoverSignature(b.coverDataUrl)) {
@@ -3279,7 +3342,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           cfg,
           {
             deviceId: s.deviceId,
-            books: s.books,
+            books: booksToSend,
             bookmarks: s.bookmarks,
             annotations: s.annotations,
             notes: s.notes,
@@ -3301,10 +3364,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedBookmarkDesignIds: sentDesigns,
             deletedChatSessionIds: sentChats,
           },
-          true,
+          false,
           keepCoverIds.size > 0,
           keepWallpaper,
-          keepCoverIds
+          keepCoverIds,
+          lastRemoteUpdatedAtRef.current
         );
 
         const sentBookSet = new Set(sentBooks);
@@ -3580,11 +3644,25 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           Boolean(s.theme.customWallpaperUrl) &&
           remote.theme?.customWallpaperUrl === s.theme.customWallpaperUrl;
 
+        const loginBooksToSend = s.books.filter((b) => {
+          if (b.isDemo) return false;
+          const rb = remote.books?.[b.id];
+          if (!rb) return true;
+          if ((b.updatedAt || 0) > (rb.updatedAt || 0)) return true;
+          if (
+            b.coverDataUrl &&
+            (!rb.coverDataUrl || getCoverSignature(rb.coverDataUrl) !== getCoverSignature(b.coverDataUrl))
+          ) {
+            return true;
+          }
+          return false;
+        });
+
         const merged = await syncFullState(
           nextCfg,
           {
             deviceId: s.deviceId,
-            books: s.books,
+            books: loginBooksToSend,
             bookmarks: s.bookmarks,
             annotations: s.annotations,
             notes: s.notes,
@@ -3606,10 +3684,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
             deletedChatSessionIds: deletedChatSessionIdsRef.current,
           },
-          true,
+          false,
           loginKeepCovers.size > 0,
           loginKeepWallpaper,
-          loginKeepCovers
+          loginKeepCovers,
+          remote.updatedAt || 0
         );
 
         const finalBooks = await applyRemotePayload(merged, remoteHasData && !localThemeCustom);
@@ -3700,6 +3779,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     profileUpdatedAtRef.current = 0;
     lastSyncedWallpaperRef.current = '';
     syncedCoverSigRef.current.clear();
+    syncedBookUpdatedAtRef.current.clear();
+    lastRemoteUpdatedAtRef.current = 0;
     localActiveSessionRef.current = null;
 
     await Promise.all([
@@ -4359,13 +4440,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     let active = true;
     let sseIsUp = false;
 
-    // Initial silent pull + push merge on startup
-    triggerSync(true).catch(() => undefined);
-
     const pullRemoteNow = async () => {
       if (!active) return;
       try {
-        const remote = await fetchRemoteSyncState(stateRef.current.syncConfig);
+        const remote = await fetchRemoteSyncState(
+          stateRef.current.syncConfig,
+          lastRemoteUpdatedAtRef.current
+        );
         if (!active) return;
         await applyRemotePayload(remote);
         setServerOnline(true);
@@ -4375,6 +4456,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         // ignore transient network glitches
       }
     };
+
+    // Initial silent pull first (seeds syncedBookUpdatedAtRef so delta sync only sends actual changes!)
+    pullRemoteNow()
+      .then(() => {
+        if (active) return triggerSync(true);
+      })
+      .catch(() => undefined);
 
     // Subscribe to real-time SSE updates from other devices (e.g. Android APK <-> Web)
     const unsubscribe = subscribeToSyncStream(

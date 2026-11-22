@@ -116,6 +116,8 @@ public class MainActivity extends BridgeActivity {
 
         if (this.bridge != null && this.bridge.getWebView() != null) {
             this.bridge.getWebView().addJavascriptInterface(new KomoAndroidBridge(this), "KomoAndroid");
+            this.bridge.getWebView().setVerticalScrollBarEnabled(false);
+            this.bridge.getWebView().setHorizontalScrollBarEnabled(false);
         }
 
         // Intercept Android system back gesture / button so reading or modals return to the previous section instead of exiting the app

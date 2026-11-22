@@ -543,9 +543,13 @@ export async function deleteBookFromServer(config: SyncConfig, bookId: string): 
   }).catch(() => undefined);
 }
 
-export async function fetchRemoteSyncState(config: SyncConfig): Promise<RemoteSyncPayload> {
+export async function fetchRemoteSyncState(
+  config: SyncConfig,
+  sinceUpdatedAt = 0
+): Promise<RemoteSyncPayload> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
-  const url = `${base}/api/sync/state`;
+  const qs = sinceUpdatedAt > 0 ? `?since=${encodeURIComponent(String(sinceUpdatedAt))}` : '';
+  const url = `${base}/api/sync/state${qs}`;
   const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
@@ -581,7 +585,8 @@ export async function syncFullState(
   uploadMissingFiles = true,
   lightweight = false,
   keepWallpaper = lightweight,
-  keepCoverIds?: Set<string>
+  keepCoverIds?: Set<string>,
+  sinceUpdatedAt = 0
 ): Promise<RemoteSyncPayload> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const booksMap: Record<string, BookItem> = {};
@@ -610,7 +615,7 @@ export async function syncFullState(
   // Split large book libraries into safe <= 1.8 MB chunks so Cloudflare / Render Free never drops
   // a huge single PUT payload with "Failed to fetch" (OOM / proxy body limit / mobile timeout).
   const MAX_CHUNK_CHARS = 1_800_000;
-  const MAX_CHUNK_BOOKS = 120;
+  const MAX_CHUNK_BOOKS = 1000;
   const bookEntries = Object.entries(booksMap);
   const bookChunks: Array<Record<string, BookItem>> = [];
 
@@ -665,6 +670,7 @@ export async function syncFullState(
     body: JSON.stringify({
       deviceId: localData.deviceId,
       spaceId: config.spaceId || undefined,
+      sinceUpdatedAt: sinceUpdatedAt > 0 ? sinceUpdatedAt : undefined,
       books: finalBooksChunk,
       bookmarks: localData.bookmarks,
       annotations: localData.annotations || [],
