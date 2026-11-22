@@ -24,6 +24,7 @@ export interface ParticipantIdentity {
   name: string;
   avatarEmoji: string;
   avatarBg: string;
+  avatarImageUrl?: string;
   progress?: number;
   currentPage?: number;
   readingStatus?: ReadingStatus;
@@ -122,6 +123,7 @@ export async function updateSharedRoomProgress(
     name?: string;
     avatarEmoji?: string;
     avatarBg?: string;
+    avatarImageUrl?: string;
     progress: number;
     currentPage?: number;
     pageCount?: number;
@@ -146,6 +148,7 @@ export async function postSharedRoomComment(
     participantId: string;
     authorName: string;
     avatarEmoji: string;
+    avatarImageUrl?: string;
     text: string;
     progressAt: number;
     pageAt?: number;
@@ -255,7 +258,7 @@ export function subscribeToRoomStream(
 export async function createSharedShelf(
   config: SyncConfig,
   title: string,
-  member: { id: string; name: string; avatarEmoji: string; avatarBg: string }
+  member: { id: string; name: string; avatarEmoji: string; avatarBg: string; avatarImageUrl?: string }
 ): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
   const url = `${base}/api/shelves`;
@@ -284,7 +287,7 @@ export async function getSharedShelf(config: SyncConfig, code: string): Promise<
 export async function joinSharedShelf(
   config: SyncConfig,
   code: string,
-  member: { id: string; name: string; avatarEmoji: string; avatarBg: string }
+  member: { id: string; name: string; avatarEmoji: string; avatarBg: string; avatarImageUrl?: string }
 ): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
   const url = `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/join`;

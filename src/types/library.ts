@@ -346,6 +346,7 @@ export interface SharedParticipant {
   name: string;
   avatarEmoji: string;
   avatarBg: string;
+  avatarImageUrl?: string;
   progress: number;
   currentPage?: number;
   pageCount?: number;
@@ -359,6 +360,7 @@ export interface SharedComment {
   participantId: string;
   authorName: string;
   avatarEmoji: string;
+  avatarImageUrl?: string;
   text: string;
   progressAt: number;
   pageAt?: number;
@@ -435,7 +437,7 @@ export interface SharedShelf {
   updatedAt: number;
   members: Record<
     string,
-    { id: string; name: string; avatarEmoji: string; avatarBg: string; joinedAt: number }
+    { id: string; name: string; avatarEmoji: string; avatarBg: string; avatarImageUrl?: string; joinedAt: number }
   >;
   kickedIds?: string[];
   books: Record<string, SharedShelfBook>;

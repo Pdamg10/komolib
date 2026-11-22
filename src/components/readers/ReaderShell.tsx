@@ -82,6 +82,7 @@ export const ReaderShell: React.FC = () => {
     addCustomSticker,
     addCustomEmoji,
     deviceId,
+    profile,
     syncConfig,
     sharedRooms,
     updateLocalRoom,
@@ -1920,8 +1921,18 @@ export const ReaderShell: React.FC = () => {
                         marginBottom: 4,
                       }}
                     >
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
-                        <span>{p.avatarEmoji} {p.name} {isMe ? '(Tú)' : ''}</span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                        {(() => {
+                          const pImg = p.avatarImageUrl || (isMe ? profile.avatarImageUrl : undefined);
+                          return pImg ? (
+                            <img src={pImg} alt={p.name} className="participant-mini-avatar" />
+                          ) : (
+                            <span>{p.avatarEmoji || '🦊'}</span>
+                          );
+                        })()}
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {p.name} {isMe ? '(Tú)' : ''}
+                        </span>
                         {isPartAdmin && <span className="admin-role-pill">Admin</span>}
                       </span>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
@@ -2018,8 +2029,19 @@ export const ReaderShell: React.FC = () => {
                         marginBottom: 3,
                       }}
                     >
-                      <span>
-                        {c.avatarEmoji} {c.authorName}
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                        {(() => {
+                          const cImg =
+                            c.avatarImageUrl ||
+                            activeRoom.participants?.[c.participantId]?.avatarImageUrl ||
+                            (c.participantId === deviceId ? profile.avatarImageUrl : undefined);
+                          return cImg ? (
+                            <img src={cImg} alt={c.authorName} className="participant-mini-avatar" />
+                          ) : (
+                            <span>{c.avatarEmoji}</span>
+                          );
+                        })()}
+                        <span>{c.authorName}</span>
                       </span>
                       <span style={{ opacity: 0.7 }}>{Math.round(c.progressAt)}%</span>
                     </div>

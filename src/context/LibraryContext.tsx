@@ -2787,6 +2787,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               name: s.profile.name,
               avatarEmoji: s.profile.avatarEmoji,
               avatarBg: s.profile.avatarBg,
+              avatarImageUrl: s.profile.avatarImageUrl || '',
               progress: currentBook.progress || 0,
               currentPage: currentBook.currentPage,
               pageCount: currentBook.pageCount,
@@ -4340,20 +4341,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             return;
           }
         }
-        // Only show sync popup when pulling genuinely NEW remote changes!
+        // Automatic background sync stays silent (popup is reserved for explicit backups & account sign-in!)
         const prevModTime = lastDriveModifiedTimeRef.current;
-        let popupShown = false;
         const pulled = await pullStateFromGoogleDrive(
           stateRef.current.syncConfig,
           stateRef.current.googleDriveAuth || auth,
-          persistGoogleDriveAuth,
-          (pct, detail) => {
-            if (!checkVersionOnly && prevModTime && pct < 30) return;
-            if (pct >= 35) {
-              popupShown = true;
-              showSyncPopupProgress(pct, detail, 'Recibiendo cambios de otro dispositivo');
-            }
-          }
+          persistGoogleDriveAuth
         );
         if (!active) return;
         const hasNewRemoteData = Boolean(pulled.state && !pulled.fromCache && pulled.modifiedTime !== prevModTime);
@@ -4361,17 +4354,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           lastDriveModifiedTimeRef.current = pulled.modifiedTime;
         }
         if (pulled.state && hasNewRemoteData) {
-          if (!popupShown) {
-            popupShown = true;
-            showSyncPopupProgress(80, 'Aplicando cambios recibidos...', 'Recibiendo cambios de otro dispositivo');
-          }
-          const updatedBooks = await applyRemotePayload(pulled.state);
-          completeSyncPopup(
-            'Cambios recibidos y aplicados correctamente.',
-            `${updatedBooks.length} títulos · Google Drive`
-          );
-        } else if (popupShown) {
-          dismissSyncPopup();
+          await applyRemotePayload(pulled.state);
         }
         setSyncStatus('ok');
         setSyncMessage(`Google Drive activo (${auth.email})`);
@@ -4482,9 +4465,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       setSyncStatus('syncing');
       setSyncMessage(`Conectando cuenta ${cleanEmail}...`);
+      showSyncPopupProgress(18, `Conectando con ${cleanEmail}...`, 'Iniciando sesión en la nube');
 
       try {
         const remote = await fetchRemoteSyncState(nextCfg);
+        showSyncPopupProgress(50, 'Cargando libros y personalización...', 'Iniciando sesión en la nube');
         const remoteBooksCount = Object.values(remote.books || {}).filter((b) => b && !b.isDemo).length;
         const remoteHasData =
           remoteBooksCount > 0 ||
@@ -4503,6 +4488,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           !isProfileCustomized(s.profile);
 
         if (remoteHasData && localIsEmpty) {
+          showSyncPopupProgress(80, 'Restaurando tu biblioteca...', 'Iniciando sesión en la nube');
           // Returning user on a clean / new device: restore 100% of their saved cloud vault!
           const restoredBooks = await applyRemotePayload(remote, true);
           const mergedProfile: UserProfile = {
@@ -4518,8 +4504,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setServerOnline(true);
           setSyncStatus('ok');
           setSyncMessage(`Cuenta restaurada (${restoredBooks.length} títulos)`);
-          showToast(
-            `¡Bienvenido de vuelta! Se restauraron ${restoredBooks.length} libro(s) y tu personalización de ${cleanEmail}`
+          completeSyncPopup(
+            `¡Bienvenido de vuelta! Cuenta ${cleanEmail} restaurada.`,
+            `${restoredBooks.length} títulos listos`
           );
           return true;
         }
@@ -4619,27 +4606,29 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           remote.updatedAt || 0
         );
 
+        showSyncPopupProgress(82, 'Combinando y guardando cambios...', 'Iniciando sesión en la nube');
         const finalBooks = await applyRemotePayload(merged, remoteHasData && !localThemeCustom);
         const now = Date.now();
         updateSyncConfig({ lastSyncedAt: now });
         setServerOnline(true);
         setSyncStatus('ok');
         setSyncMessage(`Guardado en ${cleanEmail} (${finalBooks.length} títulos)`);
-        showToast(
+        completeSyncPopup(
           remoteHasData
-            ? `Cuenta ${cleanEmail} sincronizada (${finalBooks.length} títulos)`
-            : `Cuenta ${cleanEmail} vinculada. Todo lo que hagas se guardará automáticamente.`
+            ? `Cuenta ${cleanEmail} sincronizada correctamente.`
+            : `Cuenta ${cleanEmail} vinculada correctamente.`,
+          `${finalBooks.length} títulos`
         );
         return true;
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Error al conectar con la nube';
         setSyncStatus('error');
         setSyncMessage(message);
-        showToast('No se pudo guardar en la nube. Revisa la URL del servidor de sync.');
+        failSyncPopup(message);
         return false;
       }
     },
-    [applyRemotePayload, showToast, updateProfile, updateSyncConfig]
+    [applyRemotePayload, completeSyncPopup, failSyncPopup, showSyncPopupProgress, showToast, updateProfile, updateSyncConfig]
   );
 
   const resetAccountPin = useCallback(
@@ -5683,6 +5672,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             name: s.profile.name,
             avatarEmoji: s.profile.avatarEmoji,
             avatarBg: s.profile.avatarBg,
+            avatarImageUrl: s.profile.avatarImageUrl || '',
             progress: readyBook.progress || 0,
             currentPage: readyBook.currentPage || 1,
             readingStatus: readyBook.readingStatus || 'reading',
@@ -5717,6 +5707,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           name: s.profile.name,
           avatarEmoji: s.profile.avatarEmoji,
           avatarBg: s.profile.avatarBg,
+          avatarImageUrl: s.profile.avatarImageUrl || '',
           progress: existingBook?.progress || 0,
           currentPage: existingBook?.currentPage || 1,
           readingStatus: existingBook?.readingStatus || 'reading',
@@ -5805,6 +5796,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         participantId: s.deviceId,
         authorName: s.profile.name,
         avatarEmoji: s.profile.avatarEmoji,
+        avatarImageUrl: s.profile.avatarImageUrl || '',
         text,
         progressAt,
         pageAt,
@@ -5916,6 +5908,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           name: s.profile.name,
           avatarEmoji: s.profile.avatarEmoji,
           avatarBg: s.profile.avatarBg,
+          avatarImageUrl: s.profile.avatarImageUrl || '',
         });
         let failedCount = 0;
         for (const bid of bookIds) {
@@ -5966,6 +5959,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           name: s.profile.name,
           avatarEmoji: s.profile.avatarEmoji,
           avatarBg: s.profile.avatarBg,
+          avatarImageUrl: s.profile.avatarImageUrl || '',
         });
         updateLocalShelf(shelf);
         setSelectedShelfCode(shelf.code);

@@ -1245,6 +1245,16 @@ app.get('/api/rooms', (req, res) => {
   res.json({ rooms: list });
 });
 
+function sanitizeSharedAvatarUrl(raw) {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 160000) return '';
+  if (/^(?:https?:\/\/|data:image\/(?:png|jpeg|jpg|webp|gif);base64,)/i.test(trimmed)) {
+    return trimmed;
+  }
+  return '';
+}
+
 app.post('/api/rooms', (req, res) => {
   const { book, participant } = req.body || {};
   if (!book?.id || !book?.title) {
@@ -1294,6 +1304,7 @@ app.post('/api/rooms', (req, res) => {
         name: participant?.name || 'Lector Komo',
         avatarEmoji: participant?.avatarEmoji || '🦊',
         avatarBg: participant?.avatarBg || '#f6d8ae',
+        avatarImageUrl: sanitizeSharedAvatarUrl(participant?.avatarImageUrl),
         progress: Number(participant?.progress ?? book.progress ?? 0),
         currentPage: participant?.currentPage ?? book.currentPage ?? 1,
         pageCount: book.pageCount,
@@ -1339,6 +1350,10 @@ app.post('/api/rooms/:code/join', (req, res) => {
     name: String(p.name || existing?.name || 'Invitado').slice(0, 40),
     avatarEmoji: p.avatarEmoji || existing?.avatarEmoji || '🦉',
     avatarBg: p.avatarBg || existing?.avatarBg || '#e8dccb',
+    avatarImageUrl:
+      p.avatarImageUrl !== undefined
+        ? sanitizeSharedAvatarUrl(p.avatarImageUrl)
+        : existing?.avatarImageUrl || '',
     progress: Number(p.progress ?? existing?.progress ?? 0),
     currentPage: p.currentPage ?? existing?.currentPage ?? 1,
     pageCount: room.bookMeta?.pageCount,
@@ -1370,6 +1385,7 @@ app.patch('/api/rooms/:code/progress', (req, res) => {
     name,
     avatarEmoji,
     avatarBg,
+    avatarImageUrl,
     progress,
     currentPage,
     pageCount,
@@ -1391,6 +1407,7 @@ app.patch('/api/rooms/:code/progress', (req, res) => {
     name: name || 'Lector',
     avatarEmoji: avatarEmoji || '🦊',
     avatarBg: avatarBg || '#f6d8ae',
+    avatarImageUrl: sanitizeSharedAvatarUrl(avatarImageUrl),
     joinedAt: now,
   };
 
@@ -1399,6 +1416,10 @@ app.patch('/api/rooms/:code/progress', (req, res) => {
     name: name ? String(name).slice(0, 40) : prev.name,
     avatarEmoji: avatarEmoji || prev.avatarEmoji,
     avatarBg: avatarBg || prev.avatarBg,
+    avatarImageUrl:
+      avatarImageUrl !== undefined
+        ? sanitizeSharedAvatarUrl(avatarImageUrl)
+        : prev.avatarImageUrl || '',
     progress: progress !== undefined ? Math.max(0, Math.min(100, Number(progress) || 0)) : prev.progress || 0,
     currentPage: currentPage !== undefined ? Number(currentPage) : prev.currentPage,
     pageCount: pageCount !== undefined ? Number(pageCount) : prev.pageCount || room.bookMeta?.pageCount,
@@ -1421,7 +1442,7 @@ app.post('/api/rooms/:code/comments', (req, res) => {
     return res.status(404).json({ error: 'Sala no encontrada' });
   }
 
-  const { participantId, authorName, avatarEmoji, text, progressAt, pageAt } = req.body || {};
+  const { participantId, authorName, avatarEmoji, avatarImageUrl, text, progressAt, pageAt } = req.body || {};
   const pId = String(participantId || 'anon').slice(0, 64);
   if (Array.isArray(room.kickedIds) && room.kickedIds.includes(pId)) {
     return res.status(403).json({ error: 'Fuiste eliminado de esta sala' });
@@ -1437,6 +1458,10 @@ app.post('/api/rooms/:code/comments', (req, res) => {
     participantId: pId,
     authorName: String(authorName || 'Lector').slice(0, 40),
     avatarEmoji: avatarEmoji || '🦊',
+    avatarImageUrl:
+      sanitizeSharedAvatarUrl(avatarImageUrl) ||
+      room.participants?.[pId]?.avatarImageUrl ||
+      '',
     text: cleanText,
     progressAt: Math.max(0, Math.min(100, Number(progressAt) || 0)),
     pageAt: pageAt !== undefined ? Number(pageAt) : undefined,
@@ -1610,6 +1635,7 @@ app.post('/api/shelves', (req, res) => {
         name: String(member?.name || 'Lector Komo').slice(0, 40),
         avatarEmoji: member?.avatarEmoji || '🦊',
         avatarBg: member?.avatarBg || '#f6d8ae',
+        avatarImageUrl: sanitizeSharedAvatarUrl(member?.avatarImageUrl),
         joinedAt: now,
       },
     },
@@ -1647,6 +1673,10 @@ app.post('/api/shelves/:code/join', (req, res) => {
     name: String(m.name || shelf.members[mId]?.name || 'Lector invitado').slice(0, 40),
     avatarEmoji: m.avatarEmoji || shelf.members[mId]?.avatarEmoji || '🦉',
     avatarBg: m.avatarBg || shelf.members[mId]?.avatarBg || '#e8dccb',
+    avatarImageUrl:
+      m.avatarImageUrl !== undefined
+        ? sanitizeSharedAvatarUrl(m.avatarImageUrl)
+        : shelf.members[mId]?.avatarImageUrl || '',
     joinedAt: shelf.members[mId]?.joinedAt || now,
   };
   if (Array.isArray(shelf.kickedIds)) {
