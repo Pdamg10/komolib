@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Política de Privacidad — Komolib</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        background: #f3ede4;
+        color: #2c2520;
+        margin: 0;
+        padding: 32px 16px;
+        line-height: 1.65;
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        background: #fffaf4;
+        border: 1px solid #e2d6c8;
+        border-radius: 22px;
+        padding: 28px 26px;
+        box-shadow: 0 12px 32px rgba(44, 37, 32, 0.08);
+      }
+      h1 {
+        margin-top: 0;
+        font-size: 24px;
+        color: #2c2520;
+      }
+      h2 {
+        font-size: 16px;
+        margin-top: 22px;
+        color: #c85b43;
+      }
+      p, li {
+        font-size: 14px;
+        color: #4b4038;
+      }
+      a {
+        color: #c85b43;
+      }
+      .meta {
+        font-size: 12px;
+        color: #7c6f64;
+        margin-bottom: 18px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Política de Privacidad — Komolib</h1>
+      <div class="meta">Última actualización: noviembre de 2026</div>
+
+      <p>
+        <strong>Komolib</strong> es una aplicación de biblioteca digital y lector multi-formato
+        (Web y Android) diseñada con enfoque <em>local-first</em>. Tu biblioteca, libros, progreso
+        de lectura, anotaciones y marcadores pertenecen únicamente a ti.
+      </p>
+
+      <h2>1. Uso de Google Drive y permisos de Google</h2>
+      <p>
+        Cuando decides conectar tu cuenta de Google de forma opcional para sincronizar tus
+        dispositivos, Komolib solicita únicamente los siguientes permisos limitados:
+      </p>
+      <ul>
+        <li>
+          <code>https://www.googleapis.com/auth/drive.file</code>: permite crear y administrar
+          exclusivamente la carpeta <strong>Komolib/</strong> (y su subcarpeta
+          <strong>Komolib/Libros/</strong>) creada por la propia aplicación dentro de tu Google
+          Drive. Komolib <strong>no puede leer, modificar ni eliminar</strong> ningún otro archivo
+          o carpeta de tu Google Drive.
+        </li>
+        <li>
+          <code>userinfo.email</code> y <code>userinfo.profile</code>: se usan solo para mostrar
+          tu nombre, correo y avatar en la sección de Perfil de la app.
+        </li>
+      </ul>
+
+      <h2>2. Almacenamiento y protección de datos</h2>
+      <ul>
+        <li>
+          Tus libros y respaldos de estado (<code>komolib-state.json</code>) se almacenan en tu
+          dispositivo local (IndexedDB) y, si conectas Google Drive, directamente en tu propio
+          Google Drive.
+        </li>
+        <li>
+          Komolib <strong>no vende, no comparte ni transfiere</strong> tus datos personales ni tus
+          archivos de Google Drive a terceros ni los utiliza con fines publicitarios ni para
+          entrenar modelos de inteligencia artificial.
+        </li>
+        <li>
+          El uso que hace Komolib de la información recibida de las APIs de Google cumple con la
+          <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener noreferrer">
+            Política de Datos de Usuario de los Servicios API de Google
+          </a>, incluidos los requisitos de Uso Limitado.
+        </li>
+      </ul>
+
+      <h2>3. Revocación y eliminación de datos</h2>
+      <p>
+        Puedes desconectar Google Drive en cualquier momento desde <strong>Perfil → Desconectar
+        Drive</strong> en Komolib, eliminar la carpeta <strong>Komolib</strong> directamente en tu
+        Google Drive o revocar el acceso desde tu cuenta de Google en
+        <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener noreferrer">
+          myaccount.google.com/permissions
+        </a>.
+      </p>
+
+      <h2>4. Contacto</h2>
+      <p>
+        Si tienes preguntas sobre esta Política de Privacidad, escríbenos a
+        <a href="mailto:phamelamorey1998@gmail.com">phamelamorey1998@gmail.com</a>.
+      </p>
+
+      <p style="margin-top: 24px">
+        <a href="/">← Volver a Komolib</a>
+      </p>
+    </main>
+  </body>
+</html>
