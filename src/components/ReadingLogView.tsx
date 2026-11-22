@@ -12,7 +12,8 @@ import { useLibrary } from '../context/LibraryContext';
 import type { BookItem, ReadingStatus } from '../types/library';
 import {
   computeLibraryStats,
-  formatShortDate,
+  formatCompactDateTime,
+  formatDateTime,
   getEffectiveStatus,
   getPrimaryGenreLabel,
   STATUS_META,
@@ -109,7 +110,7 @@ export const ReadingLogView: React.FC = () => {
           </p>
         </div>
 
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        <div className="tracker-filter-pills">
           <button
             className={`pill-btn ${statusFilter === 'all' ? 'active' : ''}`}
             onClick={() => setStatusFilter('all')}
@@ -147,9 +148,9 @@ export const ReadingLogView: React.FC = () => {
                   <th>Género</th>
                   <th>Estado</th>
                   <th>Calificación</th>
-                  <th>Inicio</th>
-                  <th>Fin</th>
-                  <th>Págs / %</th>
+                  <th>Última lectura</th>
+                  <th>Fin (Cap. / Libro)</th>
+                  <th>Progreso</th>
                 </tr>
               </thead>
               <tbody>
@@ -221,10 +222,28 @@ export const ReadingLogView: React.FC = () => {
                           ))}
                         </div>
                       </td>
-                      <td className="log-date-cell">{formatShortDate(book.startedAt)}</td>
-                      <td className="log-date-cell">{formatShortDate(book.finishedAt)}</td>
+                      <td className="log-date-cell" title={formatDateTime(book.lastReadAt || book.startedAt)}>
+                        {formatCompactDateTime(book.lastReadAt || book.startedAt)}
+                      </td>
+                      <td
+                        className="log-date-cell"
+                        title={
+                          book.finishedAt
+                            ? `Libro completado: ${formatDateTime(book.finishedAt)}`
+                            : book.lastChapterFinishedAt
+                            ? `Capítulo terminado${book.lastChapterFinishedTitle ? ` (${book.lastChapterFinishedTitle})` : ''}: ${formatDateTime(book.lastChapterFinishedAt)}`
+                            : 'Sin finalizar aún'
+                        }
+                      >
+                        {book.finishedAt
+                          ? `✓ Libro · ${formatCompactDateTime(book.finishedAt)}`
+                          : book.lastChapterFinishedAt
+                          ? `Cap. · ${formatCompactDateTime(book.lastChapterFinishedAt)}`
+                          : '—'}
+                      </td>
                       <td className="log-date-cell">
-                        {book.pageCount ? `${book.pageCount} p.` : `${book.progress || 0}%`}
+                        <strong>{Math.round(book.progress || 0)}%</strong>
+                        {book.pageCount ? ` · ${book.pageCount}p` : ''}
                       </td>
                     </tr>
                   );
@@ -259,7 +278,7 @@ export const ReadingLogView: React.FC = () => {
             </div>
 
             <div className="review-hero">
-              <div className="book-hardcover-wrap" style={{ width: 96, flexShrink: 0, paddingBottom: 10 }}>
+              <div className="book-hardcover-wrap review-hero-cover">
                 <div
                   className="book-hardcover"
                   style={{
@@ -295,16 +314,26 @@ export const ReadingLogView: React.FC = () => {
 
                 <div className="review-meta-grid">
                   <span>
-                    <strong>Género:</strong> {getPrimaryGenreLabel(selectedBook, categories)}
+                    <strong>Progreso:</strong> {Math.round(selectedBook.progress || 0)}%
                   </span>
                   <span>
-                    <strong>Formato:</strong> {selectedBook.format.toUpperCase()}
+                    <strong>Género:</strong> {getPrimaryGenreLabel(selectedBook, categories)} ({selectedBook.format.toUpperCase()})
                   </span>
                   <span>
-                    <strong>Inicio:</strong> {formatShortDate(selectedBook.startedAt)}
+                    <strong>Leído:</strong> {formatDateTime(selectedBook.lastReadAt || selectedBook.startedAt)}
                   </span>
                   <span>
-                    <strong>Fin:</strong> {formatShortDate(selectedBook.finishedAt)}
+                    <strong>Inicio:</strong> {formatDateTime(selectedBook.startedAt)}
+                  </span>
+                  {selectedBook.lastChapterFinishedAt && (
+                    <span style={{ gridColumn: '1 / -1' }}>
+                      <strong>Cap. terminado:</strong>{' '}
+                      {selectedBook.lastChapterFinishedTitle ? `${selectedBook.lastChapterFinishedTitle} · ` : ''}
+                      {formatDateTime(selectedBook.lastChapterFinishedAt)}
+                    </span>
+                  )}
+                  <span style={{ gridColumn: selectedBook.lastChapterFinishedAt ? '1 / -1' : undefined }}>
+                    <strong>Libro terminado:</strong> {formatDateTime(selectedBook.finishedAt)}
                   </span>
                 </div>
 
@@ -407,7 +436,7 @@ export const ReadingLogView: React.FC = () => {
                   <div className="series-counts">
                     {s.completed} / {s.total} leídos
                   </div>
-                  <div className="goal-track" style={{ flex: 1 }}>
+                  <div className="goal-track series-progress-track">
                     <div className="goal-fill" style={{ width: `${pct}%` }} />
                   </div>
                   <span

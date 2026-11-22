@@ -12,6 +12,7 @@ import {
   Layers,
   Library,
   Lock,
+  LogOut,
   MessageSquare,
   PenTool,
   Plus,
@@ -25,6 +26,7 @@ import {
   Sparkles,
   StickyNote,
   Trash2,
+  UserMinus,
   UserPlus,
   Users,
   Wifi,
@@ -45,6 +47,7 @@ import type {
   ShareMarksSelection,
 } from '../types/library';
 import { generateQrSvgPath } from '../utils/qrCodeSvg';
+import { copyTextReliably, shareLinkOrText } from '../utils/nativeBridge';
 import { STATUS_META } from '../utils/readingStats';
 import {
   BookCoverVisual,
@@ -97,6 +100,7 @@ export const SharedReadingView: React.FC = () => {
     joinRoomByCode,
     sendRoomComment,
     leaveOrDeleteRoom,
+    kickUserFromRoom,
     updateLocalRoom,
     removeLocalRoom,
     sharedShelves,
@@ -111,6 +115,7 @@ export const SharedReadingView: React.FC = () => {
     removeBookFromSharedShelf,
     importBookFromShelf,
     leaveOrDeleteShelf,
+    kickUserFromShelf,
     updateLocalShelf,
     removeLocalShelf,
     openBook,
@@ -199,26 +204,40 @@ export const SharedReadingView: React.FC = () => {
     return subscribeToRoomStream(
       syncConfig,
       activeRoom.code,
-      (updated) => updateLocalRoom(updated),
+      (updated) => {
+        if (updated.kickedIds?.includes(deviceId) && !updated.participants?.[deviceId]) {
+          removeLocalRoom(updated.code);
+          showToast(`Fuiste eliminado de la sala ${updated.code} por el administrador`);
+          return;
+        }
+        updateLocalRoom(updated);
+      },
       (deletedCode) => {
         removeLocalRoom(deletedCode);
         showToast(`La sala ${deletedCode} fue cerrada por el anfitrión`);
       }
     );
-  }, [activeRoom?.code, syncConfig, updateLocalRoom, removeLocalRoom, showToast]);
+  }, [activeRoom?.code, syncConfig, deviceId, updateLocalRoom, removeLocalRoom, showToast]);
 
   useEffect(() => {
     if (!activeShelf?.code || !syncConfig.serverUrl.trim()) return;
     return subscribeToShelfStream(
       syncConfig,
       activeShelf.code,
-      (updated) => updateLocalShelf(updated),
+      (updated) => {
+        if (updated.kickedIds?.includes(deviceId) && !updated.members?.[deviceId]) {
+          removeLocalShelf(updated.code);
+          showToast(`Fuiste eliminado de la estantería ${updated.code} por el administrador`);
+          return;
+        }
+        updateLocalShelf(updated);
+      },
       (deletedCode) => {
         removeLocalShelf(deletedCode);
         showToast(`La estantería ${deletedCode} fue cerrada por el anfitrión`);
       }
     );
-  }, [activeShelf?.code, syncConfig, updateLocalShelf, removeLocalShelf, showToast]);
+  }, [activeShelf?.code, syncConfig, deviceId, updateLocalShelf, removeLocalShelf, showToast]);
 
   // Compute which book IDs are currently targeted by the Sharing Studio
   const targetBookIdsForShare = useMemo(() => {
@@ -387,13 +406,18 @@ export const SharedReadingView: React.FC = () => {
   };
 
   const handleCopy = async (text: string, key: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
+    const ok = await copyTextReliably(text);
+    if (ok) {
       setCopiedKey(key);
       showToast('Copiado al portapapeles');
       window.setTimeout(() => setCopiedKey(''), 1800);
-    } catch {
-      showToast('No se pudo copiar automáticamente');
+    } else {
+      const shared = await shareLinkOrText('Komolib', text);
+      if (shared === 'shared') {
+        showToast('Enlace listo para compartir');
+      } else {
+        showToast('No se pudo copiar automáticamente');
+      }
     }
   };
 
@@ -472,7 +496,7 @@ export const SharedReadingView: React.FC = () => {
     <section className="tracker-page" aria-label="Compartir libros y sincronización">
       {/* Header */}
       <div className="tracker-header-card">
-        <div style={{ flex: 1, minWidth: 220 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <span className="tracker-kicker">Privacidad Local · Compartir por Código · Sync Web ↔ APK</span>
           <h2 className="tracker-heading">Compartir Libros y Dispositivos</h2>
           <p className="tracker-quote">
@@ -480,7 +504,7 @@ export const SharedReadingView: React.FC = () => {
           </p>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div className="tracker-header-actions">
           <span
             className="pill-btn"
             style={{
@@ -890,20 +914,20 @@ export const SharedReadingView: React.FC = () => {
       </div>
 
       {/* ACTIVE SPACES SWITCHER */}
-      <div className="workspace-tab-strip">
+      <div className="workspace-tab-strip share-space-tabs">
         <button
           type="button"
           className={`workspace-tab-pill ${activeListTab === 'shelves' ? 'active' : ''}`}
           onClick={() => setActiveListTab('shelves')}
         >
-          <Library size={14} /> Estanterías e Intercambios ({sharedShelves.length})
+          <Library size={14} /> <span>Estanterías ({sharedShelves.length})</span>
         </button>
         <button
           type="button"
           className={`workspace-tab-pill ${activeListTab === 'rooms' ? 'active' : ''}`}
           onClick={() => setActiveListTab('rooms')}
         >
-          <Users size={14} /> Salas de Lectura en Vivo ({sharedRooms.length})
+          <Users size={14} /> <span>Salas en Vivo ({sharedRooms.length})</span>
         </button>
       </div>
 
@@ -961,20 +985,17 @@ export const SharedReadingView: React.FC = () => {
             {activeShelf && (
               <div className="tracker-card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, flexWrap: 'wrap' }}>
-                  <div>
+                  <div style={{ minWidth: 0, flex: '1 1 200px' }}>
                     <span className="quickstart-badge" style={{ marginBottom: 4 }}>
                       Código {activeShelf.code} · Progreso independiente
                     </span>
-                    <div style={{ fontSize: 17, fontWeight: 800 }}>{activeShelf.title}</div>
+                    <div style={{ fontSize: 16.5, fontWeight: 800, overflowWrap: 'anywhere' }}>{activeShelf.title}</div>
                     <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-                      Miembros:{' '}
-                      {Object.values(activeShelf.members || {})
-                        .map((m) => `${m.avatarEmoji} ${m.name}`)
-                        .join(' · ')}
+                      Admin: <strong>{activeShelf.hostName}</strong> · {Object.keys(activeShelf.members || {}).length} miembro(s)
                     </div>
                   </div>
 
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <div className="shared-room-actions">
                     <button
                       type="button"
                       className="pill-btn"
@@ -1002,15 +1023,68 @@ export const SharedReadingView: React.FC = () => {
                     </button>
                     <button
                       type="button"
-                      className="circle-arrow-btn"
-                      style={{ color: '#c84b4e' }}
-                      onClick={() =>
-                        leaveOrDeleteShelf(activeShelf.code, activeShelf.hostId === deviceId)
-                      }
-                      title={activeShelf.hostId === deviceId ? 'Cerrar estantería' : 'Salir'}
+                      className="pill-btn"
+                      style={{ background: 'var(--banner-bg)', color: '#c84b4e' }}
+                      onClick={() => leaveOrDeleteShelf(activeShelf.code, false)}
+                      title="Salir de esta estantería compartida"
                     >
-                      <Trash2 size={13} />
+                      <LogOut size={12} /> Salir
                     </button>
+                    {activeShelf.hostId === deviceId && (
+                      <button
+                        type="button"
+                        className="pill-btn"
+                        style={{
+                          background: 'rgba(200, 75, 78, 0.14)',
+                          borderColor: 'rgba(200, 75, 78, 0.35)',
+                          color: '#c84b4e',
+                        }}
+                        onClick={() => leaveOrDeleteShelf(activeShelf.code, true)}
+                        title="Cerrar estantería para todos (solo admin)"
+                      >
+                        <Trash2 size={12} /> Cerrar
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Members List (Admin can kick any other user!) */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--text-muted)' }}>
+                    Miembros en esta estantería ({Object.keys(activeShelf.members || {}).length})
+                  </div>
+                  <div className="shared-members-list">
+                    {Object.values(activeShelf.members || {}).map((m) => {
+                      const isMe = m.id === deviceId;
+                      const isMemberAdmin = m.id === activeShelf.hostId;
+                      const iAmAdmin = activeShelf.hostId === deviceId;
+                      return (
+                        <div key={m.id} className="shared-member-chip">
+                          <span
+                            className="participant-avatar"
+                            style={{ width: 26, height: 26, fontSize: 14, background: m.avatarBg || '#f6d8ae' }}
+                          >
+                            {m.avatarEmoji || '🦊'}
+                          </span>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {m.name} {isMe ? '(Tú)' : ''}
+                          </span>
+                          {isMemberAdmin && (
+                            <span className="admin-role-pill">Admin</span>
+                          )}
+                          {iAmAdmin && !isMe && (
+                            <button
+                              type="button"
+                              className="kick-member-btn"
+                              onClick={() => kickUserFromShelf(activeShelf.code, m.id, m.name)}
+                              title={`Eliminar a ${m.name} de la estantería`}
+                            >
+                              <UserMinus size={12} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -1038,7 +1112,7 @@ export const SharedReadingView: React.FC = () => {
                 <form onSubmit={handleAddBookToActiveShelf} style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
                   <select
                     className="studio-input"
-                    style={{ flex: 1, minWidth: 180 }}
+                    style={{ flex: '1 1 160px', minWidth: 0 }}
                     value={addingBookToShelfId}
                     onChange={(e) => setAddingBookToShelfId(e.target.value)}
                   >
@@ -1071,7 +1145,7 @@ export const SharedReadingView: React.FC = () => {
                         (entry.sharedAnnotations?.length || 0) +
                         (entry.sharedBookmarks?.length || 0);
                       return (
-                        <div key={entry.bookId} className="inbox-row" style={{ padding: '10px 12px' }}>
+                        <div key={entry.bookId} className="inbox-row share-shelf-book-row">
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
                             <div className="log-mini-thumb" style={{ width: 34, height: 48 }}>
                               <BookCoverVisual
@@ -1135,13 +1209,13 @@ export const SharedReadingView: React.FC = () => {
                                 )}
                               </button>
                             )}
-                            {isMine && (
+                            {(isMine || activeShelf.hostId === deviceId) && (
                               <button
                                 type="button"
                                 className="circle-arrow-btn"
                                 style={{ width: 30, height: 30, color: '#c84b4e' }}
                                 onClick={() => removeBookFromSharedShelf(activeShelf.code, entry.bookId)}
-                                title="Dejar de compartir este libro"
+                                title="Retirar libro de la estantería"
                               >
                                 <Trash2 size={12} />
                               </button>
@@ -1223,7 +1297,7 @@ export const SharedReadingView: React.FC = () => {
           {activeRoom && (
             <div className="tracker-card">
               <div className="shared-room-hero">
-                <div className="book-hardcover-wrap" style={{ width: 88, flexShrink: 0, paddingBottom: 10 }}>
+                <div className="book-hardcover-wrap shared-hero-cover">
                   <div
                     className="book-hardcover"
                     style={{
@@ -1259,7 +1333,7 @@ export const SharedReadingView: React.FC = () => {
                   </div>
                 </div>
 
-                <div style={{ flex: 1, minWidth: 180, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <span className="quickstart-badge" style={{ marginBottom: 0 }}>
                       Sala {activeRoom.code}
@@ -1282,11 +1356,11 @@ export const SharedReadingView: React.FC = () => {
                     {activeRoom.bookMeta.author}
                   </div>
 
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                  <div className="shared-room-actions" style={{ marginTop: 4 }}>
                     <button
                       type="button"
                       className="coral-cta-btn"
-                      style={{ height: 33, padding: '0 15px', fontSize: 12 }}
+                      style={{ height: 33, padding: '0 14px', fontSize: 12 }}
                       onClick={() => handleOpenRoomBook(activeRoom)}
                     >
                       <BookOpen size={13} />{' '}
@@ -1319,15 +1393,28 @@ export const SharedReadingView: React.FC = () => {
                     </button>
                     <button
                       type="button"
-                      className="circle-arrow-btn"
-                      style={{ marginLeft: 'auto', color: '#c84b4e' }}
-                      onClick={() =>
-                        leaveOrDeleteRoom(activeRoom.code, activeRoom.hostId === deviceId)
-                      }
-                      title={activeRoom.hostId === deviceId ? 'Cerrar sala' : 'Salir de la sala'}
+                      className="pill-btn"
+                      style={{ background: 'var(--card-bg)', color: '#c84b4e' }}
+                      onClick={() => leaveOrDeleteRoom(activeRoom.code, false)}
+                      title="Salir de esta sala compartida"
                     >
-                      <Trash2 size={13} />
+                      <LogOut size={12} /> Salir
                     </button>
+                    {activeRoom.hostId === deviceId && (
+                      <button
+                        type="button"
+                        className="pill-btn"
+                        style={{
+                          background: 'rgba(200, 75, 78, 0.14)',
+                          borderColor: 'rgba(200, 75, 78, 0.35)',
+                          color: '#c84b4e',
+                        }}
+                        onClick={() => leaveOrDeleteRoom(activeRoom.code, true)}
+                        title="Cerrar sala para todos (solo admin)"
+                      >
+                        <Trash2 size={12} /> Cerrar sala
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1363,6 +1450,8 @@ export const SharedReadingView: React.FC = () => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
                   {participants.map((p) => {
                     const isMe = p.id === deviceId;
+                    const isPartAdmin = p.id === activeRoom.hostId;
+                    const iAmAdmin = activeRoom.hostId === deviceId;
                     const st = p.readingStatus || (p.progress >= 98 ? 'completed' : 'reading');
                     return (
                       <div key={p.id} className="participant-progress-row">
@@ -1370,18 +1459,31 @@ export const SharedReadingView: React.FC = () => {
                           {p.avatarEmoji || '🦊'}
                         </div>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
-                            <span style={{ fontSize: 12.5, fontWeight: 800 }}>
-                              {p.name} {isMe ? '(Tú)' : ''}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: 12.5, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                              <span>{p.name} {isMe ? '(Tú)' : ''}</span>
+                              {isPartAdmin && <span className="admin-role-pill">Admin</span>}
                               {p.lastSeenAt ? (
-                                <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, color: 'var(--text-muted)' }}>
+                                <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)' }}>
                                   · {formatRelativeTime(p.lastSeenAt)}
                                 </span>
                               ) : null}
                             </span>
-                            <span style={{ fontSize: 11, fontWeight: 800, color: STATUS_META[st]?.color || 'var(--accent-primary)' }}>
-                              {p.currentPage ? `Pág. ${p.currentPage} · ` : ''}
-                              {Math.round(p.progress || 0)}%
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 11, fontWeight: 800, color: STATUS_META[st]?.color || 'var(--accent-primary)' }}>
+                                {p.currentPage ? `Pág. ${p.currentPage} · ` : ''}
+                                {Math.round(p.progress || 0)}%
+                              </span>
+                              {iAmAdmin && !isMe && (
+                                <button
+                                  type="button"
+                                  className="kick-member-btn"
+                                  onClick={() => kickUserFromRoom(activeRoom.code, p.id, p.name)}
+                                  title={`Eliminar a ${p.name} de la sala`}
+                                >
+                                  <UserMinus size={12} />
+                                </button>
+                              )}
                             </span>
                           </div>
                           <div className="goal-track">

@@ -6,6 +6,8 @@ import {
   optimizeCoverDataUrl,
 } from '../parsers/coverGenerator';
 import type { ContentKind } from '../types/library';
+import { formatDateTime } from '../utils/readingStats';
+import { hasDisplayableOriginalCover } from '../utils/coverHelpers';
 import {
   BookCoverVisual,
   getAdaptiveRibbonCss,
@@ -44,11 +46,7 @@ export const BookDetailModal: React.FC = () => {
     setSpineColor(editingBook.spineColor);
     setRibbonColor(editingBook.ribbonColor);
     setCoverDataUrl(editingBook.coverDataUrl);
-    setHasOriginalCover(
-      editingBook.hasOriginalCover !== undefined
-        ? editingBook.hasOriginalCover
-        : !editingBook.coverDataUrl.startsWith('data:image/svg+xml')
-    );
+    setHasOriginalCover(hasDisplayableOriginalCover(editingBook));
     setCats(editingBook.categories || []);
   }, [editingBook]);
 
@@ -101,6 +99,7 @@ export const BookDetailModal: React.FC = () => {
       coverDataUrl,
       hasOriginalCover,
       coverCheckedV2: true,
+      coverCheckedV3: true,
       categories: cats,
     });
     setEditingBook(null);
@@ -120,9 +119,9 @@ export const BookDetailModal: React.FC = () => {
           </button>
         </div>
 
-        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-          <div style={{ width: 122, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 7 }}>
-            <div className="book-hardcover-wrap" style={{ width: 122, paddingBottom: 12 }}>
+        <div className="book-detail-top">
+          <div style={{ width: 118, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 7 }}>
+            <div className="book-hardcover-wrap" style={{ width: 118, paddingBottom: 12 }}>
               <div className="book-hardcover" style={{ backgroundColor: previewSpine }}>
                 <div className="book-cover-img-box">
                   <BookCoverVisual
@@ -195,7 +194,7 @@ export const BookDetailModal: React.FC = () => {
                 <option value="audiobook">Audiolibro</option>
               </select>
             </div>
-            <div style={{ display: 'flex', gap: 14 }}>
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
               <label className="color-row" style={{ gap: 8 }}>
                 <span>Color lomo</span>
                 <input
@@ -213,6 +212,47 @@ export const BookDetailModal: React.FC = () => {
                 />
               </label>
             </div>
+          </div>
+        </div>
+
+        {/* Reading progress & exact timestamps */}
+        <div
+          style={{
+            background: 'var(--banner-bg)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 14,
+            padding: '10px 12px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11.5, fontWeight: 800 }}>
+            <span>Progreso de lectura</span>
+            <span style={{ color: 'var(--accent-primary)' }}>{Math.round(editingBook.progress || 0)}%</span>
+          </div>
+          <div className="goal-track" style={{ height: 7 }}>
+            <div
+              className={`goal-fill ${(editingBook.progress || 0) >= 98 ? 'secondary' : ''}`}
+              style={{ width: `${Math.min(100, Math.max(0, Math.round(editingBook.progress || 0)))}%` }}
+            />
+          </div>
+          <div className="review-meta-grid" style={{ marginTop: 2 }}>
+            <span>
+              <strong>Última lectura:</strong> {formatDateTime(editingBook.lastReadAt)}
+            </span>
+            <span>
+              <strong>Inicio:</strong> {formatDateTime(editingBook.startedAt)}
+            </span>
+            <span>
+              <strong>Cap. terminado:</strong>{' '}
+              {editingBook.lastChapterFinishedAt
+                ? `${editingBook.lastChapterFinishedTitle ? `${editingBook.lastChapterFinishedTitle} · ` : ''}${formatDateTime(editingBook.lastChapterFinishedAt)}`
+                : '—'}
+            </span>
+            <span>
+              <strong>Libro terminado:</strong> {formatDateTime(editingBook.finishedAt)}
+            </span>
           </div>
         </div>
 
@@ -272,7 +312,7 @@ export const BookDetailModal: React.FC = () => {
             </button>
           </div>
 
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button type="button" className="pill-btn" onClick={() => setEditingBook(null)}>
               Cancelar
             </button>

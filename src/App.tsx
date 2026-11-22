@@ -7,6 +7,7 @@ import { BookShelf } from './components/BookShelf';
 import { CategoryStrip } from './components/CategoryStrip';
 import { DashboardView } from './components/DashboardView';
 import { ImportModal } from './components/ImportModal';
+import { MissingFileModal } from './components/MissingFileModal';
 import { ProfileModal } from './components/ProfileModal';
 import { ReadingLogView } from './components/ReadingLogView';
 import { ReaderShell } from './components/readers/ReaderShell';
@@ -35,10 +36,28 @@ const AppWorkspace: React.FC = () => {
   const isFullView = theme.fullView !== false;
   const hasWallpaper = Boolean(theme.customWallpaperUrl);
 
+  // Auto-detect low-end phones/tablets (<= 4 GB RAM or <= 4 CPU cores or mobile Android WebView)
+  const autoLowEnd = React.useMemo(() => {
+    if (typeof navigator === 'undefined') return false;
+    const nav = navigator as Navigator & { deviceMemory?: number };
+    const lowMem = typeof nav.deviceMemory === 'number' && nav.deviceMemory <= 4;
+    const lowCpu = typeof nav.hardwareConcurrency === 'number' && nav.hardwareConcurrency <= 4;
+    const isAndroidMobile =
+      /Android/i.test(nav.userAgent || '') &&
+      typeof window !== 'undefined' &&
+      window.innerWidth <= 1024;
+    return lowMem || lowCpu || isAndroidMobile;
+  }, []);
+
+  const isPerfLite =
+    theme.lowPerformanceMode === 'on' ||
+    (theme.lowPerformanceMode !== 'off' && autoLowEnd);
+
   const backdropClasses = [
     'app-backdrop',
     isFullView ? 'full-view' : '',
     hasWallpaper ? 'has-wallpaper' : '',
+    isPerfLite ? 'perf-lite' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -47,6 +66,7 @@ const AppWorkspace: React.FC = () => {
     'app-shell',
     isFullView ? 'full-view' : '',
     hasWallpaper ? 'has-wallpaper' : '',
+    isPerfLite ? 'perf-lite' : '',
     theme.showRightPanel ? '' : 'no-right-panel',
     theme.compactSidebar ? 'compact-sidebar' : '',
   ]
@@ -182,6 +202,7 @@ const AppWorkspace: React.FC = () => {
       <ImportModal />
       <StudioModal />
       <BookDetailModal />
+      <MissingFileModal />
       <ProfileModal />
       <AudioPlayerBar />
 
@@ -200,6 +221,8 @@ const AppWorkspace: React.FC = () => {
             borderRadius: 999,
             fontSize: 12.5,
             fontWeight: 700,
+            maxWidth: 'calc(100vw - 24px)',
+            textAlign: 'center',
             boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
             zIndex: 140,
           }}

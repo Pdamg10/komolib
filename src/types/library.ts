@@ -47,9 +47,11 @@ export interface BookItem {
   coverDataUrl: string;
   hasOriginalCover?: boolean;
   coverCheckedV2?: boolean;
+  coverCheckedV3?: boolean;
   spineColor: string;
   ribbonColor: string;
   fileName: string;
+  folderPath?: string;
   fileSize: number;
   mimeType: string;
   pageCount?: number;
@@ -71,10 +73,13 @@ export interface BookItem {
   review?: string;
   startedAt?: number;
   finishedAt?: number;
+  lastChapterFinishedAt?: number;
+  lastChapterFinishedTitle?: string;
   seriesName?: string;
   seriesOrder?: number;
   // Sync metadata
   hasLocalFile: boolean;
+  nativeFileUri?: string; // Persistent Android SAF content:// URI for zero-duplication folder imports
   hasRemoteFile?: boolean;
   remoteFileName?: string;
   addedAt: number;
@@ -228,8 +233,10 @@ export interface ReaderSettings {
   maxWidth: number; // px
   textAlign: 'left' | 'justify';
   comicMode: ComicReadMode;
-  comicFit: 'width' | 'height' | 'original';
+  comicFit: 'contain' | 'width' | 'height' | 'original';
   comicGap: number; // px between manhwa/comic panels
+  pdfFlow?: 'continuous' | 'paginated';
+  pdfFit?: 'width' | 'contain';
   brightness: number; // 50 - 120
   warmth: number; // 0 - 60 (blue light filter)
   epubFlow: 'scrolled' | 'paginated';
@@ -268,7 +275,11 @@ export interface ThemeConfig {
   showDoodlePattern: boolean;
   compactSidebar: boolean;
   fullView?: boolean;
-  viewMode: 'shelf' | 'grid';
+  viewMode: 'shelf' | 'grid' | 'list';
+  sortBy?: 'recent' | 'title' | 'author' | 'imported' | 'folder';
+  sortDir?: 'asc' | 'desc';
+  readingFilter?: 'all' | 'unread' | 'reading' | 'completed';
+  lowPerformanceMode?: 'auto' | 'on' | 'off';
   customWallpaperUrl: string;
   wallpaperOpacity?: number; // 0.45 - 0.96 glass panel opacity over wallpaper
   wallpaperBlur?: number; // 0 - 24 px backdrop blur
@@ -282,6 +293,9 @@ export interface UserProfile {
   avatarEmoji: string;
   avatarBg: string;
   avatarImageUrl?: string;
+  booksGoalPerMonth?: number;
+  pagesGoalPerMonth?: number;
+  goalsUpdatedAt?: number;
   booksGoalPerYear?: number;
   pagesGoalPerYear?: number;
 }
@@ -365,6 +379,7 @@ export interface SharedRoom {
   createdAt: number;
   updatedAt: number;
   participants: Record<string, SharedParticipant>;
+  kickedIds?: string[];
   comments: SharedComment[];
 }
 
@@ -384,6 +399,7 @@ export interface SharedShelfBook {
   spineColor: string;
   ribbonColor: string;
   fileName: string;
+  folderPath?: string;
   fileSize: number;
   mimeType: string;
   pageCount?: number;
@@ -405,5 +421,6 @@ export interface SharedShelf {
     string,
     { id: string; name: string; avatarEmoji: string; avatarBg: string; joinedAt: number }
   >;
+  kickedIds?: string[];
   books: Record<string, SharedShelfBook>;
 }

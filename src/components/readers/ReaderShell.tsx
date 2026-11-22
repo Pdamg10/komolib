@@ -11,6 +11,7 @@ import {
   ImagePlus,
   List,
   Lock,
+  LogOut,
   MapPin,
   PenTool,
   Send,
@@ -20,6 +21,7 @@ import {
   StickyNote,
   Sun,
   Trash2,
+  UserMinus,
   Users,
   X,
 } from 'lucide-react';
@@ -33,6 +35,7 @@ import {
   type ReadingStickerItem,
 } from '../../data/bookmarksCatalog';
 import { dbGetBookFile } from '../../db/localDb';
+import { readNativeUriAsBlob } from '../../utils/nativeBridge';
 import { subscribeToRoomStream } from '../../services/sharedReadingService';
 import type {
   AnnotationTool,
@@ -84,6 +87,8 @@ export const ReaderShell: React.FC = () => {
     updateLocalRoom,
     removeLocalRoom,
     sendRoomComment,
+    leaveOrDeleteRoom,
+    kickUserFromRoom,
     showToast,
   } = useLibrary();
 
@@ -168,6 +173,12 @@ export const ReaderShell: React.FC = () => {
       syncConfig,
       activeRoom.code,
       (updated) => {
+        if (updated.kickedIds?.includes(deviceId) && !updated.participants?.[deviceId]) {
+          removeLocalRoom(updated.code);
+          setDrawer((curr) => (curr === 'room' ? 'none' : curr));
+          showToast(`Fuiste eliminado de la sala ${updated.code} por el administrador`);
+          return;
+        }
         updateLocalRoom(updated);
       },
       (deletedCode) => {
@@ -176,7 +187,7 @@ export const ReaderShell: React.FC = () => {
         showToast(`La sala ${deletedCode} fue cerrada por el anfitrión`);
       }
     );
-  }, [activeRoom?.code, syncConfig, updateLocalRoom, removeLocalRoom, showToast]);
+  }, [activeRoom?.code, syncConfig, deviceId, updateLocalRoom, removeLocalRoom, showToast]);
 
   useEffect(() => {
     if (!activeBook) {
@@ -195,9 +206,23 @@ export const ReaderShell: React.FC = () => {
       chapter: activeBook.currentChapter,
       pct: activeBook.progress || 0,
     });
-    dbGetBookFile(activeBook.id).then((rec) => {
-      if (rec) setFileData({ blob: rec.blob, extraImages: rec.extraImages });
-    });
+    let active = true;
+    (async () => {
+      const rec = await dbGetBookFile(activeBook.id);
+      if (rec) {
+        if (active) setFileData({ blob: rec.blob, extraImages: rec.extraImages });
+        return;
+      }
+      if (activeBook.nativeFileUri) {
+        const nativeBlob = await readNativeUriAsBlob(activeBook.nativeFileUri, activeBook.mimeType);
+        if (nativeBlob && active) {
+          setFileData({ blob: nativeBlob });
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
   }, [activeBook?.id]);
 
   if (!activeBook) return null;
@@ -596,6 +621,7 @@ export const ReaderShell: React.FC = () => {
             pinMode={pinMode}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
+            onUpdateSettings={updateReaderSettings}
             onProgress={(page, total) => {
               const pct = total ? Math.round((page / total) * 100) : 0;
               setLivePos((prev) => ({ ...prev, page, pct }));
@@ -612,6 +638,7 @@ export const ReaderShell: React.FC = () => {
             pinMode={pinMode}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
+            onUpdateSettings={updateReaderSettings}
             onProgress={(page, total) => {
               const pct = total ? Math.round((page / total) * 100) : 0;
               setLivePos((prev) => ({ ...prev, page, pct }));
@@ -1479,7 +1506,7 @@ export const ReaderShell: React.FC = () => {
           {/* Reader Theme */}
           <div>
             <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 6 }}>Tema de lectura</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 5 }}>
               {(['cream', 'paper', 'sepia', 'dark', 'oled'] as ReaderSettings['theme'][]).map(
                 (t) => (
                   <button
@@ -1487,6 +1514,11 @@ export const ReaderShell: React.FC = () => {
                     onClick={() => updateReaderSettings({ theme: t })}
                     style={{
                       height: 34,
+                      minWidth: 0,
+                      padding: '0 2px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
                       borderRadius: 10,
                       background: READER_PALETTES[t].bg,
                       color: READER_PALETTES[t].fg,
@@ -1530,15 +1562,21 @@ export const ReaderShell: React.FC = () => {
 
               <div>
                 <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 6 }}>Ajuste de imagen</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
-                  {(['width', 'height', 'original'] as const).map((fit) => (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
+                  {(['width', 'contain', 'height', 'original'] as const).map((fit) => (
                     <button
                       key={fit}
                       className={`pill-btn ${readerSettings.comicFit === fit ? 'active' : ''}`}
                       style={{ justifyContent: 'center' }}
                       onClick={() => updateReaderSettings({ comicFit: fit })}
                     >
-                      {fit === 'width' ? 'Ancho' : fit === 'height' ? 'Alto' : 'Original'}
+                      {fit === 'width'
+                        ? 'Ancho'
+                        : fit === 'contain'
+                        ? 'Pantalla'
+                        : fit === 'height'
+                        ? 'Alto'
+                        : 'Original'}
                     </button>
                   ))}
                 </div>
@@ -1556,6 +1594,51 @@ export const ReaderShell: React.FC = () => {
                   />
                 </label>
               )}
+            </>
+          )}
+
+          {/* PDF Reading Flow & Fit Controls */}
+          {isPdf && (
+            <>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 6 }}>Modo de lectura PDF</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
+                  <button
+                    className={`pill-btn ${(readerSettings.pdfFlow || 'continuous') === 'continuous' ? 'active' : ''}`}
+                    style={{ justifyContent: 'center' }}
+                    onClick={() => updateReaderSettings({ pdfFlow: 'continuous' })}
+                  >
+                    Scroll continuo
+                  </button>
+                  <button
+                    className={`pill-btn ${readerSettings.pdfFlow === 'paginated' ? 'active' : ''}`}
+                    style={{ justifyContent: 'center' }}
+                    onClick={() => updateReaderSettings({ pdfFlow: 'paginated' })}
+                  >
+                    Página por página
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 6 }}>Ajuste de página PDF</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
+                  <button
+                    className={`pill-btn ${(readerSettings.pdfFit || 'width') === 'width' ? 'active' : ''}`}
+                    style={{ justifyContent: 'center' }}
+                    onClick={() => updateReaderSettings({ pdfFit: 'width' })}
+                  >
+                    Ajustar al ancho
+                  </button>
+                  <button
+                    className={`pill-btn ${readerSettings.pdfFit === 'contain' ? 'active' : ''}`}
+                    style={{ justifyContent: 'center' }}
+                    onClick={() => updateReaderSettings({ pdfFit: 'contain' })}
+                  >
+                    Pantalla completa
+                  </button>
+                </div>
+              </div>
             </>
           )}
 
@@ -1710,11 +1793,39 @@ export const ReaderShell: React.FC = () => {
           className="reader-drawer"
           style={{ background: pal.bar, color: pal.fg, borderLeft: `1px solid ${pal.border}` }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
             <strong style={{ fontSize: 14 }}>Sala {activeRoom.code}</strong>
-            <button onClick={() => setDrawer('none')} style={{ color: pal.fg }}>
-              <X size={16} />
-            </button>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <button
+                type="button"
+                className="pill-btn"
+                style={{ height: 26, padding: '0 8px', fontSize: 10.5, color: '#c84b4e' }}
+                onClick={async () => {
+                  await leaveOrDeleteRoom(activeRoom.code, false);
+                  setDrawer('none');
+                }}
+                title="Salir de la sala"
+              >
+                <LogOut size={11} /> Salir
+              </button>
+              {activeRoom.hostId === deviceId && (
+                <button
+                  type="button"
+                  className="pill-btn"
+                  style={{ height: 26, padding: '0 8px', fontSize: 10.5, color: '#c84b4e' }}
+                  onClick={async () => {
+                    await leaveOrDeleteRoom(activeRoom.code, true);
+                    setDrawer('none');
+                  }}
+                  title="Cerrar sala para todos"
+                >
+                  <Trash2 size={11} /> Cerrar
+                </button>
+              )}
+              <button onClick={() => setDrawer('none')} style={{ color: pal.fg }}>
+                <X size={16} />
+              </button>
+            </div>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1723,6 +1834,8 @@ export const ReaderShell: React.FC = () => {
               .sort((a, b) => (b.progress || 0) - (a.progress || 0))
               .map((p) => {
                 const isMe = p.id === deviceId;
+                const isPartAdmin = p.id === activeRoom.hostId;
+                const iAmAdmin = activeRoom.hostId === deviceId;
                 return (
                   <div
                     key={p.id}
@@ -1736,17 +1849,32 @@ export const ReaderShell: React.FC = () => {
                       style={{
                         display: 'flex',
                         justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 6,
                         fontSize: 11.5,
                         fontWeight: 800,
                         marginBottom: 4,
                       }}
                     >
-                      <span>
-                        {p.avatarEmoji} {p.name} {isMe ? '(Tú)' : ''}
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                        <span>{p.avatarEmoji} {p.name} {isMe ? '(Tú)' : ''}</span>
+                        {isPartAdmin && <span className="admin-role-pill">Admin</span>}
                       </span>
-                      <span>
-                        {p.currentPage ? `Pág. ${p.currentPage} · ` : ''}
-                        {Math.round(p.progress || 0)}%
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                        <span>
+                          {p.currentPage ? `Pág. ${p.currentPage} · ` : ''}
+                          {Math.round(p.progress || 0)}%
+                        </span>
+                        {iAmAdmin && !isMe && (
+                          <button
+                            type="button"
+                            className="kick-member-btn"
+                            onClick={() => kickUserFromRoom(activeRoom.code, p.id, p.name)}
+                            title={`Eliminar a ${p.name} de la sala`}
+                          >
+                            <UserMinus size={11} />
+                          </button>
+                        )}
                       </span>
                     </div>
                     <div className="goal-track">

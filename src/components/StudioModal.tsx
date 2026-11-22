@@ -16,6 +16,7 @@ import {
 import { useLibrary } from '../context/LibraryContext';
 import { THEME_PRESETS } from '../data/presets';
 import type { ThemeConfig } from '../types/library';
+import { saveTextFileLocally } from '../utils/nativeBridge';
 import { extractWallpaperTheme } from '../utils/wallpaperTheme';
 
 type StudioSection = 'themes' | 'palette' | 'layout' | 'categories';
@@ -56,14 +57,15 @@ export const StudioModal: React.FC = () => {
   if (!studioModalOpen) return null;
 
   const handleExportTheme = () => {
-    const blob = new Blob([JSON.stringify(theme, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `komolib-theme-${theme.presetId || 'custom'}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Tema exportado en JSON');
+    const fileName = `komolib-theme-${theme.presetId || 'custom'}.json`;
+    const res = saveTextFileLocally(fileName, JSON.stringify(theme, null, 2), 'application/json');
+    showToast(
+      res.ok
+        ? res.location && res.location !== fileName
+          ? `Tema guardado en ${res.location}`
+          : 'Tema exportado en JSON'
+        : res.error || 'No se pudo exportar el tema'
+    );
   };
 
   const handleImportTheme = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -171,27 +173,28 @@ export const StudioModal: React.FC = () => {
         aria-label="Estudio de Personalización"
       >
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="studio-modal-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
             <span
               style={{
-                width: 38,
-                height: 38,
+                width: 36,
+                height: 36,
                 borderRadius: 12,
                 background: 'color-mix(in srgb, var(--accent-primary) 16%, transparent)',
                 color: 'var(--accent-primary)',
                 display: 'grid',
                 placeItems: 'center',
+                flexShrink: 0,
               }}
             >
-              <Palette size={19} />
+              <Palette size={18} />
             </span>
-            <div>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, lineHeight: 1.2 }}>
                 Estudio de Personalización
               </h3>
-              <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600 }}>
-                Ajusta temas, imagen de fondo, paleta libre, tipografía y categorías en tiempo real
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, lineHeight: 1.35, marginTop: 2 }}>
+                Ajusta temas, fondo, paleta, tipografía y categorías en tiempo real
               </div>
             </div>
           </div>
@@ -199,6 +202,7 @@ export const StudioModal: React.FC = () => {
           <button
             type="button"
             className="circle-arrow-btn"
+            style={{ flexShrink: 0 }}
             onClick={() => setStudioModalOpen(false)}
             aria-label="Cerrar personalización"
           >
@@ -299,11 +303,11 @@ export const StudioModal: React.FC = () => {
                   />
                 )}
 
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <div className="studio-wallpaper-actions">
                   <button
                     type="button"
                     className="pill-btn"
-                    style={{ flex: 1, justifyContent: 'center' }}
+                    style={{ flex: '1 1 130px', justifyContent: 'center' }}
                     onClick={() => wallpaperInputRef.current?.click()}
                   >
                     <Upload size={12} /> {theme.customWallpaperUrl ? 'Cambiar fondo' : 'Subir imagen'}
@@ -313,6 +317,7 @@ export const StudioModal: React.FC = () => {
                       <button
                         type="button"
                         className="pill-btn"
+                        style={{ flex: '1 1 92px', justifyContent: 'center' }}
                         onClick={handleReAdaptWallpaper}
                         title="Re-extraer paleta de colores desde la imagen de fondo"
                       >
@@ -321,6 +326,7 @@ export const StudioModal: React.FC = () => {
                       <button
                         type="button"
                         className="pill-btn"
+                        style={{ flex: '1 1 82px', justifyContent: 'center' }}
                         onClick={() => updateTheme({ customWallpaperUrl: '' })}
                       >
                         Quitar
@@ -412,11 +418,10 @@ export const StudioModal: React.FC = () => {
                 <h4>
                   <Type size={14} /> Tipografía y Forma
                 </h4>
-                <label className="color-row">
+                <label className="studio-select-row">
                   <span>Fuente UI</span>
                   <select
                     className="studio-input"
-                    style={{ width: 155 }}
                     value={theme.fontFamily}
                     onChange={(e) =>
                       updateTheme({ fontFamily: e.target.value as ThemeConfig['fontFamily'] })
@@ -451,6 +456,23 @@ export const StudioModal: React.FC = () => {
                     value={theme.uiScale}
                     onChange={(e) => updateTheme({ uiScale: Number(e.target.value) })}
                   />
+                </label>
+
+                <label className="studio-select-row">
+                  <span>Rendimiento (Gama baja)</span>
+                  <select
+                    className="studio-input"
+                    value={theme.lowPerformanceMode || 'auto'}
+                    onChange={(e) =>
+                      updateTheme({
+                        lowPerformanceMode: e.target.value as ThemeConfig['lowPerformanceMode'],
+                      })
+                    }
+                  >
+                    <option value="auto">Automático</option>
+                    <option value="on">Ligero (Máx. fluidez)</option>
+                    <option value="off">Completo (Efectos)</option>
+                  </select>
                 </label>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4 }}>
@@ -497,9 +519,10 @@ export const StudioModal: React.FC = () => {
                 <Tag size={14} /> Categorías Personalizadas
               </h4>
               <form onSubmit={handleAddCat} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 }}>
                   <input
                     className="studio-input"
+                    style={{ flex: 1, minWidth: 0 }}
                     placeholder="Ej: Seinen, Terror, Estudio..."
                     value={newCatLabel}
                     onChange={(e) => setNewCatLabel(e.target.value)}
@@ -508,12 +531,13 @@ export const StudioModal: React.FC = () => {
                     type="color"
                     value={newCatColor}
                     onChange={(e) => setNewCatColor(e.target.value)}
-                    style={{ width: 38, height: 36, border: 'none', background: 'transparent' }}
+                    style={{ width: 38, height: 36, border: 'none', background: 'transparent', flexShrink: 0 }}
                   />
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 }}>
                   <select
                     className="studio-input"
+                    style={{ flex: 1, minWidth: 0 }}
                     value={newCatIcon}
                     onChange={(e) => setNewCatIcon(e.target.value)}
                   >
@@ -579,16 +603,16 @@ export const StudioModal: React.FC = () => {
 
         {/* Footer Actions */}
         <div className="studio-modal-footer">
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <div className="studio-modal-footer-actions">
             <button type="button" className="pill-btn" onClick={handleExportTheme}>
-              <Download size={12} /> Exportar JSON
+              <Download size={12} /> Exportar
             </button>
             <button
               type="button"
               className="pill-btn"
               onClick={() => importThemeInputRef.current?.click()}
             >
-              <Upload size={12} /> Importar JSON
+              <Upload size={12} /> Importar
             </button>
             <button type="button" className="pill-btn" onClick={resetTheme}>
               <RotateCcw size={12} /> Reset
@@ -597,8 +621,7 @@ export const StudioModal: React.FC = () => {
 
           <button
             type="button"
-            className="coral-cta-btn"
-            style={{ height: 34, padding: '0 18px' }}
+            className="coral-cta-btn studio-modal-done-btn"
             onClick={() => setStudioModalOpen(false)}
           >
             Listo

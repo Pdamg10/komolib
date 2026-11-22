@@ -175,7 +175,7 @@ export const AnnotationsView: React.FC = () => {
     <section className="tracker-page" aria-label="Marcadores, Separadores y Anotaciones">
       {/* Compact Header */}
       <div className="tracker-header-card">
-        <div style={{ flex: 1, minWidth: 220 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <span className="tracker-kicker">Cuaderno de Lectura Local</span>
           <h2 className="tracker-heading">Marcadores, Separadores y Anotaciones</h2>
           <p className="tracker-quote">
@@ -183,7 +183,7 @@ export const AnnotationsView: React.FC = () => {
           </p>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div className="tracker-header-actions">
           <span className="pill-btn" style={{ background: 'var(--card-bg)' }}>
             <HardDrive size={13} /> Almacenamiento local: {formatBytes(metaBytes)}
           </span>
@@ -504,10 +504,9 @@ export const AnnotationsView: React.FC = () => {
 
       {/* Compact Filters Bar */}
       <div className="tracker-card">
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="annotations-filter-row">
           <select
             className="studio-input"
-            style={{ width: 240, maxWidth: '100%' }}
             value={selectedBookId}
             onChange={(e) => setSelectedBookId(e.target.value)}
           >
@@ -519,7 +518,7 @@ export const AnnotationsView: React.FC = () => {
             ))}
           </select>
 
-          <div style={{ position: 'relative', flex: 1, minWidth: 180 }}>
+          <div style={{ position: 'relative', minWidth: 0 }}>
             <Search
               size={14}
               style={{

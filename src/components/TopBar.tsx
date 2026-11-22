@@ -6,6 +6,8 @@ export const TopBar: React.FC = () => {
   const {
     searchQuery,
     setSearchQuery,
+    setNavSection,
+    setActiveCategory,
     setImportModalOpen,
     theme,
     updateTheme,
@@ -17,6 +19,20 @@ export const TopBar: React.FC = () => {
 
   return (
     <header className="top-bar">
+      <button
+        type="button"
+        className="brand-logo-btn"
+        onClick={() => {
+          setNavSection('home');
+          setActiveCategory('all');
+          setSearchQuery('');
+        }}
+        title={theme.appName || 'Komolib'}
+        aria-label="Komolib — Inicio"
+      >
+        <img src="./icon.svg" alt="Komolib" />
+      </button>
+
       <div className="search-box">
         <Search size={18} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
         <input

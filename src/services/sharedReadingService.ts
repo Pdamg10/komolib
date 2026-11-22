@@ -9,10 +9,12 @@ import type {
   SyncConfig,
 } from '../types/library';
 import { dbGetBookFile } from '../db/localDb';
+import { readNativeUriAsBlob } from '../utils/nativeBridge';
 import {
   buildAuthHeaders,
   buildStreamUrl,
   fetchApi,
+  parseJsonResponse,
   resolveServerUrl,
   uploadBookToServer,
 } from './syncService';
@@ -33,11 +35,11 @@ export async function listSharedRooms(
 ): Promise<SharedRoom[]> {
   const base = resolveServerUrl(config.serverUrl);
   const qs = participantId ? `?participantId=${encodeURIComponent(participantId)}` : '';
-  const res = await fetchApi(`${base}/api/rooms${qs}`, {
+  const url = `${base}/api/rooms${qs}`;
+  const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
+  const data = await parseJsonResponse<{ rooms?: SharedRoom[] }>(res, url);
   return Array.isArray(data?.rooms) ? data.rooms : [];
 }
 
@@ -48,15 +50,16 @@ export async function createSharedRoom(
   sharedMarks?: { annotations?: BookAnnotation[]; bookmarks?: BookmarkItem[] }
 ): Promise<SharedRoom> {
   // Ensure the binary file is uploaded to the server so the reading partner can download it
-  let enrichedBook: BookItem & {
+  const { nativeFileUri: _ignoreLocalUri, ...shareableBook } = book;
+  let enrichedBook: Omit<BookItem, 'nativeFileUri'> & {
     sharedAnnotations?: BookAnnotation[];
     sharedBookmarks?: BookmarkItem[];
   } = {
-    ...book,
+    ...shareableBook,
     sharedAnnotations: sharedMarks?.annotations || [],
     sharedBookmarks: sharedMarks?.bookmarks || [],
   };
-  if (book.hasLocalFile) {
+  if (book.hasLocalFile && !book.hasRemoteFile) {
     const uploaded = await uploadBookToServer(config, book, participant.id);
     if (uploaded.ok) {
       enrichedBook = {
@@ -69,29 +72,27 @@ export async function createSharedRoom(
   }
 
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(`${base}/api/rooms`, {
+  const url = `${base}/api/rooms`;
+  const res = await fetchApi(url, {
     method: 'POST',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ book: enrichedBook, participant }),
   });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(errText || `Error al crear sala (${res.status})`);
-  }
-  const data = await res.json();
-  return data.room as SharedRoom;
+  const data = await parseJsonResponse<{ room: SharedRoom }>(res, url);
+  return data.room;
 }
 
 export async function getSharedRoom(config: SyncConfig, code: string): Promise<SharedRoom> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(`${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}`, {
+  const url = `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}`;
+  const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
-  if (!res.ok) {
-    throw new Error(res.status === 404 ? 'No se encontró ninguna sala con ese código' : `HTTP ${res.status}`);
+  if (res.status === 404) {
+    throw new Error('No se encontró ninguna sala con ese código');
   }
-  const data = await res.json();
-  return data.room as SharedRoom;
+  const data = await parseJsonResponse<{ room: SharedRoom }>(res, url);
+  return data.room;
 }
 
 export async function joinSharedRoom(
@@ -100,20 +101,17 @@ export async function joinSharedRoom(
   participant: ParticipantIdentity
 ): Promise<SharedRoom> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(
-    `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/join`,
-    {
-      method: 'POST',
-      headers: buildAuthHeaders(config, true),
-      body: JSON.stringify({ participant }),
-    }
-  );
-  if (!res.ok) {
-    const msg = res.status === 404 ? 'Código de sala no encontrado' : `Error al unirse (${res.status})`;
-    throw new Error(msg);
+  const url = `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/join`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify({ participant }),
+  });
+  if (res.status === 404) {
+    throw new Error('Código de sala no encontrado');
   }
-  const data = await res.json();
-  return data.room as SharedRoom;
+  const data = await parseJsonResponse<{ room: SharedRoom }>(res, url);
+  return data.room;
 }
 
 export async function updateSharedRoomProgress(
@@ -131,17 +129,14 @@ export async function updateSharedRoomProgress(
   }
 ): Promise<SharedRoom> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(
-    `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/progress`,
-    {
-      method: 'PATCH',
-      headers: buildAuthHeaders(config, true),
-      body: JSON.stringify(payload),
-    }
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.room as SharedRoom;
+  const url = `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/progress`;
+  const res = await fetchApi(url, {
+    method: 'PATCH',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ room: SharedRoom }>(res, url);
+  return data.room;
 }
 
 export async function postSharedRoomComment(
@@ -157,17 +152,14 @@ export async function postSharedRoomComment(
   }
 ): Promise<SharedRoom> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(
-    `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/comments`,
-    {
-      method: 'POST',
-      headers: buildAuthHeaders(config, true),
-      body: JSON.stringify(payload),
-    }
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.room as SharedRoom;
+  const url = `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/comments`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ room: SharedRoom }>(res, url);
+  return data.room;
 }
 
 export async function downloadSharedRoomFile(config: SyncConfig, code: string): Promise<Blob> {
@@ -195,6 +187,23 @@ export async function leaveSharedRoom(
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ participantId }),
   }).catch(() => undefined);
+}
+
+export async function kickRoomParticipant(
+  config: SyncConfig,
+  code: string,
+  requesterId: string,
+  targetParticipantId: string
+): Promise<SharedRoom> {
+  const base = resolveServerUrl(config.serverUrl);
+  const url = `${base}/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/kick`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify({ requesterId, targetParticipantId }),
+  });
+  const data = await parseJsonResponse<{ room: SharedRoom }>(res, url);
+  return data.room;
 }
 
 export async function deleteSharedRoom(config: SyncConfig, code: string): Promise<void> {
@@ -249,31 +258,27 @@ export async function createSharedShelf(
   member: { id: string; name: string; avatarEmoji: string; avatarBg: string }
 ): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(`${base}/api/shelves`, {
+  const url = `${base}/api/shelves`;
+  const res = await fetchApi(url, {
     method: 'POST',
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ title, member }),
   });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(errText || `Error al crear estantería compartida (${res.status})`);
-  }
-  const data = await res.json();
-  return data.shelf as SharedShelf;
+  const data = await parseJsonResponse<{ shelf: SharedShelf }>(res, url);
+  return data.shelf;
 }
 
 export async function getSharedShelf(config: SyncConfig, code: string): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(`${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}`, {
+  const url = `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}`;
+  const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
-  if (!res.ok) {
-    throw new Error(
-      res.status === 404 ? 'No se encontró ninguna estantería con ese código' : `HTTP ${res.status}`
-    );
+  if (res.status === 404) {
+    throw new Error('No se encontró ninguna estantería con ese código');
   }
-  const data = await res.json();
-  return data.shelf as SharedShelf;
+  const data = await parseJsonResponse<{ shelf: SharedShelf }>(res, url);
+  return data.shelf;
 }
 
 export async function joinSharedShelf(
@@ -282,21 +287,17 @@ export async function joinSharedShelf(
   member: { id: string; name: string; avatarEmoji: string; avatarBg: string }
 ): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(
-    `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/join`,
-    {
-      method: 'POST',
-      headers: buildAuthHeaders(config, true),
-      body: JSON.stringify({ member }),
-    }
-  );
-  if (!res.ok) {
-    throw new Error(
-      res.status === 404 ? 'Código de estantería no encontrado' : `Error al unirse (${res.status})`
-    );
+  const url = `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/join`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify({ member }),
+  });
+  if (res.status === 404) {
+    throw new Error('Código de estantería no encontrado');
   }
-  const data = await res.json();
-  return data.shelf as SharedShelf;
+  const data = await parseJsonResponse<{ shelf: SharedShelf }>(res, url);
+  return data.shelf;
 }
 
 export async function shareBookToShelf(
@@ -307,23 +308,27 @@ export async function shareBookToShelf(
   sharedMarks?: { annotations?: BookAnnotation[]; bookmarks?: BookmarkItem[] }
 ): Promise<SharedShelf> {
   const stored = await dbGetBookFile(book.id);
+  let uploadBlob: Blob | null = stored?.blob || null;
+  if (!uploadBlob && book.nativeFileUri) {
+    uploadBlob = await readNativeUriAsBlob(book.nativeFileUri, book.mimeType);
+  }
   const form = new FormData();
   form.append('bookId', book.id);
   form.append('ownerId', owner.id);
   form.append('ownerName', owner.name);
 
-  let meta: BookItem & {
+  const { nativeFileUri: _ignoreLocalUri, ...shareableBook } = book;
+  let meta: Omit<BookItem, 'nativeFileUri'> & {
     sharedAnnotations?: BookAnnotation[];
     sharedBookmarks?: BookmarkItem[];
   } = {
-    ...book,
+    ...shareableBook,
     sharedAnnotations: sharedMarks?.annotations || [],
     sharedBookmarks: sharedMarks?.bookmarks || [],
   };
-  if (stored) {
-    let uploadBlob: Blob = stored.blob;
+  if (uploadBlob) {
     let uploadName = book.fileName || `${book.id}.${book.format}`;
-    if (book.format === 'images' && stored.extraImages && stored.extraImages.length > 0) {
+    if (book.format === 'images' && stored?.extraImages && stored.extraImages.length > 0) {
       const zip = new JSZip();
       for (let i = 0; i < stored.extraImages.length; i++) {
         const img = stored.extraImages[i];
@@ -344,19 +349,14 @@ export async function shareBookToShelf(
   form.append('meta', JSON.stringify(meta));
 
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(
-    `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/books`,
-    {
-      method: 'POST',
-      headers: buildAuthHeaders(config, false),
-      body: form,
-    }
-  );
-  if (!res.ok) {
-    throw new Error(`No se pudo compartir "${book.title}" (${res.status})`);
-  }
-  const data = await res.json();
-  return data.shelf as SharedShelf;
+  const url = `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/books`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: buildAuthHeaders(config, false),
+    body: form,
+  });
+  const data = await parseJsonResponse<{ shelf: SharedShelf }>(res, url);
+  return data.shelf;
 }
 
 export async function removeBookFromShelf(
@@ -365,16 +365,13 @@ export async function removeBookFromShelf(
   shelfBookKey: string
 ): Promise<SharedShelf> {
   const base = resolveServerUrl(config.serverUrl);
-  const res = await fetchApi(
-    `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/books/${encodeURIComponent(shelfBookKey)}`,
-    {
-      method: 'DELETE',
-      headers: buildAuthHeaders(config, false),
-    }
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.shelf as SharedShelf;
+  const url = `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/books/${encodeURIComponent(shelfBookKey)}`;
+  const res = await fetchApi(url, {
+    method: 'DELETE',
+    headers: buildAuthHeaders(config, false),
+  });
+  const data = await parseJsonResponse<{ shelf: SharedShelf }>(res, url);
+  return data.shelf;
 }
 
 export async function downloadShelfBookFile(
@@ -406,6 +403,23 @@ export async function leaveSharedShelf(
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ memberId }),
   }).catch(() => undefined);
+}
+
+export async function kickShelfMember(
+  config: SyncConfig,
+  code: string,
+  requesterId: string,
+  targetMemberId: string
+): Promise<SharedShelf> {
+  const base = resolveServerUrl(config.serverUrl);
+  const url = `${base}/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/kick`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify({ requesterId, targetMemberId }),
+  });
+  const data = await parseJsonResponse<{ shelf: SharedShelf }>(res, url);
+  return data.shelf;
 }
 
 export async function deleteSharedShelf(config: SyncConfig, code: string): Promise<void> {

@@ -156,7 +156,8 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
       const rendition = epubInstance.renderTo(viewerRef.current, {
         width: '100%',
         height: '100%',
-        flow: settings.epubFlow === 'scrolled' ? 'scrolled-doc' : 'paginated',
+        flow: settings.epubFlow === 'scrolled' ? 'scrolled' : 'paginated',
+        manager: settings.epubFlow === 'scrolled' ? 'continuous' : 'default',
         spread: 'none',
       });
       renditionRef.current = rendition;
@@ -301,9 +302,14 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
       'a, a:link': {
         color: `${accentLink} !important`,
       },
-      img: {
+      'img, svg, image': {
         'max-width': '100% !important',
+        'max-height': '92vh !important',
+        width: 'auto !important',
         height: 'auto !important',
+        'object-fit': 'contain !important',
+        display: 'block !important',
+        margin: '0 auto !important',
       },
     });
   }, [

@@ -1,4 +1,5 @@
 import type { BookFormat, BookItem, ContentKind } from '../types/library';
+import { isRasterCoverDataUrl } from '../utils/coverHelpers';
 import { extractAudioCover } from './audioCoverParser';
 import { extractCbrCoverAndCount, extractCbzCoverAndCount } from './comicParser';
 import {
@@ -143,7 +144,18 @@ export async function importSingleFile(
   let coverDataUrl: string | undefined;
   let pageCount: number | undefined;
 
-  const extracted = await extractOriginalCoverFromBlob(file, format, title);
+  let extracted: {
+    coverDataUrl?: string;
+    title?: string;
+    author?: string;
+    description?: string;
+    pageCount?: number;
+  } = {};
+  try {
+    extracted = await extractOriginalCoverFromBlob(file, format, title);
+  } catch (err) {
+    console.warn('Cover/metadata extraction fallback:', err);
+  }
   if (!overrides?.title && extracted.title) title = extracted.title;
   if (!overrides?.author && extracted.author) author = extracted.author;
   if (extracted.description) description = extracted.description;
@@ -151,9 +163,9 @@ export async function importSingleFile(
   if (extracted.pageCount !== undefined) pageCount = extracted.pageCount;
 
   const generated = generateCozyCover(title, author, kind, format);
-  const hasOriginalCover = Boolean(coverDataUrl);
-  const finalCover = coverDataUrl || generated.coverDataUrl;
-  const palette = coverDataUrl
+  const hasOriginalCover = isRasterCoverDataUrl(coverDataUrl);
+  const finalCover = hasOriginalCover && coverDataUrl ? coverDataUrl : generated.coverDataUrl;
+  const palette = hasOriginalCover && coverDataUrl
     ? await extractCoverPaletteFromDataUrl(coverDataUrl, generated.spineColor, generated.ribbonColor)
     : { spineColor: generated.spineColor, ribbonColor: generated.ribbonColor };
 
@@ -180,6 +192,7 @@ export async function importSingleFile(
     coverDataUrl: finalCover,
     hasOriginalCover,
     coverCheckedV2: true,
+    coverCheckedV3: true,
     spineColor: palette.spineColor,
     ribbonColor: palette.ribbonColor,
     fileName: file.name,
@@ -234,6 +247,7 @@ export async function importImageBundle(
     coverDataUrl: firstCover,
     hasOriginalCover: true,
     coverCheckedV2: true,
+    coverCheckedV3: true,
     spineColor: palette.spineColor,
     ribbonColor: palette.ribbonColor,
     fileName: `${title || 'volumen'}.images`,

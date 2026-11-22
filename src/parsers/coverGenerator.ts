@@ -207,7 +207,7 @@ export async function extractDominantColorFromDataUrl(dataUrl: string, fallback:
   return spineColor;
 }
 
-export async function optimizeCoverDataUrl(dataUrl: string, maxDim = 900): Promise<string> {
+export async function optimizeCoverDataUrl(dataUrl: string, maxDim = 420): Promise<string> {
   if (!dataUrl || dataUrl.startsWith('data:image/svg+xml')) return dataUrl;
   return new Promise((resolve) => {
     const img = new Image();
@@ -229,9 +229,11 @@ export async function optimizeCoverDataUrl(dataUrl: string, maxDim = 900): Promi
         resolve(dataUrl);
         return;
       }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, cw, ch);
       ctx.drawImage(img, 0, 0, cw, ch);
       try {
-        resolve(canvas.toDataURL('image/jpeg', 0.88));
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
       } catch {
         resolve(dataUrl);
       }

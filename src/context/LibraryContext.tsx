@@ -37,12 +37,28 @@ import {
   importImageBundle,
   importSingleFile,
 } from '../parsers';
-import { extractCoverPaletteFromDataUrl } from '../parsers/coverGenerator';
+import { extractCoverPaletteFromDataUrl, generateCozyCover } from '../parsers/coverGenerator';
+import {
+  parseExternalBackupFile,
+  type ParsedExternalBackup,
+} from '../parsers/externalBackupParser';
 import {
   filterSupportedFiles,
+  getFolderPath,
   groupImagesByFolder,
   isImageFile,
 } from '../utils/fileFolderImport';
+import {
+  readNativeUriAsBlob,
+  saveTextFileLocally,
+  shareTextFileNatively,
+  type NativeScannedFolderBook,
+} from '../utils/nativeBridge';
+import {
+  getCoverSignature,
+  hasDisplayableOriginalCover,
+  isRasterCoverDataUrl,
+} from '../utils/coverHelpers';
 import {
   checkServerHealth,
   deleteBookFromServer,
@@ -67,6 +83,8 @@ import {
   getSharedShelf,
   joinSharedRoom,
   joinSharedShelf,
+  kickRoomParticipant,
+  kickShelfMember,
   leaveSharedRoom,
   leaveSharedShelf,
   listSharedRooms,
@@ -151,6 +169,8 @@ interface LibraryContextValue {
   closeAudioPlayer: () => void;
   editingBook: BookItem | null;
   setEditingBook: (book: BookItem | null) => void;
+  missingFileBook: BookItem | null;
+  setMissingFileBook: (book: BookItem | null) => void;
   importModalOpen: boolean;
   setImportModalOpen: (open: boolean) => void;
   studioModalOpen: boolean;
@@ -160,8 +180,23 @@ interface LibraryContextValue {
   // Mutations
   importFiles: (
     files: File[],
-    opts?: { bundleImages?: boolean; title?: string; author?: string; kind?: ContentKind; categories?: string[] }
+    opts?: {
+      bundleImages?: boolean;
+      title?: string;
+      author?: string;
+      kind?: ContentKind;
+      categories?: string[];
+      skipDuplicates?: boolean;
+      onProgress?: (done: number, total: number, currentName?: string) => void;
+    }
   ) => Promise<BookItem[]>;
+  importNativeFolderBooks: (
+    items: NativeScannedFolderBook[],
+    opts?: { author?: string; kind?: ContentKind; categories?: string[]; finalizeSync?: boolean }
+  ) => Promise<{ added: number; linked: number; duplicatesSkipped: number; duplicateSamples: string[] }>;
+  duplicateBooksCount: number;
+  removeDuplicateBooks: () => Promise<number>;
+  attachLocalFileToBook: (bookId: string, file: File) => Promise<BookItem | null>;
   updateBook: (id: string, patch: Partial<BookItem>) => Promise<void>;
   reExtractBookCover: (id: string) => Promise<boolean>;
   deleteBook: (id: string) => Promise<void>;
@@ -201,12 +236,31 @@ interface LibraryContextValue {
   dismissRemoteSession: () => void;
   syncStatus: 'idle' | 'syncing' | 'ok' | 'error';
   syncMessage: string;
+  offlineSyncProgress: string;
   triggerSync: (silent?: boolean) => Promise<void>;
+  syncAllBookFilesForOffline: () => Promise<{ uploaded: number; downloaded: number; failed: number }>;
   // Cloud Account by Email & Full Backup/Restore
   loginWithEmail: (email: string, pin?: string) => Promise<boolean>;
   logoutAccount: () => Promise<void>;
   exportBackupJson: () => void;
+  shareBackupJson: () => Promise<void>;
   importBackupJson: (file: File) => Promise<boolean>;
+  importExternalBackup: (
+    parsed: ParsedExternalBackup,
+    opts?: {
+      importBooks?: boolean;
+      importProgress?: boolean;
+      importBookmarks?: boolean;
+      importAnnotations?: boolean;
+      importNotes?: boolean;
+    }
+  ) => Promise<{
+    booksAdded: number;
+    booksUpdated: number;
+    bookmarksAdded: number;
+    annotationsAdded: number;
+    notesAdded: number;
+  }>;
   // Shared Reading Rooms (Buddy Read)
   sharedRooms: SharedRoom[];
   selectedRoomCode: string;
@@ -223,7 +277,8 @@ interface LibraryContextValue {
     includeSharedMarks?: boolean
   ) => Promise<{ room: SharedRoom; book?: BookItem } | null>;
   sendRoomComment: (code: string, text: string, progressAt: number, pageAt?: number) => Promise<void>;
-  leaveOrDeleteRoom: (code: string, isHost: boolean) => Promise<void>;
+  leaveOrDeleteRoom: (code: string, deleteEntireRoom: boolean) => Promise<void>;
+  kickUserFromRoom: (code: string, targetParticipantId: string, targetName?: string) => Promise<void>;
   updateLocalRoom: (room: SharedRoom) => void;
   removeLocalRoom: (code: string) => void;
   // Mutual Book Exchange Shelves (Independent Progress!)
@@ -250,7 +305,8 @@ interface LibraryContextValue {
     entry: SharedShelfBook,
     includeSharedMarks?: boolean
   ) => Promise<BookItem | null>;
-  leaveOrDeleteShelf: (code: string, isHost: boolean) => Promise<void>;
+  leaveOrDeleteShelf: (code: string, deleteEntireShelf: boolean) => Promise<void>;
+  kickUserFromShelf: (code: string, targetMemberId: string, targetName?: string) => Promise<void>;
   updateLocalShelf: (shelf: SharedShelf) => void;
   removeLocalShelf: (code: string) => void;
   toast: string | null;
@@ -432,12 +488,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [audioBook, setAudioBook] = useState<BookItem | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [editingBook, setEditingBook] = useState<BookItem | null>(null);
+  const [missingFileBook, setMissingFileBook] = useState<BookItem | null>(null);
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [studioModalOpen, setStudioModalOpen] = useState(false);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
 
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'ok' | 'error'>('idle');
   const [syncMessage, setSyncMessage] = useState('');
+  const [offlineSyncProgress, setOfflineSyncProgress] = useState('');
   const [serverOnline, setServerOnline] = useState(false);
   const [liveConnected, setLiveConnected] = useState(false);
   const [serverAuthRequired, setServerAuthRequired] = useState(false);
@@ -465,6 +523,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const themeUpdatedAtRef = useRef<number>(0);
   const profileUpdatedAtRef = useRef<number>(0);
   const lastSyncedWallpaperRef = useRef<string>('');
+  const syncedCoverSigRef = useRef<Map<string, string>>(new Map());
   const lastResumeSyncAtRef = useRef<number>(0);
   const localActiveSessionRef = useRef<ActiveReadingSession | null>(null);
   const suppressAutoSyncRef = useRef<boolean>(false);
@@ -563,7 +622,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         savedPendingTombstones,
         savedThemeTs,
         savedProfileTs,
-        savedExplicitLogout,
       ] = await Promise.all([
         dbGetKV<ThemeConfig>('theme'),
         dbGetKV<CategoryItem[]>('categories'),
@@ -590,7 +648,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }>('pendingTombstones'),
         dbGetKV<number>('themeUpdatedAt'),
         dbGetKV<number>('profileUpdatedAt'),
-        dbGetKV<boolean>('explicitLogout'),
       ]);
 
       if (typeof savedThemeTs === 'number') themeUpdatedAtRef.current = savedThemeTs;
@@ -830,61 +887,31 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setAnnotations(loadedAnnotations.filter((a) => !pendingAnnDel.has(a.id)));
       setNotes(loadedNotes.filter((n) => !pendingNoteDel.has(n.id)));
 
-      // If accessed by the owner on localhost (:3000, :4123, :5173), LAN, or the deployed server from the owner's network
-      // (and not explicitly logged out or joining a guest room), auto-connect to the owner's primary vault
-      // so the saved custom theme, books, and marcadores display immediately on both localhost:3000 and the tunnel!
-      const hasGuestParam =
-        typeof window !== 'undefined' &&
-        (new URLSearchParams(window.location.search).has('join') ||
-          new URLSearchParams(window.location.search).has('shelf'));
-
-      if (!savedExplicitLogout && !hasGuestParam && !savedSync?.accountEmail) {
-        try {
-          const defaultBase =
-            typeof window !== 'undefined' &&
-            window.location.origin.startsWith('http') &&
-            !/:5173$/.test(window.location.origin)
-              ? window.location.origin.replace(/\/+$/, '')
-              : 'http://localhost:4123';
-          const isLocalOrigin =
-            typeof window !== 'undefined' &&
-            (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-          const health = await checkServerHealth({
-            ...initialSync,
-            serverUrl: initialSync.serverUrl || defaultBase,
-          }).catch(() => null);
-
-          if ((isLocalOrigin || health?.isOwnerNetwork) && health?.ownerSpaceId) {
-            initialSync = {
-              ...initialSync,
-              serverUrl: initialSync.serverUrl || defaultBase,
-              spaceId: health.ownerSpaceId,
-              autoSync: true,
-              liveSync: true,
-            };
-            setSyncConfig(initialSync);
-            await dbSetKV('syncConfig', initialSync);
-            const remote = await fetchRemoteSyncState(initialSync).catch(() => null);
-            if (remote && !cancelled) {
-              await applyRemotePayload(remote, loadedBooks.length === 0);
-            }
-          }
-        } catch {
-          // ignore offline bootstrap check
-        }
-      }
+      // Privacy invariant: Every new device/install MUST start 100% isolated and empty.
+      // Cloud sync ONLY pulls data after the user explicitly signs in with their email/PIN
+      // or explicitly pairs via ?pair=1 — NEVER auto-connects any device to a shared/owner vault.
 
       setReady(true);
 
-      // Background pass: ensure existing books in IndexedDB extract their original cover
-      // (or use adaptive cover when the file has no embedded cover image)
-      const needsCheck = loadedBooks.filter((b) => !b.coverCheckedV2);
+      // Background pass (v3): ensure existing local books in IndexedDB extract their original cover
+      // (re-checks books that previously failed extraction on older Android WebView builds)
+      const needsCheck = loadedBooks.filter(
+        (b) =>
+          !b.coverCheckedV2 ||
+          (!b.coverCheckedV3 &&
+            b.hasLocalFile &&
+            !b.isDemo &&
+            !hasDisplayableOriginalCover(b) &&
+            b.hasOriginalCover !== false) ||
+          (!b.coverCheckedV3 && b.hasLocalFile && !b.isDemo && !isRasterCoverDataUrl(b.coverDataUrl))
+      );
       if (needsCheck.length > 0) {
         (async () => {
+          let upgradedCovers = 0;
           for (const book of needsCheck) {
             if (cancelled) return;
             try {
-              let patch: Partial<BookItem> = { coverCheckedV2: true };
+              let patch: Partial<BookItem> = { coverCheckedV2: true, coverCheckedV3: true };
               if (book.isDemo) {
                 patch.hasOriginalCover = book.format !== 'md';
               } else if (book.hasLocalFile) {
@@ -897,7 +924,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                       fileRec.extraImages
                     )
                   : {};
-                if (extracted.coverDataUrl) {
+                if (extracted.coverDataUrl && isRasterCoverDataUrl(extracted.coverDataUrl)) {
                   const pal = await extractCoverPaletteFromDataUrl(
                     extracted.coverDataUrl,
                     book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
@@ -907,30 +934,39 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                     coverDataUrl: extracted.coverDataUrl,
                     hasOriginalCover: true,
                     coverCheckedV2: true,
+                    coverCheckedV3: true,
+                    spineColor: pal.spineColor,
+                    ribbonColor: pal.ribbonColor,
+                    updatedAt: Date.now(),
+                  };
+                  if (
+                    extracted.author &&
+                    (!book.author ||
+                      book.author === 'Autor desconocido' ||
+                      book.author === 'Biblioteca Personal')
+                  ) {
+                    patch.author = extracted.author;
+                  }
+                  upgradedCovers++;
+                } else if (isRasterCoverDataUrl(book.coverDataUrl)) {
+                  const pal = await extractCoverPaletteFromDataUrl(
+                    book.coverDataUrl,
+                    book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
+                    book.ribbonColor || '#f2ba59'
+                  );
+                  patch = {
+                    hasOriginalCover: true,
+                    coverCheckedV2: true,
+                    coverCheckedV3: true,
                     spineColor: pal.spineColor,
                     ribbonColor: pal.ribbonColor,
                   };
                 } else {
-                  const hasCustomRasterCover =
-                    Boolean(book.coverDataUrl) && !book.coverDataUrl.startsWith('data:image/svg+xml');
-                  if (hasCustomRasterCover) {
-                    const pal = await extractCoverPaletteFromDataUrl(
-                      book.coverDataUrl,
-                      book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
-                      book.ribbonColor || '#f2ba59'
-                    );
-                    patch = {
-                      hasOriginalCover: true,
-                      coverCheckedV2: true,
-                      spineColor: pal.spineColor,
-                      ribbonColor: pal.ribbonColor,
-                    };
-                  } else {
-                    patch = {
-                      hasOriginalCover: false,
-                      coverCheckedV2: true,
-                    };
-                  }
+                  patch = {
+                    hasOriginalCover: false,
+                    coverCheckedV2: true,
+                    coverCheckedV3: true,
+                  };
                 }
               }
 
@@ -942,6 +978,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             } catch {
               // skip faulty book without blocking other books
             }
+          }
+          if (!cancelled && upgradedCovers > 0) {
+            setSyncMessage((prev) => prev || `${upgradedCovers} portadas originales recuperadas`);
           }
         })();
       }
@@ -1073,9 +1112,55 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           if (!remoteBook || remoteBook.isDemo || deletedBookSet.has(remoteBook.id)) continue;
           const local = mergedMap.get(remoteBook.id);
           const hasFileRec = local?.hasLocalFile ? true : Boolean(await dbGetBookFile(remoteBook.id));
+
+          // Track confirmed server cover so future lightweight syncs only omit unchanged covers
+          if (remoteBook.coverDataUrl && remoteBook.coverDataUrl !== '__KEEP__') {
+            syncedCoverSigRef.current.set(remoteBook.id, getCoverSignature(remoteBook.coverDataUrl));
+          }
+
+          const remoteHasRaster = isRasterCoverDataUrl(remoteBook.coverDataUrl);
+          const localHasRaster = isRasterCoverDataUrl(local?.coverDataUrl);
+
           if (!local || forceRestore || (remoteBook.updatedAt || 0) >= (local.updatedAt || 0)) {
+            let safeCover =
+              remoteBook.coverDataUrl && remoteBook.coverDataUrl !== '__KEEP__'
+                ? remoteBook.coverDataUrl
+                : local?.coverDataUrl || '';
+            let safeHasOriginal = remoteBook.hasOriginalCover;
+            let safeSpine = remoteBook.spineColor || local?.spineColor || '#4c6c8a';
+            let safeRibbon = remoteBook.ribbonColor || local?.ribbonColor || '#f2ba59';
+
+            // Never let a remote placeholder/SVG/empty cover clobber a real local original cover!
+            if (localHasRaster && !remoteHasRaster && remoteBook.hasOriginalCover !== false && local) {
+              safeCover = local.coverDataUrl;
+              safeHasOriginal = true;
+              safeSpine = local.spineColor || safeSpine;
+              safeRibbon = local.ribbonColor || safeRibbon;
+            } else if (remoteHasRaster && safeHasOriginal === undefined) {
+              safeHasOriginal = true;
+            }
+
+            if (!safeCover) {
+              const fallback = generateCozyCover(
+                remoteBook.title || local?.title || 'Sin título',
+                remoteBook.author || local?.author || 'Autor desconocido',
+                remoteBook.kind || local?.kind || 'book',
+                remoteBook.format || local?.format || 'epub'
+              );
+              safeCover = fallback.coverDataUrl;
+              safeHasOriginal = false;
+            }
+
             const mergedItem: BookItem = {
+              ...local,
               ...remoteBook,
+              coverDataUrl: safeCover,
+              hasOriginalCover: safeHasOriginal,
+              spineColor: safeSpine,
+              ribbonColor: safeRibbon,
+              coverCheckedV3: local?.coverCheckedV3 || remoteBook.coverCheckedV3,
+              folderPath: remoteBook.folderPath || local?.folderPath,
+              nativeFileUri: local?.nativeFileUri,
               hasLocalFile: hasFileRec,
             };
             await dbPutBook(mergedItem);
@@ -1083,16 +1168,29 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             if (!hasFileRec && remoteBook.hasRemoteFile) {
               booksToAutoDownload.push(mergedItem);
             }
-          } else if (remoteBook.hasRemoteFile && !local.hasRemoteFile) {
-            const updatedLocal: BookItem = {
-              ...local,
-              hasRemoteFile: true,
-              remoteFileName: remoteBook.remoteFileName || local.remoteFileName,
-            };
-            await dbPutBook(updatedLocal);
-            mergedMap.set(remoteBook.id, updatedLocal);
-            if (!hasFileRec) {
-              booksToAutoDownload.push(updatedLocal);
+          } else {
+            // Local is newer, but still absorb cloud file availability OR a real remote cover if local lacked one!
+            const shouldAdoptRemoteCover = remoteHasRaster && !localHasRaster && local.hasOriginalCover !== false;
+            const shouldAdoptRemoteFile = Boolean(remoteBook.hasRemoteFile && !local.hasRemoteFile);
+            if (shouldAdoptRemoteCover || shouldAdoptRemoteFile) {
+              const updatedLocal: BookItem = {
+                ...local,
+                hasRemoteFile: local.hasRemoteFile || Boolean(remoteBook.hasRemoteFile),
+                remoteFileName: remoteBook.remoteFileName || local.remoteFileName,
+                ...(shouldAdoptRemoteCover
+                  ? {
+                      coverDataUrl: remoteBook.coverDataUrl,
+                      hasOriginalCover: true,
+                      spineColor: remoteBook.spineColor || local.spineColor,
+                      ribbonColor: remoteBook.ribbonColor || local.ribbonColor,
+                    }
+                  : {}),
+              };
+              await dbPutBook(updatedLocal);
+              mergedMap.set(remoteBook.id, updatedLocal);
+              if (!hasFileRec && updatedLocal.hasRemoteFile) {
+                booksToAutoDownload.push(updatedLocal);
+              }
             }
           }
         }
@@ -1102,9 +1200,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         );
         setBooks(nextBooks);
 
-        // Background auto-download book files from user's cloud vault so they are immediately ready to open
+        // Background auto-download book files from user's cloud vault so they are immediately ready offline!
         if (booksToAutoDownload.length > 0) {
           (async () => {
+            let downloadedOk = 0;
             for (const target of booksToAutoDownload) {
               try {
                 await downloadBookFromServer(stateRef.current.syncConfig, target);
@@ -1113,9 +1212,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 setBooks((prev) =>
                   prev.map((x) => (x.id === target.id ? { ...x, hasLocalFile: true } : x))
                 );
+                downloadedOk++;
               } catch {
-                // will retry when book is clicked
+                // will retry when book is clicked or via offline sync button
               }
+            }
+            if (downloadedOk > 0) {
+              showToast(
+                downloadedOk === 1
+                  ? '1 libro descargado y guardado para leer sin internet'
+                  : `${downloadedOk} libros descargados y guardados para leer sin internet`
+              );
             }
           })();
         }
@@ -1347,6 +1454,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             cs.messages.some((m) => m.sender === 'user')
           );
 
+          const keepCoverIds = new Set<string>();
+          for (const b of s.books) {
+            if (b.isDemo || !b.coverDataUrl) continue;
+            const confirmedSig = syncedCoverSigRef.current.get(b.id);
+            if (confirmedSig && confirmedSig === getCoverSignature(b.coverDataUrl)) {
+              keepCoverIds.add(b.id);
+            }
+          }
+
           const merged = await syncFullState(
             s.syncConfig,
             {
@@ -1375,7 +1491,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             },
             true,
             true,
-            keepWallpaper
+            keepWallpaper,
+            keepCoverIds
           );
 
           const sentBookSet = new Set(sentBooks);
@@ -1542,6 +1659,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         author?: string;
         kind?: ContentKind;
         categories?: string[];
+        skipDuplicates?: boolean;
+        onProgress?: (done: number, total: number, currentName?: string) => void;
       }
     ): Promise<BookItem[]> => {
       if (!files.length) return [];
@@ -1551,92 +1670,698 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return [];
       }
 
+      const skipDups = opts?.skipDuplicates !== false;
       const added: BookItem[] = [];
       const imageFiles = supported.filter((f) => isImageFile(f));
       const nonImageFiles = supported.filter((f) => !isImageFile(f));
 
-      // Import all standard book/comic/audio files individually
-      for (const f of nonImageFiles) {
-        const bundle = await importSingleFile(f, {
-          title: nonImageFiles.length === 1 && imageFiles.length === 0 ? opts?.title : undefined,
-          author: opts?.author,
-          kind: opts?.kind,
-          categories: opts?.categories,
-        });
-        await dbPutBook(bundle.book);
-        await dbPutBookFile(bundle.book.id, bundle.blob, bundle.extraImages);
-        added.push(bundle.book);
+      const normalizeMatch = (raw: string) =>
+        raw
+          .split(/[\\/]/)
+          .pop()!
+          .replace(/\.(epub|pdf|mobi|azw3?|fb2|cbz|cbr|txt|docx|zip|rar|mp3|m4b|m4a|jpe?g|png|webp|gif|avif|bmp)$/i, '')
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim();
 
-        if (syncConfig.autoSync && syncConfig.serverUrl) {
-          uploadBookToServer(syncConfig, bundle.book).catch(() => undefined);
+      const existingWithoutFile = stateRef.current.books.filter((b) => !b.hasLocalFile && !b.isDemo);
+      const existingFileNameKeys = new Set<string>();
+      const existingTitleKeys = new Set<string>();
+      for (const b of stateRef.current.books) {
+        if (b.isDemo || !b.hasLocalFile) continue;
+        const fk = normalizeMatch(b.fileName || '');
+        const tk = normalizeMatch(b.title || '');
+        if (fk) existingFileNameKeys.add(fk);
+        if (tk) existingTitleKeys.add(tk);
+      }
+
+      const linkedExistingIds = new Set<string>();
+      let linkedCount = 0;
+      let failedCount = 0;
+      let skippedDupCount = 0;
+      const duplicateSamples: string[] = [];
+
+      const recordDuplicate = (label: string) => {
+        skippedDupCount++;
+        if (duplicateSamples.length < 3 && label) {
+          duplicateSamples.push(label);
+        }
+      };
+
+      // Only auto-upload individual files sequentially for small batches (<= 20)
+      // so importing 1,600+ books NEVER spawns 1,600 concurrent uploads or OOMs Android WebView!
+      const uploadQueue: BookItem[] = [];
+      const allowAutoUpload = nonImageFiles.length + (imageFiles.length > 0 ? 1 : 0) <= 20;
+
+      const totalWork = nonImageFiles.length + (imageFiles.length > 0 ? (opts?.bundleImages ? 1 : imageFiles.length) : 0);
+      let processedCount = 0;
+      let pendingNewBatch: BookItem[] = [];
+      const flushNewBatch = () => {
+        if (!pendingNewBatch.length) return;
+        const chunk = pendingNewBatch;
+        pendingNewBatch = [];
+        setBooks((prev) => [...chunk, ...prev]);
+      };
+
+      // Import all standard book/comic/audio files individually with anti-duplication & per-file error isolation!
+      for (const f of nonImageFiles) {
+        processedCount++;
+        opts?.onProgress?.(processedCount, totalWork, f.name);
+        try {
+          const folder = getFolderPath(f);
+          const fnKey = normalizeMatch(f.name);
+
+          // Fast pre-check BEFORE heavy EPUB/PDF parsing if the filename already exists locally!
+          const catalogMatchByName = existingWithoutFile.find(
+            (ex) =>
+              !linkedExistingIds.has(ex.id) &&
+              fnKey &&
+              (normalizeMatch(ex.fileName) === fnKey || normalizeMatch(ex.title) === fnKey)
+          );
+          if (skipDups && !catalogMatchByName && fnKey && (existingFileNameKeys.has(fnKey) || existingTitleKeys.has(fnKey))) {
+            recordDuplicate(f.name.replace(/\.[^.]+$/, ''));
+            if (processedCount % 25 === 0) {
+              await new Promise((r) => setTimeout(r, 0));
+            }
+            continue;
+          }
+
+          const bundle = await importSingleFile(f, {
+            title: nonImageFiles.length === 1 && imageFiles.length === 0 ? opts?.title : undefined,
+            author: opts?.author,
+            kind: opts?.kind,
+            categories: opts?.categories,
+          });
+          if (folder) bundle.book.folderPath = folder;
+
+          const titleKey = normalizeMatch(bundle.book.title);
+          const existingMatch =
+            catalogMatchByName ||
+            existingWithoutFile.find(
+              (ex) =>
+                !linkedExistingIds.has(ex.id) &&
+                ((fnKey && normalizeMatch(ex.fileName) === fnKey) ||
+                  (titleKey && normalizeMatch(ex.title) === titleKey) ||
+                  (fnKey && normalizeMatch(ex.title) === fnKey))
+            );
+
+          if (existingMatch) {
+            linkedExistingIds.add(existingMatch.id);
+            const mergedExisting: BookItem = {
+              ...existingMatch,
+              author:
+                existingMatch.author &&
+                existingMatch.author !== 'Autor desconocido' &&
+                existingMatch.author !== 'Biblioteca Personal'
+                  ? existingMatch.author
+                  : bundle.book.author || existingMatch.author,
+              description: existingMatch.description || bundle.book.description,
+              format: bundle.book.format,
+              fileName: bundle.book.fileName,
+              fileSize: bundle.book.fileSize,
+              mimeType: bundle.book.mimeType,
+              folderPath: existingMatch.folderPath || bundle.book.folderPath,
+              pageCount: bundle.book.pageCount ?? existingMatch.pageCount,
+              coverDataUrl: isRasterCoverDataUrl(existingMatch.coverDataUrl)
+                ? existingMatch.coverDataUrl
+                : isRasterCoverDataUrl(bundle.book.coverDataUrl)
+                ? bundle.book.coverDataUrl
+                : existingMatch.coverDataUrl,
+              hasOriginalCover:
+                isRasterCoverDataUrl(existingMatch.coverDataUrl) ||
+                isRasterCoverDataUrl(bundle.book.coverDataUrl),
+              coverCheckedV2: true,
+              coverCheckedV3: true,
+              spineColor:
+                !isRasterCoverDataUrl(existingMatch.coverDataUrl) &&
+                isRasterCoverDataUrl(bundle.book.coverDataUrl)
+                  ? bundle.book.spineColor
+                  : existingMatch.spineColor,
+              ribbonColor:
+                !isRasterCoverDataUrl(existingMatch.coverDataUrl) &&
+                isRasterCoverDataUrl(bundle.book.coverDataUrl)
+                  ? bundle.book.ribbonColor
+                  : existingMatch.ribbonColor,
+              hasLocalFile: true,
+              updatedAt: Date.now(),
+            };
+            await dbPutBook(mergedExisting);
+            await dbPutBookFile(mergedExisting.id, bundle.blob, bundle.extraImages);
+            setBooks((prev) => prev.map((b) => (b.id === mergedExisting.id ? mergedExisting : b)));
+            linkedCount++;
+            if (fnKey) existingFileNameKeys.add(fnKey);
+            if (titleKey) existingTitleKeys.add(titleKey);
+            if (allowAutoUpload) uploadQueue.push(mergedExisting);
+          } else if (
+            skipDups &&
+            ((fnKey && existingFileNameKeys.has(fnKey)) || (titleKey && existingTitleKeys.has(titleKey)))
+          ) {
+            recordDuplicate(bundle.book.title || f.name);
+          } else {
+            await dbPutBook(bundle.book);
+            await dbPutBookFile(bundle.book.id, bundle.blob, bundle.extraImages);
+            added.push(bundle.book);
+            pendingNewBatch.push(bundle.book);
+            if (fnKey) existingFileNameKeys.add(fnKey);
+            if (titleKey) existingTitleKeys.add(titleKey);
+            if (allowAutoUpload) uploadQueue.push(bundle.book);
+          }
+        } catch (err) {
+          failedCount++;
+          console.warn('Error importando archivo individual:', f.name, err);
+        }
+
+        // Flush React state & yield every 10 files so WebView stays responsive and never OOMs!
+        if (processedCount % 10 === 0) {
+          flushNewBatch();
+          await new Promise((r) => setTimeout(r, 0));
         }
       }
+      flushNewBatch();
 
       // Import images (either grouped by folder / single bundle, or individually)
       if (imageFiles.length > 0) {
         if (opts?.bundleImages && imageFiles.length > 1) {
           const groups = groupImagesByFolder(imageFiles);
           for (const group of groups) {
-            const groupTitle =
-              groups.length === 1 && opts?.title
-                ? opts.title
-                : group.folderName || opts?.title || 'Volumen Ilustrado';
-            const bundle = await importImageBundle(
-              group.files,
-              groupTitle,
-              opts?.author || 'Biblioteca Personal',
-              opts?.kind || 'manhwa',
-              opts?.categories || []
-            );
-            await dbPutBook(bundle.book);
-            await dbPutBookFile(bundle.book.id, bundle.blob, bundle.extraImages);
-            added.push(bundle.book);
-          }
-        } else {
-          for (const f of imageFiles) {
-            const bundle = await importSingleFile(f, {
-              title: supported.length === 1 ? opts?.title : undefined,
-              author: opts?.author,
-              kind: opts?.kind,
-              categories: opts?.categories,
-            });
-            await dbPutBook(bundle.book);
-            await dbPutBookFile(bundle.book.id, bundle.blob, bundle.extraImages);
-            added.push(bundle.book);
-
-            if (syncConfig.autoSync && syncConfig.serverUrl) {
-              uploadBookToServer(syncConfig, bundle.book).catch(() => undefined);
+            try {
+              const groupTitle =
+                groups.length === 1 && opts?.title
+                  ? opts.title
+                  : group.folderName || opts?.title || 'Volumen Ilustrado';
+              const gKey = normalizeMatch(groupTitle);
+              if (skipDups && gKey && existingTitleKeys.has(gKey)) {
+                recordDuplicate(groupTitle);
+                continue;
+              }
+              const bundle = await importImageBundle(
+                group.files,
+                groupTitle,
+                opts?.author || 'Biblioteca Personal',
+                opts?.kind || 'manhwa',
+                opts?.categories || []
+              );
+              await dbPutBook(bundle.book);
+              await dbPutBookFile(bundle.book.id, bundle.blob, bundle.extraImages);
+              added.push(bundle.book);
+              pendingNewBatch.push(bundle.book);
+              if (gKey) existingTitleKeys.add(gKey);
+              if (allowAutoUpload) uploadQueue.push(bundle.book);
+            } catch {
+              failedCount++;
             }
           }
+          flushNewBatch();
+        } else {
+          for (const f of imageFiles) {
+            processedCount++;
+            opts?.onProgress?.(processedCount, totalWork, f.name);
+            try {
+              const fk = normalizeMatch(f.name);
+              if (skipDups && fk && existingFileNameKeys.has(fk)) {
+                recordDuplicate(f.name);
+                continue;
+              }
+              const bundle = await importSingleFile(f, {
+                title: supported.length === 1 ? opts?.title : undefined,
+                author: opts?.author,
+                kind: opts?.kind,
+                categories: opts?.categories,
+              });
+              await dbPutBook(bundle.book);
+              await dbPutBookFile(bundle.book.id, bundle.blob, bundle.extraImages);
+              added.push(bundle.book);
+              pendingNewBatch.push(bundle.book);
+              if (fk) existingFileNameKeys.add(fk);
+              if (allowAutoUpload) uploadQueue.push(bundle.book);
+            } catch {
+              failedCount++;
+            }
+            if (processedCount % 10 === 0) {
+              flushNewBatch();
+              await new Promise((r) => setTimeout(r, 0));
+            }
+          }
+          flushNewBatch();
         }
       }
 
-      setBooks((prev) => [...added, ...prev]);
-      showToast(
-        added.length === 1
-          ? `"${added[0].title}" añadido a tu librería`
-          : `${added.length} títulos añadidos a tu librería`
-      );
+      // Sequential background upload for small imports
+      const cfg = stateRef.current.syncConfig;
+      if (uploadQueue.length > 0 && (cfg.autoSync || cfg.liveSync) && cfg.serverUrl) {
+        (async () => {
+          for (const targetBook of uploadQueue) {
+            try {
+              const up = await uploadBookToServer(stateRef.current.syncConfig, targetBook, stateRef.current.deviceId);
+              if (!up.ok) continue;
+              setBooks((prev) =>
+                prev.map((b) => {
+                  if (b.id !== targetBook.id) return b;
+                  const nextBook: BookItem = {
+                    ...b,
+                    hasRemoteFile: true,
+                    remoteFileName: up.remoteFileName || b.remoteFileName,
+                    format: up.format || b.format,
+                  };
+                  dbPutBook(nextBook).catch(() => undefined);
+                  return nextBook;
+                })
+              );
+            } catch {
+              // ignore individual upload failure
+            }
+          }
+        })();
+      }
+
+      const dupHint =
+        skippedDupCount > 0
+          ? ` · ${skippedDupCount} duplicado${skippedDupCount === 1 ? '' : 's'} omitido${skippedDupCount === 1 ? '' : 's'}`
+          : '';
+      const errHint = failedCount > 0 ? ` · ${failedCount} con error` : '';
+      const sampleTxt = duplicateSamples.length > 0 ? ` (${duplicateSamples.join(', ')})` : '';
+
+      if (added.length > 0 && linkedCount > 0) {
+        showToast(`${added.length} añadidos, ${linkedCount} vinculados${dupHint}${errHint}`);
+      } else if (linkedCount > 0) {
+        showToast(
+          `${linkedCount} archivo${linkedCount === 1 ? '' : 's'} vinculado${linkedCount === 1 ? '' : 's'}${dupHint}${errHint}`
+        );
+      } else if (added.length > 0) {
+        showToast(
+          added.length === 1 && !dupHint
+            ? `"${added[0].title}" añadido a tu librería`
+            : `${added.length} nuevo${added.length === 1 ? '' : 's'} añadido${added.length === 1 ? '' : 's'}${dupHint}${errHint}`
+        );
+      } else if (skippedDupCount > 0) {
+        showToast(
+          `Anti-duplicados: ${skippedDupCount} libro${skippedDupCount === 1 ? '' : 's'} ya estaba${skippedDupCount === 1 ? '' : 'n'} en tu biblioteca${sampleTxt}`
+        );
+      } else if (failedCount > 0) {
+        showToast(`No se pudieron leer ${failedCount} archivos (revisa permisos o usa "Elegir carpeta")`);
+      }
       scheduleAutoSync();
       return added;
     },
-    [scheduleAutoSync, showToast, syncConfig]
+    [scheduleAutoSync, showToast]
   );
+
+  const importNativeFolderBooks = useCallback(
+    async (
+      items: NativeScannedFolderBook[],
+      opts?: { author?: string; kind?: ContentKind; categories?: string[]; finalizeSync?: boolean }
+    ): Promise<{ added: number; linked: number; duplicatesSkipped: number; duplicateSamples: string[] }> => {
+      if (!items.length) {
+        if (opts?.finalizeSync) scheduleAutoSync();
+        return { added: 0, linked: 0, duplicatesSkipped: 0, duplicateSamples: [] };
+      }
+
+      const normalizeMatch = (raw: string) =>
+        raw
+          .split(/[\\/]/)
+          .pop()!
+          .replace(/\.(epub|pdf|mobi|azw3?|fb2|cbz|cbr|txt|docx|zip|rar|mp3|m4b|m4a)$/i, '')
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim();
+
+      const currentBooks = stateRef.current.books;
+      const byUri = new Map<string, BookItem>();
+      const byFileKey = new Map<string, BookItem>();
+      const byTitleKey = new Map<string, BookItem>();
+      for (const b of currentBooks) {
+        if (b.isDemo) continue;
+        if (b.nativeFileUri) byUri.set(b.nativeFileUri, b);
+        const fk = normalizeMatch(b.fileName || '');
+        if (fk && !byFileKey.has(fk)) byFileKey.set(fk, b);
+        const tk = normalizeMatch(b.title || '');
+        if (tk && !byTitleKey.has(tk)) byTitleKey.set(tk, b);
+      }
+
+      const newlyCreated: BookItem[] = [];
+      const updatedMap = new Map<string, BookItem>();
+      let linkedCount = 0;
+      let duplicatesSkipped = 0;
+      const duplicateSamples: string[] = [];
+      const now = Date.now();
+
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const fmt = (it.format || 'epub') as BookItem['format'];
+        const cleanFileTitle = it.fileName
+          .replace(/\.[^.]+$/, '')
+          .replace(/[_-]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const title = (it.title && it.title.trim()) || cleanFileTitle || 'Sin título';
+        const author =
+          opts?.author?.trim() ||
+          (it.author && it.author.trim()) ||
+          'Biblioteca Personal';
+        const kind: ContentKind =
+          opts?.kind ||
+          (fmt === 'audio'
+            ? 'audiobook'
+            : /manhwa|webtoon|manhua/i.test(`${it.folderPath || ''} ${it.fileName}`)
+            ? 'manhwa'
+            : fmt === 'cbz' || fmt === 'cbr' || /manga/i.test(`${it.folderPath || ''} ${it.fileName}`)
+            ? 'manga'
+            : 'book');
+
+        const realCoverUrl = it.coverBase64 ? `data:image/jpeg;base64,${it.coverBase64}` : undefined;
+        const fnKey = normalizeMatch(it.fileName);
+        const titleKey = normalizeMatch(title);
+
+        const existing =
+          byUri.get(it.uri) ||
+          (fnKey ? byFileKey.get(fnKey) : undefined) ||
+          (titleKey ? byTitleKey.get(titleKey) : undefined);
+
+        if (existing) {
+          const wasMissingFile = !existing.hasLocalFile;
+          const shouldUpgradeCover = Boolean(realCoverUrl) && !isRasterCoverDataUrl(existing.coverDataUrl);
+          const needsUriUpdate = existing.nativeFileUri !== it.uri;
+
+          if (wasMissingFile) {
+            linkedCount++;
+          } else {
+            duplicatesSkipped++;
+            if (duplicateSamples.length < 3) duplicateSamples.push(existing.title || title);
+          }
+
+          if (wasMissingFile || shouldUpgradeCover || needsUriUpdate) {
+            const merged: BookItem = {
+              ...existing,
+              author:
+                existing.author &&
+                existing.author !== 'Autor desconocido' &&
+                existing.author !== 'Biblioteca Personal'
+                  ? existing.author
+                  : author,
+              description: existing.description || it.description,
+              format: fmt || existing.format,
+              fileName: it.fileName || existing.fileName,
+              fileSize: it.fileSize || existing.fileSize,
+              mimeType: it.mimeType || existing.mimeType,
+              folderPath: it.folderPath || existing.folderPath,
+              pageCount: it.pageCount ?? existing.pageCount,
+              coverDataUrl: shouldUpgradeCover && realCoverUrl ? realCoverUrl : existing.coverDataUrl,
+              hasOriginalCover: shouldUpgradeCover ? true : existing.hasOriginalCover,
+              coverCheckedV2: true,
+              coverCheckedV3: true,
+              hasLocalFile: true,
+              nativeFileUri: it.uri,
+              updatedAt: now + i,
+            };
+            await dbPutBook(merged);
+            updatedMap.set(merged.id, merged);
+            byUri.set(it.uri, merged);
+          }
+          continue;
+        }
+
+        const generated = generateCozyCover(title, author, kind, fmt);
+        const hasOriginalCover = Boolean(realCoverUrl);
+        const finalCover = realCoverUrl || generated.coverDataUrl;
+
+        const defaultCats = new Set<string>(opts?.categories || []);
+        defaultCats.add('new');
+        if (kind === 'manga') defaultCats.add('manga');
+        else if (kind === 'manhwa') defaultCats.add('manhwa');
+        else if (kind === 'comic') defaultCats.add('comic');
+        else if (kind === 'audiobook') defaultCats.add('audiobooks');
+        else defaultCats.add('ebooks');
+
+        const created: BookItem = {
+          id: `book_${now}_${i}_${Math.random().toString(36).slice(2, 7)}`,
+          title,
+          author,
+          description: it.description || '',
+          format: fmt,
+          kind,
+          categories: Array.from(defaultCats),
+          tags: [fmt.toUpperCase()],
+          coverDataUrl: finalCover,
+          hasOriginalCover,
+          coverCheckedV2: true,
+          coverCheckedV3: true,
+          spineColor: generated.spineColor,
+          ribbonColor: generated.ribbonColor,
+          fileName: it.fileName,
+          folderPath: it.folderPath,
+          fileSize: it.fileSize || 0,
+          mimeType: it.mimeType || 'application/octet-stream',
+          pageCount: it.pageCount,
+          progress: 0,
+          favorite: false,
+          wishlist: false,
+          hasLocalFile: true,
+          nativeFileUri: it.uri,
+          addedAt: now + i,
+          updatedAt: now + i,
+        };
+        await dbPutBook(created);
+        newlyCreated.push(created);
+        byUri.set(it.uri, created);
+        if (fnKey) byFileKey.set(fnKey, created);
+        if (titleKey) byTitleKey.set(titleKey, created);
+      }
+
+      if (newlyCreated.length > 0 || updatedMap.size > 0) {
+        setBooks((prev) => {
+          const next = updatedMap.size > 0 ? prev.map((b) => updatedMap.get(b.id) || b) : prev;
+          return newlyCreated.length > 0 ? [...newlyCreated, ...next] : next;
+        });
+      }
+
+      if (opts?.finalizeSync) {
+        scheduleAutoSync();
+      }
+      return { added: newlyCreated.length, linked: linkedCount, duplicatesSkipped, duplicateSamples };
+    },
+    [scheduleAutoSync]
+  );
+
+  const duplicateBooksCount = React.useMemo(() => {
+    const norm = (raw: string) =>
+      raw
+        .split(/[\\/]/)
+        .pop()!
+        .replace(/\.(epub|pdf|mobi|azw3?|fb2|cbz|cbr|txt|docx|zip|rar|mp3|m4b|m4a)$/i, '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+    const seen = new Set<string>();
+    let dups = 0;
+    for (const b of books) {
+      if (b.isDemo) continue;
+      const key = norm(b.fileName || '') || norm(b.title || '');
+      if (!key) continue;
+      if (seen.has(key)) dups++;
+      else seen.add(key);
+    }
+    return dups;
+  }, [books]);
+
+  const removeDuplicateBooks = useCallback(async (): Promise<number> => {
+    const norm = (raw: string) =>
+      raw
+        .split(/[\\/]/)
+        .pop()!
+        .replace(/\.(epub|pdf|mobi|azw3?|fb2|cbz|cbr|txt|docx|zip|rar|mp3|m4b|m4a)$/i, '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+
+    const current = stateRef.current;
+    const groups = new Map<string, BookItem[]>();
+    for (const b of current.books) {
+      if (b.isDemo) continue;
+      const key = norm(b.fileName || '') || norm(b.title || '');
+      if (!key) continue;
+      const arr = groups.get(key) || [];
+      arr.push(b);
+      groups.set(key, arr);
+    }
+
+    const scoreBook = (b: BookItem) =>
+      (b.progress || 0) * 10 +
+      (isRasterCoverDataUrl(b.coverDataUrl) ? 500 : 0) +
+      (b.hasLocalFile ? 200 : 0) +
+      (b.hasRemoteFile ? 80 : 0) +
+      (b.favorite ? 40 : 0) +
+      (b.lastReadAt ? 30 : 0);
+
+    const idsToRemove = new Set<string>();
+    const remapId = new Map<string, string>();
+    const keptReplacements = new Map<string, BookItem>();
+
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const sorted = [...group].sort((a, b) => scoreBook(b) - scoreBook(a) || (a.addedAt || 0) - (b.addedAt || 0));
+      const keeper = { ...sorted[0] };
+
+      for (let i = 1; i < sorted.length; i++) {
+        const dup = sorted[i];
+        idsToRemove.add(dup.id);
+        remapId.set(dup.id, keeper.id);
+
+        // Merge any richer metadata from the duplicate into the keeper before deleting
+        if (!isRasterCoverDataUrl(keeper.coverDataUrl) && isRasterCoverDataUrl(dup.coverDataUrl)) {
+          keeper.coverDataUrl = dup.coverDataUrl;
+          keeper.hasOriginalCover = true;
+          keeper.spineColor = dup.spineColor;
+          keeper.ribbonColor = dup.ribbonColor;
+        }
+        if ((dup.progress || 0) > (keeper.progress || 0)) {
+          keeper.progress = dup.progress;
+          keeper.currentPage = dup.currentPage ?? keeper.currentPage;
+          keeper.currentCfi = dup.currentCfi || keeper.currentCfi;
+          keeper.currentChapter = dup.currentChapter || keeper.currentChapter;
+        }
+        keeper.favorite = keeper.favorite || dup.favorite;
+        keeper.wishlist = keeper.wishlist || dup.wishlist;
+        keeper.hasLocalFile = keeper.hasLocalFile || dup.hasLocalFile;
+        keeper.hasRemoteFile = keeper.hasRemoteFile || dup.hasRemoteFile;
+        keeper.nativeFileUri = keeper.nativeFileUri || dup.nativeFileUri;
+        keeper.folderPath = keeper.folderPath || dup.folderPath;
+        keeper.lastReadAt = Math.max(keeper.lastReadAt || 0, dup.lastReadAt || 0) || undefined;
+        keeper.finishedAt = keeper.finishedAt || dup.finishedAt;
+        keeper.tags = Array.from(new Set([...(keeper.tags || []), ...(dup.tags || [])]));
+        keeper.categories = Array.from(new Set([...(keeper.categories || []), ...(dup.categories || [])]));
+        keeper.updatedAt = Date.now();
+      }
+      keptReplacements.set(keeper.id, keeper);
+    }
+
+    if (idsToRemove.size === 0) {
+      showToast('No se encontraron libros duplicados en tu biblioteca');
+      return 0;
+    }
+
+    // Reassign bookmarks/annotations/notes from removed duplicates to kept books
+    const nextBookmarks = current.bookmarks.map((bm) => {
+      const targetId = remapId.get(bm.bookId);
+      if (!targetId) return bm;
+      const updated = { ...bm, bookId: targetId };
+      dbPutBookmark(updated).catch(() => undefined);
+      return updated;
+    });
+    const nextAnnotations = current.annotations.map((ann) => {
+      const targetId = remapId.get(ann.bookId);
+      if (!targetId) return ann;
+      const updated = { ...ann, bookId: targetId, updatedAt: Date.now() };
+      dbPutAnnotation(updated).catch(() => undefined);
+      return updated;
+    });
+
+    for (const keeper of keptReplacements.values()) {
+      await dbPutBook(keeper);
+    }
+    for (const delId of idsToRemove) {
+      await dbDeleteBook(delId).catch(() => undefined);
+      if (!deletedIdsRef.current.includes(delId)) deletedIdsRef.current.push(delId);
+    }
+    persistPendingTombstones();
+
+    setBooks((prev) =>
+      prev
+        .filter((b) => !idsToRemove.has(b.id))
+        .map((b) => keptReplacements.get(b.id) || b)
+    );
+    setBookmarks(nextBookmarks);
+    setAnnotations(nextAnnotations);
+    showToast(`Limpieza completada: se eliminaron ${idsToRemove.size} libros duplicados (progresos y notas conservados)`);
+    scheduleAutoSync(true);
+    return idsToRemove.size;
+  }, [persistPendingTombstones, scheduleAutoSync, showToast]);
 
   const updateBook = useCallback(
     async (id: string, patch: Partial<BookItem>) => {
+      const now = Date.now();
       let latestBook: BookItem | undefined;
       setBooks((prev) => {
-        const next = prev.map((b) =>
-          b.id === id ? { ...b, ...patch, updatedAt: Date.now() } : b
-        );
+        const next = prev.map((b) => {
+          if (b.id !== id) return b;
+          const isReadingUpdate =
+            patch.progress !== undefined ||
+            patch.currentPage !== undefined ||
+            patch.currentChapter !== undefined ||
+            patch.currentCfi !== undefined ||
+            patch.scrollRatio !== undefined ||
+            patch.audioTime !== undefined ||
+            patch.lastReadAt !== undefined;
+
+          const enriched: Partial<BookItem> = { ...patch };
+
+          if (isReadingUpdate) {
+            if (enriched.lastReadAt === undefined) {
+              enriched.lastReadAt = now;
+            }
+            const nextProgress = enriched.progress ?? b.progress ?? 0;
+            if (!b.startedAt && !enriched.startedAt && (nextProgress > 0 || enriched.lastReadAt)) {
+              enriched.startedAt = now;
+            }
+
+            // Detect chapter completion when advancing from a previous chapter to a new one
+            if (
+              enriched.currentChapter &&
+              b.currentChapter &&
+              enriched.currentChapter.trim() !== b.currentChapter.trim()
+            ) {
+              enriched.lastChapterFinishedAt = now;
+              enriched.lastChapterFinishedTitle = b.currentChapter.trim();
+            } else if (
+              enriched.currentPage !== undefined &&
+              (enriched.pageCount ?? b.pageCount) &&
+              enriched.currentPage >= (enriched.pageCount ?? b.pageCount ?? 0) &&
+              (b.currentPage ?? 0) < (enriched.pageCount ?? b.pageCount ?? 0)
+            ) {
+              enriched.lastChapterFinishedAt = now;
+              enriched.lastChapterFinishedTitle =
+                enriched.currentChapter || b.currentChapter || `Pág. ${enriched.currentPage}`;
+            }
+
+            // Detect book completion automatically when progress reaches >= 98%
+            if (nextProgress >= 98) {
+              if (!b.finishedAt || (b.progress || 0) < 98) {
+                enriched.finishedAt = enriched.finishedAt ?? now;
+              }
+              if (!enriched.readingStatus && b.readingStatus !== 'completed') {
+                enriched.readingStatus = 'completed';
+              }
+            } else if (
+              nextProgress > 0 &&
+              !enriched.readingStatus &&
+              (!b.readingStatus || b.readingStatus === 'want_to_read')
+            ) {
+              enriched.readingStatus = 'reading';
+            }
+          }
+
+          if (enriched.readingStatus === 'completed' && !b.finishedAt && !enriched.finishedAt) {
+            enriched.finishedAt = now;
+          }
+
+          return { ...b, ...enriched, updatedAt: now };
+        });
         latestBook = next.find((b) => b.id === id);
         if (latestBook) {
           dbPutBook(latestBook).catch(console.error);
         }
         return next;
       });
-      setActiveBook((curr) => (curr && curr.id === id ? { ...curr, ...patch } : curr));
+      setActiveBook((curr) =>
+        curr && curr.id === id ? (latestBook ? latestBook : { ...curr, ...patch }) : curr
+      );
 
       // Update active reading session for Web <-> APK continuity
       if (patch.progress !== undefined || patch.currentPage !== undefined || patch.lastReadAt !== undefined) {
@@ -1692,7 +2417,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     async (id: string): Promise<boolean> => {
       const target = books.find((b) => b.id === id);
       if (!target) return false;
-      const fileRec = await dbGetBookFile(id);
+      let fileRec = await dbGetBookFile(id);
+      if (!fileRec && target.nativeFileUri) {
+        const nativeBlob = await readNativeUriAsBlob(target.nativeFileUri, target.mimeType);
+        if (nativeBlob) fileRec = { id, blob: nativeBlob };
+      }
       if (!fileRec) {
         showToast('No hay archivo local disponible para extraer portada');
         return false;
@@ -1703,7 +2432,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         target.title,
         fileRec.extraImages
       );
-      if (extracted.coverDataUrl) {
+      if (extracted.coverDataUrl && isRasterCoverDataUrl(extracted.coverDataUrl)) {
         const pal = await extractCoverPaletteFromDataUrl(
           extracted.coverDataUrl,
           target.spineColor.startsWith('#') ? target.spineColor : '#4c6c8a',
@@ -1713,6 +2442,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           coverDataUrl: extracted.coverDataUrl,
           hasOriginalCover: true,
           coverCheckedV2: true,
+          coverCheckedV3: true,
           spineColor: pal.spineColor,
           ribbonColor: pal.ribbonColor,
         };
@@ -1721,9 +2451,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         showToast('Portada original extraída correctamente');
         return true;
       }
-      await updateBook(id, { hasOriginalCover: false, coverCheckedV2: true });
+      await updateBook(id, { hasOriginalCover: false, coverCheckedV2: true, coverCheckedV3: true });
       setEditingBook((curr) =>
-        curr && curr.id === id ? { ...curr, hasOriginalCover: false, coverCheckedV2: true } : curr
+        curr && curr.id === id
+          ? { ...curr, hasOriginalCover: false, coverCheckedV2: true, coverCheckedV3: true }
+          : curr
       );
       showToast('Este archivo no incluye portada; se activó la portada adaptable');
       return false;
@@ -1748,28 +2480,147 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [activeBook, editingBook, persistPendingTombstones, scheduleAutoSync, showToast, syncConfig]
   );
 
+  const attachLocalFileToBook = useCallback(
+    async (bookId: string, file: File): Promise<BookItem | null> => {
+      const target = stateRef.current.books.find((b) => b.id === bookId);
+      if (!target) return null;
+      const bundle = await importSingleFile(file, {
+        title: target.title,
+        author:
+          target.author &&
+          target.author !== 'Autor desconocido' &&
+          target.author !== 'Biblioteca Personal'
+            ? target.author
+            : undefined,
+        kind: target.kind,
+        categories: target.categories,
+      });
+
+      const updated: BookItem = {
+        ...target,
+        author:
+          target.author &&
+          target.author !== 'Autor desconocido' &&
+          target.author !== 'Biblioteca Personal'
+            ? target.author
+            : bundle.book.author || target.author,
+        description: target.description || bundle.book.description,
+        format: bundle.book.format,
+        fileName: file.name || target.fileName,
+        fileSize: file.size,
+        mimeType: file.type || bundle.book.mimeType,
+        pageCount: bundle.book.pageCount ?? target.pageCount,
+        coverDataUrl: isRasterCoverDataUrl(target.coverDataUrl)
+          ? target.coverDataUrl
+          : isRasterCoverDataUrl(bundle.book.coverDataUrl)
+          ? bundle.book.coverDataUrl
+          : target.coverDataUrl,
+        hasOriginalCover:
+          isRasterCoverDataUrl(target.coverDataUrl) ||
+          isRasterCoverDataUrl(bundle.book.coverDataUrl),
+        coverCheckedV2: true,
+        coverCheckedV3: true,
+        spineColor:
+          !isRasterCoverDataUrl(target.coverDataUrl) && isRasterCoverDataUrl(bundle.book.coverDataUrl)
+            ? bundle.book.spineColor
+            : target.spineColor,
+        ribbonColor:
+          !isRasterCoverDataUrl(target.coverDataUrl) && isRasterCoverDataUrl(bundle.book.coverDataUrl)
+            ? bundle.book.ribbonColor
+            : target.ribbonColor,
+        hasLocalFile: true,
+        updatedAt: Date.now(),
+      };
+
+      await dbPutBook(updated);
+      await dbPutBookFile(updated.id, bundle.blob, bundle.extraImages);
+      setBooks((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
+
+      const cfg = stateRef.current.syncConfig;
+      if ((cfg.autoSync || cfg.liveSync) && cfg.serverUrl) {
+        uploadBookToServer(cfg, updated, stateRef.current.deviceId)
+          .then((up) => {
+            if (!up.ok) return;
+            const synced: BookItem = {
+              ...updated,
+              hasRemoteFile: true,
+              remoteFileName: up.remoteFileName || updated.remoteFileName,
+              format: up.format || updated.format,
+            };
+            dbPutBook(synced).catch(() => undefined);
+            setBooks((prev) => prev.map((b) => (b.id === synced.id ? synced : b)));
+          })
+          .catch(() => undefined);
+      }
+
+      scheduleAutoSync();
+      showToast(`"${updated.title}" guardado offline en este dispositivo`);
+      return updated;
+    },
+    [scheduleAutoSync, showToast]
+  );
+
   const openBook = useCallback(
     async (book: BookItem) => {
-      // Ensure binary file is available locally (download from sync server if remote-only)
+      // 1. Check local IndexedDB first (100% offline!)
       let fileRecord = await dbGetBookFile(book.id);
-      if (!fileRecord && book.hasRemoteFile && syncConfig.serverUrl) {
+
+      // 1b. If imported via Android native folder (SAF), stream directly from persistent URI (100% offline!)
+      if (!fileRecord && book.nativeFileUri) {
+        const nativeBlob = await readNativeUriAsBlob(book.nativeFileUri, book.mimeType);
+        if (nativeBlob) {
+          fileRecord = { id: book.id, blob: nativeBlob };
+        }
+      }
+
+      // 2. If not stored locally yet, try downloading from user's cloud vault (even if hasRemoteFile flag was stale)
+      const cfg = stateRef.current.syncConfig;
+      const canTryCloud =
+        Boolean(cfg.serverUrl?.trim()) &&
+        (book.hasRemoteFile || Boolean(cfg.accountEmail) || Boolean(cfg.liveSync));
+
+      if (!fileRecord && canTryCloud) {
         try {
-          showToast(`Descargando "${book.title}" del servidor...`);
-          const blob = await downloadBookFromServer(syncConfig, book);
+          showToast(`Descargando "${book.title}" para leer sin internet...`);
+          const blob = await downloadBookFromServer(cfg, book);
           fileRecord = { id: book.id, blob };
-          await updateBook(book.id, { hasLocalFile: true });
-        } catch (err) {
-          showToast(`Error al descargar: ${err instanceof Error ? err.message : 'desconocido'}`);
-          return;
+          await updateBook(book.id, { hasLocalFile: true, hasRemoteFile: true });
+          // If the book lacked an original raster cover, extract it now from the freshly downloaded file!
+          if (!hasDisplayableOriginalCover(book) && book.hasOriginalCover !== false) {
+            extractOriginalCoverFromBlob(blob, book.format, book.title)
+              .then(async (ext) => {
+                if (!ext.coverDataUrl || !isRasterCoverDataUrl(ext.coverDataUrl)) return;
+                const pal = await extractCoverPaletteFromDataUrl(
+                  ext.coverDataUrl,
+                  book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
+                  book.ribbonColor || '#f2ba59'
+                );
+                await updateBook(book.id, {
+                  coverDataUrl: ext.coverDataUrl,
+                  hasOriginalCover: true,
+                  coverCheckedV2: true,
+                  coverCheckedV3: true,
+                  spineColor: pal.spineColor,
+                  ribbonColor: pal.ribbonColor,
+                });
+              })
+              .catch(() => undefined);
+          }
+        } catch {
+          // Will fall through to MissingFileModal so user can retry or link local file
         }
       }
 
       if (!fileRecord) {
-        showToast('El archivo local no está disponible en este dispositivo');
+        setMissingFileBook(book);
         return;
       }
 
-      await updateBook(book.id, { lastReadAt: Date.now() });
+      const openedAt = Date.now();
+      await updateBook(book.id, {
+        startedAt: book.startedAt || openedAt,
+        lastReadAt: openedAt,
+      });
 
       if (book.format === 'audio') {
         if (audioUrl) URL.revokeObjectURL(audioUrl);
@@ -1779,18 +2630,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return;
       }
 
-      // Smart default comic mode based on kind
-      if (book.kind === 'manhwa') {
-        updateReaderSettings({ comicMode: 'manhwa-strip' });
-      } else if (book.kind === 'manga') {
-        updateReaderSettings({ comicMode: 'manga-rtl' });
-      } else if (book.kind === 'comic') {
-        updateReaderSettings({ comicMode: 'comic-ltr' });
-      }
-
+      // Respect user's chosen comic/manga reading mode (continuous strip by default) instead of forcing paged mode
       setActiveBook(book);
     },
-    [audioUrl, showToast, syncConfig, updateBook, updateReaderSettings]
+    [audioUrl, showToast, updateBook, updateReaderSettings]
   );
 
   const clearReaderJumpTarget = useCallback(() => setReaderJumpTarget(null), []);
@@ -2469,6 +3312,99 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [applyRemotePayload, persistPendingTombstones, showToast, updateSyncConfig]
   );
 
+  /**
+   * Bidirectional offline file sync for Tablet <-> Phone:
+   * 1) Uploads ALL local book files from this device to your private cloud vault.
+   * 2) Downloads ALL missing cloud book files into THIS device's local IndexedDB
+   *    so every book can be read 100% offline with zero internet!
+   */
+  const syncAllBookFilesForOffline = useCallback(async (): Promise<{
+    uploaded: number;
+    downloaded: number;
+    failed: number;
+  }> => {
+    const cfg = stateRef.current.syncConfig;
+    if (!cfg.serverUrl.trim() || !cfg.accountEmail) {
+      showToast('Conecta primero tu correo en la nube para sincronizar archivos entre dispositivos');
+      return { uploaded: 0, downloaded: 0, failed: 0 };
+    }
+
+    let uploaded = 0;
+    let downloaded = 0;
+    let failed = 0;
+
+    setOfflineSyncProgress('Conectando con tu bóveda en la nube...');
+    try {
+      await triggerSync(true);
+
+      const currentBooks = stateRef.current.books.filter((b) => !b.isDemo);
+      const localBooks: BookItem[] = [];
+      const missingLocalBooks: BookItem[] = [];
+
+      for (const b of currentBooks) {
+        const rec = await dbGetBookFile(b.id);
+        if (rec) localBooks.push(b);
+        else missingLocalBooks.push(b);
+      }
+
+      // Step 1: Upload all local book files from this device (re-uploads if Render restarted)
+      for (let i = 0; i < localBooks.length; i++) {
+        const b = localBooks[i];
+        setOfflineSyncProgress(`Subiendo a la nube (${i + 1}/${localBooks.length}): ${b.title}`);
+        try {
+          const up = await uploadBookToServer(cfg, b, stateRef.current.deviceId);
+          if (up.ok) {
+            uploaded++;
+            const patched: BookItem = {
+              ...b,
+              hasLocalFile: true,
+              hasRemoteFile: true,
+              remoteFileName: up.remoteFileName || b.remoteFileName,
+              format: up.format || b.format,
+            };
+            await dbPutBook(patched);
+            setBooks((prev) => prev.map((x) => (x.id === b.id ? patched : x)));
+          } else {
+            failed++;
+          }
+        } catch {
+          failed++;
+        }
+      }
+
+      // Step 2: Download all missing books from the cloud vault to this device's local offline storage
+      for (let i = 0; i < missingLocalBooks.length; i++) {
+        const b = missingLocalBooks[i];
+        setOfflineSyncProgress(`Descargando offline (${i + 1}/${missingLocalBooks.length}): ${b.title}`);
+        try {
+          await downloadBookFromServer(cfg, b);
+          downloaded++;
+          const patched: BookItem = { ...b, hasLocalFile: true, hasRemoteFile: true };
+          await dbPutBook(patched);
+          setBooks((prev) => prev.map((x) => (x.id === b.id ? patched : x)));
+        } catch {
+          failed++;
+        }
+      }
+
+      await triggerSync(true);
+
+      const parts: string[] = [];
+      if (uploaded > 0) parts.push(`${uploaded} subido(s)`);
+      if (downloaded > 0) parts.push(`${downloaded} guardado(s) offline`);
+      if (parts.length > 0) {
+        showToast(`Sincronización offline lista: ${parts.join(' · ')}`);
+      } else if (failed > 0) {
+        showToast('Algunos libros aún no han sido subidos desde el otro dispositivo');
+      } else {
+        showToast('Todos tus libros ya están disponibles sin internet en este dispositivo');
+      }
+      return { uploaded, downloaded, failed };
+    } finally {
+      setOfflineSyncProgress('');
+    }
+  }, [showToast, triggerSync]);
+
   // Cloud Account by Email + Full Backup / Restore
   const loginWithEmail = useCallback(
     async (rawEmail: string, rawPin = ''): Promise<boolean> => {
@@ -2708,6 +3644,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     themeUpdatedAtRef.current = 0;
     profileUpdatedAtRef.current = 0;
     lastSyncedWallpaperRef.current = '';
+    syncedCoverSigRef.current.clear();
     localActiveSessionRef.current = null;
 
     await Promise.all([
@@ -2743,7 +3680,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     showToast('Sesión cerrada en este dispositivo. Tu copia sigue guardada en tu correo.');
   }, [showToast]);
 
-  const exportBackupJson = useCallback(() => {
+  const buildBackupJsonBundle = useCallback(() => {
     const s = stateRef.current;
     const payload = {
       komolibBackupVersion: 2,
@@ -2762,68 +3699,495 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       notes: s.notes,
       chatSessions: s.chatSessions.filter((cs) => cs.messages.some((m) => m.sender === 'user')),
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
     const dateStr = new Date().toISOString().slice(0, 10);
-    a.href = url;
-    a.download = `komolib-backup-${s.profile.email || dateStr}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Copia de seguridad descargada (.json)');
-  }, [showToast]);
+    const safeTag = (s.profile.email || dateStr).replace(/[^a-zA-Z0-9._-]/g, '_');
+    return {
+      fileName: `komolib-backup-${safeTag}.json`,
+      content: JSON.stringify(payload, null, 2),
+    };
+  }, []);
+
+  const exportBackupJson = useCallback(() => {
+    const { fileName, content } = buildBackupJsonBundle();
+    const res = saveTextFileLocally(fileName, content, 'application/json');
+    if (res.ok) {
+      showToast(
+        res.location && res.location !== fileName
+          ? `Copia guardada en ${res.location}`
+          : `Copia de seguridad guardada (${fileName})`
+      );
+    } else {
+      showToast(res.error || 'No se pudo guardar la copia de seguridad local');
+    }
+  }, [buildBackupJsonBundle, showToast]);
+
+  const shareBackupJson = useCallback(async () => {
+    const { fileName, content } = buildBackupJsonBundle();
+    const ok = await shareTextFileNatively(fileName, content, 'application/json');
+    if (!ok) {
+      showToast('No se pudo compartir la copia de seguridad');
+    }
+  }, [buildBackupJsonBundle, showToast]);
+
+  const applyNativeBackupObject = useCallback(
+    async (data: Record<string, unknown>) => {
+      const booksRecord: Record<string, BookItem> = {};
+      if (Array.isArray(data.books)) {
+        for (const b of data.books) {
+          if (b && typeof b === 'object' && (b as BookItem).id && !(b as BookItem).isDemo) {
+            booksRecord[(b as BookItem).id] = b as BookItem;
+          }
+        }
+      } else if (data.books && typeof data.books === 'object') {
+        for (const [k, b] of Object.entries(data.books as Record<string, unknown>)) {
+          if (b && typeof b === 'object' && !(b as BookItem).isDemo) {
+            booksRecord[k] = b as BookItem;
+          }
+        }
+      }
+      await applyRemotePayload(
+        {
+          updatedAt: Date.now(),
+          books: booksRecord,
+          bookmarks: Array.isArray(data.bookmarks) ? (data.bookmarks as BookmarkItem[]) : [],
+          annotations: Array.isArray(data.annotations) ? (data.annotations as BookAnnotation[]) : [],
+          notes: Array.isArray(data.notes) ? (data.notes as NoteItem[]) : [],
+          chatSessions: Array.isArray(data.chatSessions) ? (data.chatSessions as ChatSession[]) : undefined,
+          customBookmarkDesigns: Array.isArray(data.customBookmarkDesigns)
+            ? (data.customBookmarkDesigns as BookmarkDesign[])
+            : [],
+          customStationery: (data.customStationery as CustomStationeryKit | null) || null,
+          categories: Array.isArray(data.categories) ? (data.categories as CategoryItem[]) : null,
+          collections: Array.isArray(data.collections) ? (data.collections as CollectionCard[]) : null,
+          readerSettings: (data.readerSettings as ReaderSettings | null) || null,
+          theme: (data.theme as ThemeConfig | null) || null,
+          themeUpdatedAt: Date.now(),
+          profile: (data.profile as UserProfile | null) || null,
+          profileUpdatedAt: Date.now(),
+        },
+        true
+      );
+      scheduleAutoSync(true);
+    },
+    [applyRemotePayload, scheduleAutoSync]
+  );
+
+  const importExternalBackup = useCallback(
+    async (
+      parsed: ParsedExternalBackup,
+      opts?: {
+        importBooks?: boolean;
+        importProgress?: boolean;
+        importBookmarks?: boolean;
+        importAnnotations?: boolean;
+        importNotes?: boolean;
+      }
+    ) => {
+      const importBooksOpt = opts?.importBooks !== false;
+      const importProgressOpt = opts?.importProgress !== false;
+      const importBookmarksOpt = opts?.importBookmarks !== false;
+      const importAnnotationsOpt = opts?.importAnnotations !== false;
+      const importNotesOpt = opts?.importNotes !== false;
+
+      if (
+        parsed.nativeKomoLibData &&
+        importBooksOpt &&
+        importProgressOpt &&
+        importBookmarksOpt &&
+        importAnnotationsOpt &&
+        importNotesOpt
+      ) {
+        await applyNativeBackupObject(parsed.nativeKomoLibData);
+        showToast('Copia de KomoLib restaurada completamente');
+        return {
+          booksAdded: parsed.books.length,
+          booksUpdated: 0,
+          bookmarksAdded: parsed.bookmarks.length,
+          annotationsAdded: parsed.annotations.length,
+          notesAdded: parsed.notes.length,
+        };
+      }
+
+      const normalizeTitleKey = (t: string) =>
+        t
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim();
+
+      const s = stateRef.current;
+      const now = Date.now();
+      const nextBooksMap = new Map<string, BookItem>();
+      const titleToBookId = new Map<string, string>();
+      const fileStemToBookId = new Map<string, string>();
+      const normalizeFileStem = (fn?: string) =>
+        fn
+          ? normalizeTitleKey(
+              fn
+                .split(/[\\/]/)
+                .pop()!
+                .replace(/\.(epub|pdf|mobi|azw3?|fb2|cbz|cbr|txt|docx|zip|rar)$/i, '')
+            )
+          : '';
+
+      for (const b of s.books) {
+        nextBooksMap.set(b.id, b);
+        const key = normalizeTitleKey(b.title);
+        if (key && !titleToBookId.has(key)) titleToBookId.set(key, b.id);
+        const fKey = normalizeFileStem(b.fileName);
+        if (fKey && !fileStemToBookId.has(fKey)) fileStemToBookId.set(fKey, b.id);
+      }
+
+      let booksAdded = 0;
+      let booksUpdated = 0;
+
+      const isPlaceholderAuthor = (a?: string) => {
+        if (!a) return true;
+        const low = a.trim().toLowerCase();
+        return !low || low === 'biblioteca personal' || low === 'autor desconocido' || low === 'unknown';
+      };
+
+      const ensureOrMergeBook = async (
+        entry: ParsedExternalBackup['books'][number],
+        allowCreate: boolean
+      ): Promise<string | null> => {
+        const key = normalizeTitleKey(entry.title);
+        const fKey = normalizeFileStem(entry.fileName);
+        if (!key && !fKey) return null;
+        const existingId =
+          (key && titleToBookId.get(key)) ||
+          (fKey && fileStemToBookId.get(fKey)) ||
+          (fKey && titleToBookId.get(fKey)) ||
+          undefined;
+
+        if (existingId) {
+          const prev = nextBooksMap.get(existingId);
+          if (prev && (importProgressOpt || importBooksOpt)) {
+            const incomingProg = entry.progress ?? prev.progress;
+            const mergedProgress = importProgressOpt
+              ? Math.max(prev.progress || 0, incomingProg || 0)
+              : prev.progress;
+
+            const shouldUpgradeCover =
+              isRasterCoverDataUrl(entry.coverDataUrl) && !isRasterCoverDataUrl(prev.coverDataUrl);
+            let nextCoverDataUrl = prev.coverDataUrl;
+            let nextHasOriginalCover = prev.hasOriginalCover;
+            let nextSpineColor = prev.spineColor;
+            let nextRibbonColor = prev.ribbonColor;
+
+            if (shouldUpgradeCover && entry.coverDataUrl) {
+              nextCoverDataUrl = entry.coverDataUrl;
+              nextHasOriginalCover = true;
+              try {
+                const pal = await extractCoverPaletteFromDataUrl(
+                  entry.coverDataUrl,
+                  prev.spineColor.startsWith('#') ? prev.spineColor : '#4c6c8a',
+                  prev.ribbonColor || '#f2ba59'
+                );
+                nextSpineColor = pal.spineColor;
+                nextRibbonColor = pal.ribbonColor;
+              } catch {
+                // keep existing spine/ribbon colors
+              }
+            }
+
+            const updated: BookItem = {
+              ...prev,
+              author: !isPlaceholderAuthor(prev.author)
+                ? prev.author
+                : !isPlaceholderAuthor(entry.author)
+                ? entry.author
+                : prev.author,
+              description: prev.description || entry.description,
+              folderPath: prev.folderPath || entry.folderPath,
+              format: entry.format || prev.format,
+              coverDataUrl: nextCoverDataUrl,
+              hasOriginalCover: nextHasOriginalCover,
+              spineColor: nextSpineColor,
+              ribbonColor: nextRibbonColor,
+              progress: mergedProgress,
+              currentPage: importProgressOpt ? entry.currentPage ?? prev.currentPage : prev.currentPage,
+              pageCount: entry.pageCount ?? prev.pageCount,
+              currentChapter: importProgressOpt
+                ? entry.currentChapter || prev.currentChapter
+                : prev.currentChapter,
+              currentCfi: importProgressOpt ? entry.currentCfi || prev.currentCfi : prev.currentCfi,
+              readingStatus: importProgressOpt
+                ? entry.readingStatus || prev.readingStatus
+                : prev.readingStatus,
+              rating: entry.rating ?? prev.rating,
+              review: entry.review || prev.review,
+              favorite: prev.favorite || Boolean(entry.favorite),
+              wishlist: prev.wishlist || Boolean(entry.wishlist),
+              startedAt: prev.startedAt || entry.startedAt,
+              finishedAt: prev.finishedAt || entry.finishedAt,
+              lastReadAt: Math.max(prev.lastReadAt || 0, entry.lastReadAt || 0) || prev.lastReadAt,
+              tags: Array.from(new Set([...(prev.tags || []), ...(entry.tags || [])])),
+              updatedAt: now,
+            };
+            await dbPutBook(updated);
+            nextBooksMap.set(updated.id, updated);
+            booksUpdated += 1;
+          }
+          return existingId;
+        }
+
+        if (!allowCreate) return null;
+
+        const kind: ContentKind = entry.kind || 'book';
+        const format: BookItem['format'] = entry.format || (kind === 'audiobook' ? 'audio' : kind === 'manga' || kind === 'manhwa' || kind === 'comic' ? 'cbz' : 'epub');
+        const generated = generateCozyCover(entry.title, entry.author || 'Autor desconocido', kind, format);
+        let coverDataUrl = generated.coverDataUrl;
+        let hasOriginalCover = false;
+        let spineColor = generated.spineColor;
+        let ribbonColor = generated.ribbonColor;
+
+        if (entry.coverDataUrl && isRasterCoverDataUrl(entry.coverDataUrl)) {
+          coverDataUrl = entry.coverDataUrl;
+          hasOriginalCover = true;
+          try {
+            const pal = await extractCoverPaletteFromDataUrl(
+              entry.coverDataUrl,
+              generated.spineColor,
+              generated.ribbonColor
+            );
+            spineColor = pal.spineColor;
+            ribbonColor = pal.ribbonColor;
+          } catch {
+            // keep cozy fallback palette
+          }
+        }
+
+        const cats = new Set<string>(entry.categories || []);
+        if (kind === 'manga') cats.add('manga');
+        else if (kind === 'manhwa') cats.add('manhwa');
+        else if (kind === 'comic') cats.add('comic');
+        else if (kind === 'audiobook') cats.add('audiobooks');
+        else cats.add('ebooks');
+
+        const id = `book_imp_${now}_${Math.random().toString(36).slice(2, 7)}`;
+        const created: BookItem = {
+          id,
+          title: entry.title,
+          author: entry.author || 'Autor desconocido',
+          description: entry.description,
+          format,
+          kind,
+          categories: Array.from(cats),
+          tags: Array.from(new Set([parsed.detectedSource.split(' ')[0].toUpperCase(), ...(entry.tags || [])])),
+          coverDataUrl,
+          hasOriginalCover,
+          coverCheckedV2: true,
+          spineColor,
+          ribbonColor,
+          fileName: entry.fileName || `${entry.title}.${format}`,
+          folderPath: entry.folderPath,
+          fileSize: 0,
+          mimeType: 'application/octet-stream',
+          pageCount: entry.pageCount,
+          progress: importProgressOpt ? entry.progress ?? 0 : 0,
+          currentPage: importProgressOpt ? entry.currentPage : undefined,
+          currentChapter: importProgressOpt ? entry.currentChapter : undefined,
+          currentCfi: importProgressOpt ? entry.currentCfi : undefined,
+          readingStatus: importProgressOpt ? entry.readingStatus : undefined,
+          rating: entry.rating,
+          review: entry.review,
+          favorite: Boolean(entry.favorite),
+          wishlist: Boolean(entry.wishlist),
+          startedAt: entry.startedAt,
+          finishedAt: entry.finishedAt,
+          hasLocalFile: false,
+          addedAt: now,
+          lastReadAt: entry.lastReadAt,
+          updatedAt: now,
+        };
+        await dbPutBook(created);
+        nextBooksMap.set(created.id, created);
+        if (key) titleToBookId.set(key, created.id);
+        if (fKey) fileStemToBookId.set(fKey, created.id);
+        booksAdded += 1;
+        return created.id;
+      };
+
+      for (const b of parsed.books) {
+        await ensureOrMergeBook(b, importBooksOpt);
+      }
+
+      if (booksAdded > 0 || booksUpdated > 0) {
+        setBooks(
+          Array.from(nextBooksMap.values()).sort(
+            (a, b) => (b.lastReadAt || b.addedAt) - (a.lastReadAt || a.addedAt)
+          )
+        );
+      }
+
+      let bookmarksAdded = 0;
+      if (importBookmarksOpt && parsed.bookmarks.length > 0) {
+        const existingBms = new Set(
+          s.bookmarks.map(
+            (bm) => `${bm.bookId}|${bm.label.toLowerCase()}|${bm.page ?? ''}|${bm.cfi ?? ''}`
+          )
+        );
+        const createdBms: BookmarkItem[] = [];
+        for (const bm of parsed.bookmarks) {
+          const bookId = await ensureOrMergeBook(
+            { title: bm.bookTitle, author: bm.bookAuthor || 'Autor desconocido' },
+            importBooksOpt
+          );
+          if (!bookId) continue;
+          const sig = `${bookId}|${bm.label.toLowerCase()}|${bm.page ?? ''}|${bm.cfi ?? ''}`;
+          if (existingBms.has(sig)) continue;
+          existingBms.add(sig);
+          const item: BookmarkItem = {
+            id: `bm_imp_${now}_${Math.random().toString(36).slice(2, 7)}`,
+            bookId,
+            label: bm.label,
+            chapter: bm.chapter,
+            page: bm.page,
+            progress: bm.progress,
+            cfi: bm.cfi,
+            excerpt: bm.excerpt,
+            createdAt: bm.createdAt || now,
+          };
+          await dbPutBookmark(item);
+          createdBms.push(item);
+          bookmarksAdded += 1;
+        }
+        if (createdBms.length > 0) {
+          setBookmarks((prev) =>
+            [...createdBms, ...prev].sort((a, b) => b.createdAt - a.createdAt)
+          );
+        }
+      }
+
+      let annotationsAdded = 0;
+      if (importAnnotationsOpt && parsed.annotations.length > 0) {
+        const existingAnns = new Set(
+          s.annotations.map(
+            (a) => `${a.bookId}|${a.quote.slice(0, 80).toLowerCase()}|${(a.note || '').slice(0, 60).toLowerCase()}`
+          )
+        );
+        const createdAnns: BookAnnotation[] = [];
+        for (const ann of parsed.annotations) {
+          const bookId = await ensureOrMergeBook(
+            { title: ann.bookTitle, author: ann.bookAuthor || 'Autor desconocido' },
+            importBooksOpt
+          );
+          if (!bookId) continue;
+          const sig = `${bookId}|${ann.quote.slice(0, 80).toLowerCase()}|${(ann.note || '').slice(0, 60).toLowerCase()}`;
+          if (existingAnns.has(sig)) continue;
+          existingAnns.add(sig);
+          const item: BookAnnotation = {
+            id: `ann_imp_${now}_${Math.random().toString(36).slice(2, 7)}`,
+            bookId,
+            tool: ann.tool || 'highlighter',
+            color: ann.color || '#ffe066',
+            quote: ann.quote,
+            note: ann.note,
+            chapter: ann.chapter,
+            page: ann.page,
+            progress: ann.progress ?? 0,
+            cfi: ann.cfi,
+            createdAt: ann.createdAt || now,
+            updatedAt: ann.createdAt || now,
+          };
+          await dbPutAnnotation(item);
+          createdAnns.push(item);
+          annotationsAdded += 1;
+        }
+        if (createdAnns.length > 0) {
+          setAnnotations((prev) =>
+            [...createdAnns, ...prev].sort((a, b) => b.createdAt - a.createdAt)
+          );
+        }
+      }
+
+      let notesAdded = 0;
+      if (importNotesOpt && parsed.notes.length > 0) {
+        const existingNotes = new Set(
+          s.notes.map((n) => `${n.bookId}|${n.text.slice(0, 100).toLowerCase()}`)
+        );
+        const createdNotes: NoteItem[] = [];
+        for (const n of parsed.notes) {
+          const bookId =
+            (await ensureOrMergeBook(
+              { title: n.bookTitle, author: n.bookAuthor || 'Autor desconocido' },
+              importBooksOpt
+            )) || 'general';
+          const sig = `${bookId}|${n.text.slice(0, 100).toLowerCase()}`;
+          if (existingNotes.has(sig)) continue;
+          existingNotes.add(sig);
+          const item: NoteItem = {
+            id: `note_imp_${now}_${Math.random().toString(36).slice(2, 7)}`,
+            bookId,
+            text: n.text,
+            page: n.page,
+            color: '#f5b855',
+            createdAt: n.createdAt || now,
+            updatedAt: n.createdAt || now,
+          };
+          await dbPutNote(item);
+          createdNotes.push(item);
+          notesAdded += 1;
+        }
+        if (createdNotes.length > 0) {
+          setNotes((prev) =>
+            [...createdNotes, ...prev].sort((a, b) => b.updatedAt - a.updatedAt)
+          );
+        }
+      }
+
+      // Refresh books list if marks created any new catalog entries
+      if (nextBooksMap.size !== s.books.length || booksUpdated > 0) {
+        setBooks(
+          Array.from(nextBooksMap.values()).sort(
+            (a, b) => (b.lastReadAt || b.addedAt) - (a.lastReadAt || a.addedAt)
+          )
+        );
+      }
+
+      scheduleAutoSync(true);
+      const summaryParts: string[] = [];
+      if (booksAdded) summaryParts.push(`${booksAdded} libro(s)`);
+      if (booksUpdated) summaryParts.push(`${booksUpdated} progreso(s)`);
+      if (bookmarksAdded) summaryParts.push(`${bookmarksAdded} marcador(es)`);
+      if (annotationsAdded) summaryParts.push(`${annotationsAdded} cita(s)`);
+      if (notesAdded) summaryParts.push(`${notesAdded} nota(s)`);
+      showToast(
+        summaryParts.length > 0
+          ? `Importado desde ${parsed.detectedSource}: ${summaryParts.join(', ')}`
+          : `No se encontraron datos nuevos para importar en "${parsed.fileName}"`
+      );
+      return { booksAdded, booksUpdated, bookmarksAdded, annotationsAdded, notesAdded };
+    },
+    [applyNativeBackupObject, scheduleAutoSync, showToast]
+  );
 
   const importBackupJson = useCallback(
     async (file: File): Promise<boolean> => {
       try {
-        const text = await file.text();
-        const data = JSON.parse(text);
-        if (!data || typeof data !== 'object') {
-          throw new Error('Formato de copia no válido');
+        const parsed = await parseExternalBackupFile(file);
+        if (
+          !parsed.nativeKomoLibData &&
+          parsed.books.length === 0 &&
+          parsed.bookmarks.length === 0 &&
+          parsed.annotations.length === 0 &&
+          parsed.notes.length === 0
+        ) {
+          throw new Error(
+            parsed.warnings[0] ||
+              'No se encontraron libros, progresos ni marcadores legibles en ese archivo'
+          );
         }
-        const booksRecord: Record<string, BookItem> = {};
-        if (Array.isArray(data.books)) {
-          for (const b of data.books) {
-            if (b?.id && !b.isDemo) booksRecord[b.id] = b;
-          }
-        } else if (data.books && typeof data.books === 'object') {
-          for (const [k, b] of Object.entries(data.books)) {
-            if (b && typeof b === 'object' && !(b as BookItem).isDemo) {
-              booksRecord[k] = b as BookItem;
-            }
-          }
-        }
-        await applyRemotePayload(
-          {
-            updatedAt: Date.now(),
-            books: booksRecord,
-            bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks : [],
-            annotations: Array.isArray(data.annotations) ? data.annotations : [],
-            notes: Array.isArray(data.notes) ? data.notes : [],
-            chatSessions: Array.isArray(data.chatSessions) ? data.chatSessions : undefined,
-            customBookmarkDesigns: Array.isArray(data.customBookmarkDesigns)
-              ? data.customBookmarkDesigns
-              : [],
-            customStationery: data.customStationery || null,
-            categories: Array.isArray(data.categories) ? data.categories : null,
-            collections: Array.isArray(data.collections) ? data.collections : null,
-            readerSettings: data.readerSettings || null,
-            theme: data.theme || null,
-            themeUpdatedAt: Date.now(),
-            profile: data.profile || null,
-            profileUpdatedAt: Date.now(),
-          },
-          true
-        );
-        scheduleAutoSync(true);
-        showToast('Copia de seguridad restaurada correctamente');
+        await importExternalBackup(parsed);
         return true;
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'No se pudo importar la copia de seguridad');
         return false;
       }
     },
-    [applyRemotePayload, scheduleAutoSync, showToast]
+    [importExternalBackup, showToast]
   );
 
   // Shared Reading Rooms management
@@ -2850,12 +4214,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     const joinedCodes = joinedRoomCodesRef.current;
+    const kickedCodes = new Set<string>();
     if (joinedCodes.length > 0) {
       await Promise.all(
         joinedCodes.map(async (code) => {
           if (byCode.has(code)) return;
           try {
             const room = await getSharedRoom(cfg, code);
+            if (myId && room.kickedIds?.includes(myId) && !room.participants?.[myId]) {
+              kickedCodes.add(room.code);
+              return;
+            }
             byCode.set(room.code, room);
             setServerOnline(true);
           } catch {
@@ -2865,11 +4234,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       );
     }
 
+    if (kickedCodes.size > 0) {
+      persistJoinedRoomCodes(joinedCodes.filter((c) => !kickedCodes.has(c)));
+    }
+
     const combined = Array.from(byCode.values()).sort(
       (a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0)
     );
     setSharedRooms(combined);
-  }, []);
+  }, [persistJoinedRoomCodes]);
 
   const applyPairingLink = useCallback(
     async (raw: string): Promise<boolean> => {
@@ -3256,17 +4629,31 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   );
 
   const leaveOrDeleteRoom = useCallback(
-    async (code: string, isHost: boolean) => {
+    async (code: string, deleteEntireRoom: boolean) => {
       const s = stateRef.current;
-      if (isHost) {
+      if (deleteEntireRoom) {
         await deleteSharedRoom(s.syncConfig, code);
       } else {
         await leaveSharedRoom(s.syncConfig, code, s.deviceId);
       }
       removeLocalRoom(code);
-      showToast(isHost ? `Sala ${code} cerrada` : `Saliste de la sala ${code}`);
+      showToast(deleteEntireRoom ? `Sala ${code} cerrada para todos` : `Saliste de la sala ${code}`);
     },
     [removeLocalRoom, showToast]
+  );
+
+  const kickUserFromRoom = useCallback(
+    async (code: string, targetParticipantId: string, targetName?: string) => {
+      const s = stateRef.current;
+      try {
+        const updated = await kickRoomParticipant(s.syncConfig, code, s.deviceId, targetParticipantId);
+        updateLocalRoom(updated);
+        showToast(`${targetName || 'Usuario'} fue eliminado de la sala ${code}`);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'No se pudo eliminar al usuario de la sala');
+      }
+    },
+    [showToast, updateLocalRoom]
   );
 
   /* -------- Mutual Book Exchange Shelves (Independent Progress per User!) -------- */
@@ -3298,13 +4685,19 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const refreshSharedShelves = useCallback(async () => {
     const cfg = stateRef.current.syncConfig;
+    const myId = stateRef.current.deviceId;
     const codes = joinedShelfCodesRef.current;
     if (!cfg.serverUrl.trim() || !codes.length) return;
     const fetched: SharedShelf[] = [];
+    const kickedCodes = new Set<string>();
     await Promise.all(
       codes.map(async (code) => {
         try {
           const shelf = await getSharedShelf(cfg, code);
+          if (myId && shelf.kickedIds?.includes(myId) && !shelf.members?.[myId]) {
+            kickedCodes.add(shelf.code);
+            return;
+          }
           fetched.push(shelf);
           setServerOnline(true);
         } catch {
@@ -3312,9 +4705,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       })
     );
+    if (kickedCodes.size > 0) {
+      persistJoinedShelfCodes(codes.filter((c) => !kickedCodes.has(c)));
+    }
     fetched.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
     setSharedShelves(fetched);
-  }, []);
+  }, [persistJoinedShelfCodes]);
 
   useEffect(() => {
     if (!ready || !syncConfig.serverUrl.trim()) return;
@@ -3335,9 +4731,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           avatarEmoji: s.profile.avatarEmoji,
           avatarBg: s.profile.avatarBg,
         });
+        let failedCount = 0;
         for (const bid of bookIds) {
           const target = s.books.find((b) => b.id === bid);
-          if (target) {
+          if (!target) continue;
+          try {
             const marks = collectSharedMarksForBook(target.id, marksSelection);
             shelf = await shareBookToShelf(
               s.syncConfig,
@@ -3349,12 +4747,19 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               },
               marks
             );
+          } catch {
+            failedCount += 1;
           }
         }
         updateLocalShelf(shelf);
         setSelectedShelfCode(shelf.code);
         persistJoinedShelfCodes([shelf.code, ...joinedShelfCodesRef.current]);
-        showToast(`Estantería mutua ${shelf.code} creada (${Object.keys(shelf.books).length} libros)`);
+        const sharedCount = Object.keys(shelf.books).length;
+        showToast(
+          failedCount > 0
+            ? `Estantería ${shelf.code} creada (${sharedCount} libros compartidos, ${failedCount} omitido(s))`
+            : `Estantería mutua ${shelf.code} creada (${sharedCount} libros)`
+        );
         return shelf;
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'No se pudo crear la estantería compartida');
@@ -3520,17 +4925,37 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   );
 
   const leaveOrDeleteShelf = useCallback(
-    async (code: string, isHost: boolean) => {
+    async (code: string, deleteEntireShelf: boolean) => {
       const s = stateRef.current;
-      if (isHost) {
+      if (deleteEntireShelf) {
         await deleteSharedShelf(s.syncConfig, code);
       } else {
         await leaveSharedShelf(s.syncConfig, code, s.deviceId);
       }
       removeLocalShelf(code);
-      showToast(isHost ? `Estantería ${code} cerrada` : `Saliste de la estantería ${code}`);
+      showToast(
+        deleteEntireShelf
+          ? `Estantería ${code} cerrada para todos`
+          : `Saliste de la estantería ${code}`
+      );
     },
     [removeLocalShelf, showToast]
+  );
+
+  const kickUserFromShelf = useCallback(
+    async (code: string, targetMemberId: string, targetName?: string) => {
+      const s = stateRef.current;
+      try {
+        const updated = await kickShelfMember(s.syncConfig, code, s.deviceId, targetMemberId);
+        updateLocalShelf(updated);
+        showToast(`${targetName || 'Usuario'} fue eliminado de la estantería ${code}`);
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'No se pudo eliminar al usuario de la estantería'
+        );
+      }
+    },
+    [showToast, updateLocalShelf]
   );
 
   const dismissRemoteSession = useCallback(() => setRemoteActiveSession(null), []);
@@ -3582,6 +5007,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         closeAudioPlayer,
         editingBook,
         setEditingBook,
+        missingFileBook,
+        setMissingFileBook,
         importModalOpen,
         setImportModalOpen,
         studioModalOpen,
@@ -3589,6 +5016,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         profileModalOpen,
         setProfileModalOpen,
         importFiles,
+        importNativeFolderBooks,
+        duplicateBooksCount,
+        removeDuplicateBooks,
+        attachLocalFileToBook,
         updateBook,
         reExtractBookCover,
         deleteBook,
@@ -3627,11 +5058,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dismissRemoteSession,
         syncStatus,
         syncMessage,
+        offlineSyncProgress,
         triggerSync,
+        syncAllBookFilesForOffline,
         loginWithEmail,
         logoutAccount,
         exportBackupJson,
+        shareBackupJson,
         importBackupJson,
+        importExternalBackup,
         sharedRooms,
         selectedRoomCode,
         setSelectedRoomCode,
@@ -3642,6 +5077,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         joinRoomByCode,
         sendRoomComment,
         leaveOrDeleteRoom,
+        kickUserFromRoom,
         updateLocalRoom,
         removeLocalRoom,
         sharedShelves,
@@ -3656,6 +5092,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         removeBookFromSharedShelf,
         importBookFromShelf,
         leaveOrDeleteShelf,
+        kickUserFromShelf,
         updateLocalShelf,
         removeLocalShelf,
         toast,

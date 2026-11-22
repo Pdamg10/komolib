@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { BookOpen, Headphones, Sparkles } from 'lucide-react';
 import type { BookItem } from '../types/library';
+import { hasDisplayableOriginalCover } from '../utils/coverHelpers';
 
 interface BookCoverVisualProps {
   book: Pick<
@@ -34,26 +35,18 @@ export function getAdaptiveRibbonCss(seed: string): string {
 
 /**
  * Renders either:
- * 1. The book's original cover artwork adapted cleanly to the 3D hardcover book proportions
- *    (full-bleed for standard book ratios, or full uncropped artwork over a matching blurred
- *    backdrop for square/wide/ultra-tall covers), with a subtle physical book-binding crease.
+ * 1. The book's original cover artwork cleanly adapted edge-to-edge (`object-fit: cover`)
+ *    inside a strictly uniform 2:3 hardcover frame so EVERY book stays the exact same size.
  * 2. A live theme-adaptive editorial hardcover when the file has no embedded cover image.
  */
-export const BookCoverVisual: React.FC<BookCoverVisualProps> = ({ book, compact = false }) => {
-  const [fitMode, setFitMode] = useState<'cover' | 'contain'>('cover');
+const BookCoverVisualInner: React.FC<BookCoverVisualProps> = ({ book, compact = false }) => {
   const [imgError, setImgError] = useState(false);
 
   useEffect(() => {
     setImgError(false);
-    setFitMode('cover');
   }, [book.coverDataUrl]);
 
-  const hasOriginal =
-    !imgError &&
-    Boolean(book.coverDataUrl) &&
-    (book.hasOriginalCover === true ||
-      (book.hasOriginalCover === undefined &&
-        !book.coverDataUrl.startsWith('data:image/svg+xml')));
+  const hasOriginal = !imgError && hasDisplayableOriginalCover(book);
 
   const variant = useMemo(
     () => getAdaptiveVariantIndex(`${book.id}:${book.title}`),
@@ -98,32 +91,17 @@ export const BookCoverVisual: React.FC<BookCoverVisualProps> = ({ book, compact 
   }
 
   return (
-    <div className={`original-cover-stage ${fitMode === 'contain' ? 'is-contained' : ''}`}>
-      {fitMode === 'contain' && (
-        <img
-          src={book.coverDataUrl}
-          alt=""
-          aria-hidden="true"
-          className="book-cover-backdrop"
-          loading="lazy"
-        />
-      )}
+    <div className="original-cover-stage">
       <img
         src={book.coverDataUrl}
         alt={book.title}
-        loading="lazy"
-        className={`book-cover-img ${fitMode === 'contain' ? 'contain-fit' : 'cover-fit'}`}
+        decoding="async"
+        className="book-cover-img cover-fit"
         onError={() => setImgError(true)}
-        onLoad={(e) => {
-          const img = e.currentTarget;
-          if (!img.naturalWidth || !img.naturalHeight) return;
-          const ratio = img.naturalWidth / img.naturalHeight;
-          // Standard book/manga covers (~0.56 to ~0.88) fill edge-to-edge;
-          // square audiobooks, landscape PDFs, or ultra-tall strips preserve the full uncropped cover
-          setFitMode(ratio >= 0.56 && ratio <= 0.88 ? 'cover' : 'contain');
-        }}
       />
       <div className="book-cover-binding-sheen" aria-hidden="true" />
     </div>
   );
 };
+
+export const BookCoverVisual = React.memo(BookCoverVisualInner);

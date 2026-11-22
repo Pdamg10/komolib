@@ -69,6 +69,64 @@ export function formatShortDate(ts?: number): string {
   }
 }
 
+export function formatDateTime(ts?: number): string {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts);
+    const datePart = d.toLocaleDateString('es-ES', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+    const timePart = d.toLocaleTimeString('es-ES', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    return `${datePart} · ${timePart}`;
+  } catch {
+    return '—';
+  }
+}
+
+export function formatCompactDateTime(ts?: number): string {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts);
+    const datePart = d.toLocaleDateString('es-ES', {
+      day: '2-digit',
+      month: 'short',
+    });
+    const timePart = d.toLocaleTimeString('es-ES', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    return `${datePart} · ${timePart}`;
+  } catch {
+    return '—';
+  }
+}
+
+export function formatMonthYear(ts = Date.now()): string {
+  try {
+    const raw = new Date(ts).toLocaleDateString('es-ES', {
+      month: 'long',
+      year: 'numeric',
+    });
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  } catch {
+    return 'Este mes';
+  }
+}
+
+export function isInCurrentMonth(ts?: number, refNow = Date.now()): boolean {
+  if (!ts || !Number.isFinite(ts)) return false;
+  const d = new Date(ts);
+  const now = new Date(refNow);
+  return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+}
+
 export function getPrimaryGenreLabel(book: BookItem, categories: CategoryItem[]): string {
   for (const catId of book.categories || []) {
     if (catId === 'all' || catId === 'new') continue;
@@ -91,7 +149,11 @@ export function computeLibraryStats(books: BookItem[], categories: CategoryItem[
     dropped: 0,
   };
 
+  const now = Date.now();
   let totalPagesRead = 0;
+  let monthlyCompletedBooks = 0;
+  let monthlyPagesRead = 0;
+  let monthlyLastActivityAt = 0;
   let ratingSum = 0;
   let ratedCount = 0;
   const genreCounts = new Map<string, { label: string; count: number; color: string }>();
@@ -105,10 +167,28 @@ export function computeLibraryStats(books: BookItem[], categories: CategoryItem[
     statusCounts[st]++;
 
     const estPages = book.pageCount || (book.format === 'audio' ? 0 : 240);
-    if (st === 'completed') {
-      totalPagesRead += estPages;
-    } else if (book.progress > 0) {
-      totalPagesRead += Math.round((estPages * book.progress) / 100);
+    const readPagesForBook =
+      st === 'completed'
+        ? estPages
+        : book.progress > 0
+        ? Math.round((estPages * book.progress) / 100)
+        : 0;
+    totalPagesRead += readPagesForBook;
+
+    const activityTs = Math.max(
+      book.finishedAt || 0,
+      book.lastChapterFinishedAt || 0,
+      book.lastReadAt || 0
+    );
+    const completedTs = book.finishedAt || book.lastReadAt || book.updatedAt;
+    if (st === 'completed' && isInCurrentMonth(completedTs, now)) {
+      monthlyCompletedBooks += 1;
+    }
+    if (readPagesForBook > 0 && isInCurrentMonth(activityTs || book.updatedAt, now)) {
+      monthlyPagesRead += readPagesForBook;
+    }
+    if (activityTs > 0 && isInCurrentMonth(activityTs, now) && activityTs > monthlyLastActivityAt) {
+      monthlyLastActivityAt = activityTs;
     }
 
     if (book.rating && book.rating > 0) {
@@ -159,6 +239,10 @@ export function computeLibraryStats(books: BookItem[], categories: CategoryItem[
     totalBooks: books.length,
     statusCounts,
     totalPagesRead,
+    currentMonthLabel: formatMonthYear(now),
+    monthlyCompletedBooks,
+    monthlyPagesRead,
+    monthlyLastActivityAt: monthlyLastActivityAt || undefined,
     avgRating,
     ratedCount,
     topGenres,

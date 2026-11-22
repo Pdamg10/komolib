@@ -1,7 +1,9 @@
 import React from 'react';
-import { Cloud, Edit3, Heart, Headphones, Star } from 'lucide-react';
+import { CheckCircle2, Clock, Cloud, Edit3, Folder, Heart, Headphones, Star } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import type { BookItem } from '../types/library';
+import { formatCompactDateTime, formatDateTime } from '../utils/readingStats';
+import { hasDisplayableOriginalCover } from '../utils/coverHelpers';
 import {
   BookCoverVisual,
   getAdaptiveRibbonCss,
@@ -12,14 +14,10 @@ interface BookCardProps {
   book: BookItem;
 }
 
-export const BookCard: React.FC<BookCardProps> = ({ book }) => {
+const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
   const { openBook, updateBook, setEditingBook, theme } = useLibrary();
 
-  const hasOriginal =
-    Boolean(book.coverDataUrl) &&
-    (book.hasOriginalCover === true ||
-      (book.hasOriginalCover === undefined &&
-        !book.coverDataUrl.startsWith('data:image/svg+xml')));
+  const hasOriginal = hasDisplayableOriginalCover(book);
 
   const adaptiveSeed = `${book.id}:${book.title}`;
   const effectiveSpineColor = hasOriginal ? book.spineColor : getAdaptiveSpineCss(adaptiveSeed);
@@ -67,17 +65,23 @@ export const BookCard: React.FC<BookCardProps> = ({ book }) => {
               )}
             </span>
 
-            {!book.hasLocalFile && book.hasRemoteFile && (
+            {!book.hasLocalFile && (
               <span
                 className="book-format-pill"
                 style={{
                   top: 'auto',
                   bottom: 14,
                   left: 7,
-                  background: 'color-mix(in srgb, var(--sidebar-pill-bg) 90%, transparent)',
-                  color: 'var(--sidebar-pill-contrast)',
+                  background: book.hasRemoteFile
+                    ? 'color-mix(in srgb, var(--sidebar-pill-bg) 90%, transparent)'
+                    : 'rgba(60, 52, 46, 0.84)',
+                  color: '#ffffff',
                 }}
-                title="En servidor — toca para descargar y leer"
+                title={
+                  book.hasRemoteFile
+                    ? 'En la nube — toca para descargar y guardar offline'
+                    : 'Solo registro — toca para descargar de tu cuenta o vincular archivo local'
+                }
               >
                 <Cloud size={10} />
               </span>
@@ -134,7 +138,155 @@ export const BookCard: React.FC<BookCardProps> = ({ book }) => {
         <div className="book-author" title={book.author}>
           {book.author}
         </div>
+        {(book.progress > 0 || book.lastReadAt || book.finishedAt || book.lastChapterFinishedAt) && (
+          <div
+            className="book-time-meta"
+            title={[
+              `Progreso: ${Math.round(book.progress || 0)}%`,
+              book.lastReadAt ? `Última lectura: ${formatDateTime(book.lastReadAt)}` : '',
+              book.lastChapterFinishedAt
+                ? `Últ. cap. terminado${book.lastChapterFinishedTitle ? ` (${book.lastChapterFinishedTitle})` : ''}: ${formatDateTime(book.lastChapterFinishedAt)}`
+                : '',
+              book.finishedAt ? `Libro terminado: ${formatDateTime(book.finishedAt)}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n')}
+          >
+            <span className="book-time-pct">{Math.round(book.progress || 0)}%</span>
+            {book.finishedAt ? (
+              <span className="book-time-stamp done">
+                <CheckCircle2 size={9} /> {formatCompactDateTime(book.finishedAt)}
+              </span>
+            ) : book.lastChapterFinishedAt ? (
+              <span className="book-time-stamp done">
+                <CheckCircle2 size={9} /> Cap. {formatCompactDateTime(book.lastChapterFinishedAt)}
+              </span>
+            ) : book.lastReadAt ? (
+              <span className="book-time-stamp">
+                <Clock size={9} /> {formatCompactDateTime(book.lastReadAt)}
+              </span>
+            ) : null}
+          </div>
+        )}
       </div>
     </article>
   );
 };
+
+export const BookCard = React.memo(BookCardInner);
+
+const BookListRowInner: React.FC<BookCardProps> = ({ book }) => {
+  const { openBook, updateBook, setEditingBook } = useLibrary();
+
+  const hasOriginal = hasDisplayableOriginalCover(book);
+
+  const adaptiveSeed = `${book.id}:${book.title}`;
+  const effectiveSpineColor = hasOriginal ? book.spineColor : getAdaptiveSpineCss(adaptiveSeed);
+  const pct = Math.round(book.progress || 0);
+  const badgeLabel =
+    book.kind === 'manhwa'
+      ? 'MANHWA'
+      : book.kind === 'manga'
+      ? 'MANGA'
+      : book.kind === 'audiobook'
+      ? 'AUDIO'
+      : book.format.toUpperCase();
+
+  return (
+    <article
+      className="book-list-row"
+      onClick={() => openBook(book)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openBook(book);
+        }
+      }}
+    >
+      <div className="book-list-thumb" style={{ backgroundColor: effectiveSpineColor }}>
+        <div className="book-cover-img-box" style={{ borderRadius: 6 }}>
+          <BookCoverVisual book={book} compact />
+        </div>
+      </div>
+
+      <div className="book-list-info">
+        <div className="book-list-top">
+          <div className="book-list-title" title={book.title}>
+            {book.title}
+          </div>
+          <span className="book-list-fmt">{badgeLabel}</span>
+        </div>
+
+        <div className="book-list-sub">
+          <span className="book-list-author" title={book.author}>
+            {book.author}
+          </span>
+          {book.folderPath && (
+            <span className="book-list-folder" title={`Carpeta: ${book.folderPath}`}>
+              <Folder size={10} /> {book.folderPath}
+            </span>
+          )}
+        </div>
+
+        <div className="book-list-progress-row">
+          <div className="goal-track" style={{ height: 6, flex: 1 }}>
+            <div
+              className={`goal-fill ${pct >= 98 ? 'secondary' : ''}`}
+              style={{ width: `${Math.min(100, Math.max(pct > 0 ? 3 : 0, pct))}%` }}
+            />
+          </div>
+          <span className="book-time-pct">{pct}%</span>
+        </div>
+
+        <div className="book-list-dates">
+          {book.lastReadAt && (
+            <span title={`Última lectura: ${formatDateTime(book.lastReadAt)}`}>
+              <Clock size={10} /> Leído: {formatCompactDateTime(book.lastReadAt)}
+            </span>
+          )}
+          {book.finishedAt ? (
+            <span className="done" title={`Libro terminado: ${formatDateTime(book.finishedAt)}`}>
+              <CheckCircle2 size={10} /> Fin: {formatCompactDateTime(book.finishedAt)}
+            </span>
+          ) : book.lastChapterFinishedAt ? (
+            <span
+              className="done"
+              title={`Capítulo terminado${book.lastChapterFinishedTitle ? ` (${book.lastChapterFinishedTitle})` : ''}: ${formatDateTime(book.lastChapterFinishedAt)}`}
+            >
+              <CheckCircle2 size={10} /> Cap.: {formatCompactDateTime(book.lastChapterFinishedAt)}
+            </span>
+          ) : !book.lastReadAt ? (
+            <span title={`Importado: ${formatDateTime(book.addedAt)}`}>
+              Importado: {formatCompactDateTime(book.addedAt)}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="book-list-actions" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className={`circle-arrow-btn ${book.favorite ? 'active-fav' : ''}`}
+          style={{ width: 30, height: 30 }}
+          onClick={() => updateBook(book.id, { favorite: !book.favorite })}
+          title={book.favorite ? 'Quitar de favoritos' : 'Añadir a favoritos'}
+        >
+          <Star size={13} fill={book.favorite ? 'currentColor' : 'none'} />
+        </button>
+        <button
+          type="button"
+          className="circle-arrow-btn"
+          style={{ width: 30, height: 30 }}
+          onClick={() => setEditingBook(book)}
+          title="Editar título, portada o detalles"
+        >
+          <Edit3 size={13} />
+        </button>
+      </div>
+    </article>
+  );
+};
+
+export const BookListRow = React.memo(BookListRowInner);

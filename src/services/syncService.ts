@@ -19,6 +19,7 @@ import type {
 } from '../types/library';
 import { dbGetBookFile, dbPutBookFile } from '../db/localDb';
 import type { FileWithRelPath } from '../utils/fileFolderImport';
+import { readNativeUriAsBlob } from '../utils/nativeBridge';
 
 export interface ServerHealth {
   ok: boolean;
@@ -29,8 +30,6 @@ export interface ServerHealth {
   roomsCount?: number;
   updatedAt: number;
   authRequired: boolean;
-  isOwnerNetwork?: boolean;
-  ownerSpaceId?: string;
   aiConfigured?: boolean;
   aiModel?: string;
   publicUrl?: string;
@@ -438,14 +437,17 @@ export async function uploadBookToServer(
   deviceId = ''
 ): Promise<{ ok: boolean; remoteFileName?: string; format?: BookItem['format'] }> {
   const stored = await dbGetBookFile(book.id);
-  if (!stored) return { ok: false };
+  let uploadBlob: Blob | null = stored?.blob || null;
+  if (!uploadBlob && book.nativeFileUri) {
+    uploadBlob = await readNativeUriAsBlob(book.nativeFileUri, book.mimeType);
+  }
+  if (!uploadBlob) return { ok: false };
 
-  let uploadBlob: Blob = stored.blob;
   let uploadName = book.fileName || `${book.id}.${book.format}`;
   let uploadMeta: BookItem = book;
 
   // Pack multi-image folders into a standard CBZ archive so APK & shared rooms receive every page
-  if (book.format === 'images' && stored.extraImages && stored.extraImages.length > 0) {
+  if (book.format === 'images' && stored?.extraImages && stored.extraImages.length > 0) {
     const zip = new JSZip();
     for (let i = 0; i < stored.extraImages.length; i++) {
       const img = stored.extraImages[i];
@@ -547,16 +549,23 @@ export async function syncFullState(
   },
   uploadMissingFiles = true,
   lightweight = false,
-  keepWallpaper = lightweight
+  keepWallpaper = lightweight,
+  keepCoverIds?: Set<string>
 ): Promise<RemoteSyncPayload> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const booksMap: Record<string, BookItem> = {};
   for (const b of localData.books) {
     if (!b.isDemo) {
-      booksMap[b.id] =
-        lightweight && b.hasRemoteFile && b.coverDataUrl
-          ? { ...b, coverDataUrl: '__KEEP__' }
-          : b;
+      // Never leak device-local Android SAF nativeFileUri to other devices
+      const { nativeFileUri: _ignoreLocalUri, ...syncableBook } = b;
+      const canOmitCover =
+        lightweight &&
+        Boolean(syncableBook.coverDataUrl) &&
+        syncableBook.coverDataUrl !== '__KEEP__' &&
+        (keepCoverIds ? keepCoverIds.has(syncableBook.id) : false);
+      booksMap[syncableBook.id] = canOmitCover
+        ? { ...syncableBook, coverDataUrl: '__KEEP__' }
+        : syncableBook;
     }
   }
 

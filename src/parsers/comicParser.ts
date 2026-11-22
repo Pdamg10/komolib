@@ -35,7 +35,8 @@ export interface ComicPage {
 }
 
 export async function extractCbzPages(blob: Blob): Promise<ComicPage[]> {
-  const zip = await JSZip.loadAsync(blob);
+  const rawBuf = await blob.arrayBuffer();
+  const zip = await JSZip.loadAsync(rawBuf);
   const imageFiles = Object.values(zip.files)
     .filter((f) => !f.dir && !f.name.startsWith('__MACOSX') && IMAGE_EXT_RE.test(f.name))
     .sort((a, b) => naturalSortStrings(a.name, b.name));
@@ -55,7 +56,8 @@ export async function extractCbzPages(blob: Blob): Promise<ComicPage[]> {
 export async function extractCbzCoverAndCount(
   blob: Blob
 ): Promise<{ coverDataUrl?: string; pageCount: number }> {
-  const zip = await JSZip.loadAsync(blob);
+  const rawBuf = await blob.arrayBuffer();
+  const zip = await JSZip.loadAsync(rawBuf);
   const imageFiles = Object.values(zip.files)
     .filter((f) => !f.dir && isValidComicImage(f.name))
     .sort((a, b) => naturalSortStrings(a.name, b.name));

@@ -1,10 +1,10 @@
 {
-  "name": "KomoLib — Librería Universal",
-  "short_name": "KomoLib",
+  "name": "Komolib — Librería Universal",
+  "short_name": "Komolib",
   "description": "Librería personalizable para libros, mangas, manhwas, cómics y audiolibros.",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#d8cbc1",
+  "background_color": "#e7ddd3",
   "theme_color": "#f3ede4",
   "icons": [
     {

@@ -99,8 +99,8 @@ fs.mkdirSync(FILES_DIR, { recursive: true });
 fs.mkdirSync(INBOX_DIR, { recursive: true });
 
 const OWNER_PRIMARY_SPACE = 'vault_mwmcjg7d_1au9m1';
+// Only explicit authenticated email account aliases map to the owner vault — NEVER 'default'!
 const OWNER_SPACE_ALIASES = new Set([
-  'default',
   'vault_mwmcjg7d_1au9m1',
   'acct_phamelamor_2765b2076c8c9d03',
   'acct_sakura_84ba1a81c0a341e1',
@@ -365,7 +365,7 @@ app.use(
     ],
   })
 );
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '150mb' }));
 
 // Optional bearer token middleware (also accepts ?token= for SSE & direct device uploads).
 // Guest access to a specific Shared Reading Room or Shared Shelf by its exact code is allowed
@@ -376,12 +376,12 @@ app.use('/api', (req, res, next) => {
 
   const isGuestRoomEndpoint =
     (req.method === 'GET' && /^\/rooms\/[A-Za-z0-9-]+$/.test(req.path)) ||
-    /^\/rooms\/[A-Za-z0-9-]+\/(join|leave|progress|comments|file|stream)$/.test(req.path);
+    /^\/rooms\/[A-Za-z0-9-]+\/(join|leave|kick|progress|comments|file|stream)$/.test(req.path);
   if (isGuestRoomEndpoint) return next();
 
   const isGuestShelfEndpoint =
     (req.method === 'GET' && /^\/shelves\/[A-Za-z0-9-]+$/.test(req.path)) ||
-    /^\/shelves\/[A-Za-z0-9-]+\/(join|leave|books|stream)(\/[^/]+(\/file)?)?$/.test(req.path);
+    /^\/shelves\/[A-Za-z0-9-]+\/(join|leave|kick|books|stream)(\/[^/]+(\/file)?)?$/.test(req.path);
   if (isGuestShelfEndpoint) return next();
 
   const auth = req.headers.authorization || '';
@@ -436,10 +436,6 @@ app.get('/api/health', (req, res) => {
     roomsCount: Object.keys(rooms).length,
     updatedAt: state.updatedAt || 0,
     authRequired: Boolean(AUTH_TOKEN),
-    isOwnerNetwork: isOwnerNetworkRequest(req),
-    ownerSpaceId: fs.existsSync(path.join(SPACES_DIR, OWNER_PRIMARY_SPACE, 'state.json'))
-      ? OWNER_PRIMARY_SPACE
-      : 'default',
     aiConfigured: Boolean(GEMINI_API_KEY),
     aiModel: GEMINI_MODEL,
     publicUrl,
@@ -660,6 +656,13 @@ app.put('/api/sync/state', (req, res) => {
   const deletedBookmarkDesignsSet = new Set(deletedBookmarkDesignIds);
   const deletedChatSessionsSet = new Set(deletedChatSessionIds);
 
+  const isRasterCoverUrl = (url) => {
+    if (!url || typeof url !== 'string') return false;
+    const t = url.trim();
+    if (!t || t === '__KEEP__' || t.startsWith('data:image/svg+xml')) return false;
+    return t.startsWith('data:image/') || t.startsWith('https://') || t.startsWith('http://');
+  };
+
   const mergedBooks = {};
   for (const [id, book] of Object.entries(current.books || {})) {
     if (!book?.isDemo) mergedBooks[id] = book;
@@ -672,15 +675,48 @@ app.put('/api/sync/state', (req, res) => {
         continue;
       }
       const prev = mergedBooks[id];
-      if (!prev || (book.updatedAt || 0) >= (prev.updatedAt || 0)) {
-        const resolvedCover =
+      const prevHasRaster = isRasterCoverUrl(prev?.coverDataUrl);
+      const incHasRaster = isRasterCoverUrl(book.coverDataUrl);
+      const incomingNewer = !prev || (book.updatedAt || 0) >= (prev.updatedAt || 0);
+
+      if (incomingNewer) {
+        let resolvedCover =
           book.coverDataUrl === '__KEEP__'
             ? prev?.coverDataUrl || ''
             : book.coverDataUrl || prev?.coverDataUrl || '';
+        let resolvedHasOriginal = book.hasOriginalCover;
+        let resolvedSpine = book.spineColor || prev?.spineColor;
+        let resolvedRibbon = book.ribbonColor || prev?.ribbonColor;
+
+        // Never let an empty/placeholder/SVG cover accidentally destroy a real raster cover
+        if (prevHasRaster && !incHasRaster && book.hasOriginalCover !== false) {
+          resolvedCover = prev.coverDataUrl;
+          resolvedHasOriginal = true;
+          resolvedSpine = prev.spineColor || resolvedSpine;
+          resolvedRibbon = prev.ribbonColor || resolvedRibbon;
+        } else if (incHasRaster) {
+          resolvedCover = book.coverDataUrl;
+          if (resolvedHasOriginal === undefined) resolvedHasOriginal = true;
+        }
+
         mergedBooks[id] = {
           ...prev,
           ...book,
           coverDataUrl: resolvedCover,
+          hasOriginalCover: resolvedHasOriginal,
+          spineColor: resolvedSpine,
+          ribbonColor: resolvedRibbon,
+          hasRemoteFile: prev?.hasRemoteFile || book.hasRemoteFile || false,
+          remoteFileName: prev?.remoteFileName || book.remoteFileName,
+        };
+      } else if (incHasRaster && !prevHasRaster) {
+        // Even if incoming book had an older timestamp, never drop a newly recovered original cover!
+        mergedBooks[id] = {
+          ...prev,
+          coverDataUrl: book.coverDataUrl,
+          hasOriginalCover: true,
+          spineColor: book.spineColor || prev.spineColor,
+          ribbonColor: book.ribbonColor || prev.ribbonColor,
           hasRemoteFile: prev?.hasRemoteFile || book.hasRemoteFile || false,
           remoteFileName: prev?.remoteFileName || book.remoteFileName,
         };
@@ -943,6 +979,9 @@ app.post('/api/rooms/:code/join', (req, res) => {
     joinedAt: existing?.joinedAt || now,
     lastSeenAt: now,
   };
+  if (Array.isArray(room.kickedIds)) {
+    room.kickedIds = room.kickedIds.filter((id) => id !== pId);
+  }
   room.updatedAt = now;
 
   rooms[code] = room;
@@ -973,6 +1012,9 @@ app.patch('/api/rooms/:code/progress', (req, res) => {
   const pId = String(participantId || '').slice(0, 64);
   if (!pId) {
     return res.status(400).json({ error: 'participantId requerido' });
+  }
+  if (Array.isArray(room.kickedIds) && room.kickedIds.includes(pId)) {
+    return res.status(403).json({ error: 'Fuiste eliminado de esta sala' });
   }
 
   const now = Date.now();
@@ -1013,6 +1055,10 @@ app.post('/api/rooms/:code/comments', (req, res) => {
   }
 
   const { participantId, authorName, avatarEmoji, text, progressAt, pageAt } = req.body || {};
+  const pId = String(participantId || 'anon').slice(0, 64);
+  if (Array.isArray(room.kickedIds) && room.kickedIds.includes(pId)) {
+    return res.status(403).json({ error: 'Fuiste eliminado de esta sala' });
+  }
   const cleanText = typeof text === 'string' ? text.trim().slice(0, 600) : '';
   if (!cleanText) {
     return res.status(400).json({ error: 'Comentario vacío' });
@@ -1021,7 +1067,7 @@ app.post('/api/rooms/:code/comments', (req, res) => {
   const now = Date.now();
   const comment = {
     id: `rc_${now}_${Math.random().toString(36).slice(2, 6)}`,
-    participantId: String(participantId || 'anon'),
+    participantId: pId,
     authorName: String(authorName || 'Lector').slice(0, 40),
     avatarEmoji: avatarEmoji || '🦊',
     text: cleanText,
@@ -1094,11 +1140,49 @@ app.post('/api/rooms/:code/leave', (req, res) => {
   const pId = String(req.body?.participantId || '').slice(0, 64);
   if (pId && room.participants && room.participants[pId]) {
     delete room.participants[pId];
+    const remaining = Object.values(room.participants);
+    if (remaining.length === 0) {
+      delete rooms[code];
+      writeRooms(rooms);
+      broadcastRoomDeleted(code);
+      return res.json({ ok: true, deleted: true });
+    }
+    if (room.hostId === pId) {
+      const nextHost = remaining[0];
+      room.hostId = nextHost.id;
+      room.hostName = nextHost.name || 'Anfitrión';
+    }
     room.updatedAt = Date.now();
     rooms[code] = room;
     writeRooms(rooms);
     broadcastRoomUpdate(code, room);
   }
+  res.json({ ok: true, room });
+});
+
+app.post('/api/rooms/:code/kick', (req, res) => {
+  const code = normalizeRoomCode(req.params.code);
+  const rooms = readRooms();
+  const room = rooms[code];
+  if (!room) {
+    return res.status(404).json({ error: 'Sala no encontrada' });
+  }
+  const requesterId = String(req.body?.requesterId || '').slice(0, 64);
+  const targetId = String(req.body?.targetParticipantId || '').slice(0, 64);
+  if (!requesterId || requesterId !== room.hostId) {
+    return res.status(403).json({ error: 'Solo el administrador/creador de la sala puede eliminar usuarios' });
+  }
+  if (!targetId || targetId === room.hostId) {
+    return res.status(400).json({ error: 'Usuario objetivo inválido' });
+  }
+  if (room.participants?.[targetId]) {
+    delete room.participants[targetId];
+  }
+  room.kickedIds = Array.from(new Set([...(room.kickedIds || []), targetId])).slice(-50);
+  room.updatedAt = Date.now();
+  rooms[code] = room;
+  writeRooms(rooms);
+  broadcastRoomUpdate(code, room);
   res.json({ ok: true, room });
 });
 
@@ -1198,6 +1282,9 @@ app.post('/api/shelves/:code/join', (req, res) => {
     avatarBg: m.avatarBg || shelf.members[mId]?.avatarBg || '#e8dccb',
     joinedAt: shelf.members[mId]?.joinedAt || now,
   };
+  if (Array.isArray(shelf.kickedIds)) {
+    shelf.kickedIds = shelf.kickedIds.filter((id) => id !== mId);
+  }
   shelf.updatedAt = now;
   shelves[code] = shelf;
   writeShelves(shelves);
@@ -1227,6 +1314,12 @@ app.post('/api/shelves/:code/books', shelfUpload.single('file'), (req, res) => {
 
   const now = Date.now();
   const ownerId = String(req.body.ownerId || book.ownerId || 'anon').slice(0, 64);
+  if (Array.isArray(shelf.kickedIds) && shelf.kickedIds.includes(ownerId)) {
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+    }
+    return res.status(403).json({ error: 'Fuiste eliminado de esta estantería' });
+  }
   const ownerName = String(req.body.ownerName || book.ownerName || 'Lector').slice(0, 40);
   const key = `${ownerId}_${bookId}`.slice(0, 96);
 
@@ -1247,6 +1340,10 @@ app.post('/api/shelves/:code/books', shelfUpload.single('file'), (req, res) => {
     spineColor: book.spineColor || '#4c6c8a',
     ribbonColor: book.ribbonColor || '#f2ba59',
     fileName: book.fileName || `${bookId}.${book.format || 'epub'}`,
+    folderPath:
+      typeof book.folderPath === 'string' && book.folderPath.trim()
+        ? book.folderPath.trim().slice(0, 260)
+        : undefined,
     fileSize: req.file?.size || book.fileSize || 0,
     mimeType: book.mimeType || req.file?.mimetype || 'application/octet-stream',
     pageCount: book.pageCount,
@@ -1308,11 +1405,55 @@ app.post('/api/shelves/:code/leave', (req, res) => {
   const mId = String(req.body?.memberId || '').slice(0, 64);
   if (mId && shelf.members?.[mId]) {
     delete shelf.members[mId];
+    const remaining = Object.values(shelf.members);
+    if (remaining.length === 0) {
+      for (const entry of Object.values(shelf.books || {})) {
+        if (entry?.remoteFileName && entry.remoteFileName.startsWith('shelf_')) {
+          const fp = path.join(FILES_DIR, path.basename(entry.remoteFileName));
+          if (fs.existsSync(fp)) {
+            try { fs.unlinkSync(fp); } catch { /* ignore */ }
+          }
+        }
+      }
+      delete shelves[code];
+      writeShelves(shelves);
+      broadcastShelfDeleted(code);
+      return res.json({ ok: true, deleted: true });
+    }
+    if (shelf.hostId === mId) {
+      const nextHost = remaining[0];
+      shelf.hostId = nextHost.id;
+      shelf.hostName = nextHost.name || 'Anfitrión';
+    }
     shelf.updatedAt = Date.now();
     shelves[code] = shelf;
     writeShelves(shelves);
     broadcastShelfUpdate(code, shelf);
   }
+  res.json({ ok: true, shelf });
+});
+
+app.post('/api/shelves/:code/kick', (req, res) => {
+  const code = normalizeRoomCode(req.params.code);
+  const shelves = readShelves();
+  const shelf = shelves[code];
+  if (!shelf) return res.status(404).json({ error: 'Estantería no encontrada' });
+  const requesterId = String(req.body?.requesterId || '').slice(0, 64);
+  const targetId = String(req.body?.targetMemberId || '').slice(0, 64);
+  if (!requesterId || requesterId !== shelf.hostId) {
+    return res.status(403).json({ error: 'Solo el administrador/creador de la estantería puede eliminar usuarios' });
+  }
+  if (!targetId || targetId === shelf.hostId) {
+    return res.status(400).json({ error: 'Usuario objetivo inválido' });
+  }
+  if (shelf.members?.[targetId]) {
+    delete shelf.members[targetId];
+  }
+  shelf.kickedIds = Array.from(new Set([...(shelf.kickedIds || []), targetId])).slice(-50);
+  shelf.updatedAt = Date.now();
+  shelves[code] = shelf;
+  writeShelves(shelves);
+  broadcastShelfUpdate(code, shelf);
   res.json({ ok: true, shelf });
 });
 

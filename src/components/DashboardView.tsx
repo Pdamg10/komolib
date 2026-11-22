@@ -2,6 +2,9 @@ import React, { useMemo, useState } from 'react';
 import {
   BookCheck,
   BookOpen,
+  CalendarClock,
+  CheckCircle2,
+  Clock,
   FileText,
   Pencil,
   Star,
@@ -11,6 +14,8 @@ import {
 import { useLibrary } from '../context/LibraryContext';
 import {
   computeLibraryStats,
+  formatCompactDateTime,
+  formatDateTime,
   STATUS_META,
   STATUS_ORDER,
 } from '../utils/readingStats';
@@ -19,15 +24,27 @@ import { BookCoverVisual, getAdaptiveSpineCss } from './BookCoverVisual';
 export const DashboardView: React.FC = () => {
   const { books, categories, profile, updateProfile, openBook, setNavSection } = useLibrary();
   const [editingGoals, setEditingGoals] = useState(false);
-  const [booksGoalInput, setBooksGoalInput] = useState(String(profile.booksGoalPerYear || 50));
-  const [pagesGoalInput, setPagesGoalInput] = useState(String(profile.pagesGoalPerYear || 15000));
+  const [booksGoalInput, setBooksGoalInput] = useState(String(profile.booksGoalPerMonth || 4));
+  const [pagesGoalInput, setPagesGoalInput] = useState(String(profile.pagesGoalPerMonth || 1200));
 
   const stats = useMemo(() => computeLibraryStats(books, categories), [books, categories]);
 
-  const booksGoal = Math.max(1, profile.booksGoalPerYear || 50);
-  const pagesGoal = Math.max(100, profile.pagesGoalPerYear || 15000);
-  const booksGoalPct = Math.min(100, Math.round((stats.statusCounts.completed / booksGoal) * 100));
-  const pagesGoalPct = Math.min(100, Math.round((stats.totalPagesRead / pagesGoal) * 100));
+  const booksGoal = Math.max(1, profile.booksGoalPerMonth || 4);
+  const pagesGoal = Math.max(50, profile.pagesGoalPerMonth || 1200);
+  const booksGoalPct = Math.min(100, Math.round((stats.monthlyCompletedBooks / booksGoal) * 100));
+  const pagesGoalPct = Math.min(100, Math.round((stats.monthlyPagesRead / pagesGoal) * 100));
+  const goalTimestamp = stats.monthlyLastActivityAt || profile.goalsUpdatedAt || Date.now();
+
+  const recentActivityBooks = useMemo(() => {
+    return [...books]
+      .filter((b) => b.lastReadAt || b.finishedAt || b.lastChapterFinishedAt || (b.progress || 0) > 0)
+      .sort(
+        (a, b) =>
+          Math.max(b.finishedAt || 0, b.lastChapterFinishedAt || 0, b.lastReadAt || 0, b.updatedAt || 0) -
+          Math.max(a.finishedAt || 0, a.lastChapterFinishedAt || 0, a.lastReadAt || 0, a.updatedAt || 0)
+      )
+      .slice(0, 6);
+  }, [books]);
 
   // Build SVG donut chart segments
   const radius = 46;
@@ -54,8 +71,9 @@ export const DashboardView: React.FC = () => {
   const handleSaveGoals = (e: React.FormEvent) => {
     e.preventDefault();
     updateProfile({
-      booksGoalPerYear: Math.max(1, Number(booksGoalInput) || 50),
-      pagesGoalPerYear: Math.max(100, Number(pagesGoalInput) || 15000),
+      booksGoalPerMonth: Math.max(1, Number(booksGoalInput) || 4),
+      pagesGoalPerMonth: Math.max(50, Number(pagesGoalInput) || 1200),
+      goalsUpdatedAt: Date.now(),
     });
     setEditingGoals(false);
   };
@@ -71,13 +89,13 @@ export const DashboardView: React.FC = () => {
             «Una habitación sin libros es como un cuerpo sin alma.» — Cicerón
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div className="tracker-header-actions">
           <button className="pill-btn" onClick={() => setNavSection('reading-log')}>
-            Ver Reading Log completo
+            Ver Reading Log
           </button>
           <button
             className="coral-cta-btn"
-            style={{ height: 34, padding: '0 16px', fontSize: 12 }}
+            style={{ height: 32, padding: '0 14px', fontSize: 12 }}
             onClick={() => setNavSection('home')}
           >
             Ir a estantería
@@ -138,7 +156,7 @@ export const DashboardView: React.FC = () => {
           </div>
           <div className="donut-layout">
             <div className="donut-wrap">
-              <svg viewBox="0 0 120 120" width="112" height="112">
+              <svg viewBox="0 0 120 120" width="98" height="98">
                 <circle
                   cx="60"
                   cy="60"
@@ -217,11 +235,11 @@ export const DashboardView: React.FC = () => {
           )}
         </div>
 
-        {/* Reading Goals */}
-        <div className="tracker-card">
+        {/* Monthly Reading Goals */}
+        <div className="tracker-card dashboard-goals-card">
           <div className="tracker-card-head">
             <h3>
-              <Target size={15} /> Metas de lectura
+              <Target size={15} /> Meta mensual · {stats.currentMonthLabel}
             </h3>
             <button
               type="button"
@@ -233,45 +251,53 @@ export const DashboardView: React.FC = () => {
             </button>
           </div>
 
+          <div className="goal-timestamp-bar">
+            <CalendarClock size={12} />
+            <span>
+              {stats.monthlyLastActivityAt ? 'Último avance:' : 'Fecha y hora:'}{' '}
+              <strong>{formatDateTime(goalTimestamp)}</strong>
+            </span>
+          </div>
+
           {editingGoals ? (
             <form onSubmit={handleSaveGoals} style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               <label style={{ fontSize: 11.5, fontWeight: 700 }}>
-                Meta de libros al año
+                Meta de libros al mes
                 <input
                   className="studio-input"
                   type="number"
                   min={1}
-                  max={500}
+                  max={100}
                   value={booksGoalInput}
                   onChange={(e) => setBooksGoalInput(e.target.value)}
                   style={{ marginTop: 4 }}
                 />
               </label>
               <label style={{ fontSize: 11.5, fontWeight: 700 }}>
-                Meta de páginas al año
+                Meta de páginas al mes
                 <input
                   className="studio-input"
                   type="number"
-                  min={100}
-                  max={200000}
-                  step={500}
+                  min={50}
+                  max={50000}
+                  step={100}
                   value={pagesGoalInput}
                   onChange={(e) => setPagesGoalInput(e.target.value)}
                   style={{ marginTop: 4 }}
                 />
               </label>
               <button type="submit" className="coral-cta-btn" style={{ height: 34, justifyContent: 'center' }}>
-                Guardar metas
+                Guardar metas mensuales
               </button>
             </form>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 4 }}>
+            <div className="dashboard-goals-list">
               <div>
                 <div className="goal-row-label">
                   <span>
-                    {stats.statusCounts.completed} / {booksGoal} libros
+                    Libros este mes: <strong>{stats.monthlyCompletedBooks} / {booksGoal}</strong>
                   </span>
-                  <strong>{booksGoalPct}%</strong>
+                  <strong style={{ color: 'var(--accent-primary)' }}>{booksGoalPct}%</strong>
                 </div>
                 <div className="goal-track">
                   <div className="goal-fill" style={{ width: `${booksGoalPct}%` }} />
@@ -281,10 +307,13 @@ export const DashboardView: React.FC = () => {
               <div>
                 <div className="goal-row-label">
                   <span>
-                    {stats.totalPagesRead.toLocaleString('es-ES')} /{' '}
-                    {pagesGoal.toLocaleString('es-ES')} páginas
+                    Páginas este mes:{' '}
+                    <strong>
+                      {stats.monthlyPagesRead.toLocaleString('es-ES')} /{' '}
+                      {pagesGoal.toLocaleString('es-ES')}
+                    </strong>
                   </span>
-                  <strong>{pagesGoalPct}%</strong>
+                  <strong style={{ color: 'var(--accent-secondary)' }}>{pagesGoalPct}%</strong>
                 </div>
                 <div className="goal-track">
                   <div
@@ -296,6 +325,70 @@ export const DashboardView: React.FC = () => {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Recent Reading Timeline (Exact Date, Time, Chapter & Book Completion) */}
+      <div className="tracker-card">
+        <div className="tracker-card-head">
+          <h3>
+            <Clock size={15} /> Actividad y progreso reciente
+          </h3>
+          <span className="section-count">{recentActivityBooks.length} títulos</span>
+        </div>
+
+        {recentActivityBooks.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 0' }}>
+            Abre cualquier libro para registrar automáticamente su progreso, fecha y hora exacta de lectura, capítulos terminados y finalización.
+          </div>
+        ) : (
+          <div className="activity-timeline-grid">
+            {recentActivityBooks.map((book) => {
+              const pct = Math.round(book.progress || 0);
+              return (
+                <button
+                  key={book.id}
+                  type="button"
+                  className="activity-timeline-item"
+                  onClick={() => openBook(book)}
+                >
+                  <div className="log-mini-thumb" style={{ width: 32, height: 46 }}>
+                    <BookCoverVisual book={book} compact />
+                  </div>
+                  <div className="activity-timeline-body">
+                    <div className="activity-timeline-top">
+                      <span className="activity-timeline-title" title={book.title}>
+                        {book.title}
+                      </span>
+                      <span className="activity-timeline-pct">{pct}%</span>
+                    </div>
+                    <div className="goal-track" style={{ height: 6 }}>
+                      <div
+                        className={`goal-fill ${pct >= 98 ? 'secondary' : ''}`}
+                        style={{ width: `${Math.min(100, Math.max(2, pct))}%` }}
+                      />
+                    </div>
+                    <div className="activity-timeline-dates">
+                      {book.lastReadAt && (
+                        <span>
+                          <Clock size={10} /> Leído: {formatCompactDateTime(book.lastReadAt)}
+                        </span>
+                      )}
+                      {book.finishedAt ? (
+                        <span className="done">
+                          <CheckCircle2 size={10} /> Libro fin: {formatCompactDateTime(book.finishedAt)}
+                        </span>
+                      ) : book.lastChapterFinishedAt ? (
+                        <span className="done">
+                          <CheckCircle2 size={10} /> Cap. fin: {formatCompactDateTime(book.lastChapterFinishedAt)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Top Rated Books */}

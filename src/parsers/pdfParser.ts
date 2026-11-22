@@ -1,16 +1,42 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+const resolvedWorkerSrc = (() => {
+  try {
+    if (typeof window !== 'undefined' && window.location?.href) {
+      return new URL(pdfWorkerUrl, window.location.href).href;
+    }
+  } catch {
+    // ignore URL resolution error
+  }
+  return pdfWorkerUrl;
+})();
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = resolvedWorkerSrc;
 
 export { pdfjsLib };
+
+export async function openPdfDocumentReliably(data: Uint8Array) {
+  try {
+    return await pdfjsLib.getDocument({ data: data.slice(), isEvalSupported: false }).promise;
+  } catch {
+    // Android WebView fallback when ES module Web Worker cannot be instantiated
+    return await pdfjsLib.getDocument({
+      data: data.slice(),
+      isEvalSupported: false,
+      useWorkerFetch: false,
+      disableFontFace: true,
+      // @ts-expect-error pdfjs-dist supports disableWorker at runtime in browser builds
+      disableWorker: true,
+    }).promise;
+  }
+}
 
 export async function extractPdfMetaAndCover(
   blob: Blob
 ): Promise<{ title?: string; author?: string; coverDataUrl?: string; pageCount: number }> {
   const data = new Uint8Array(await blob.arrayBuffer());
-  const loadingTask = pdfjsLib.getDocument({ data });
-  const pdf = await loadingTask.promise;
+  const pdf = await openPdfDocumentReliably(data);
 
   let title: string | undefined;
   let author: string | undefined;

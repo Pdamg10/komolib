@@ -10,12 +10,17 @@ import {
   LogOut,
   Mail,
   RefreshCw,
+  Share2,
   Star,
   Upload,
   X,
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import { SYNC_SERVER_URL } from '../config';
+import {
+  pickExternalBackupNatively,
+  supportsNativeBackupPicker,
+} from '../utils/nativeBridge';
 
 const EMOJIS = ['🦊', '🐱', '🦉', '🐻', '🌸', '📚', '✨', '🧙', '🎧', '🐉'];
 
@@ -29,13 +34,19 @@ export const ProfileModal: React.FC = () => {
     updateSyncConfig,
     syncStatus,
     syncMessage,
+    offlineSyncProgress,
     triggerSync,
+    syncAllBookFilesForOffline,
     refreshServerHealth,
     loginWithEmail,
     logoutAccount,
     exportBackupJson,
+    shareBackupJson,
     importBackupJson,
+    showToast,
     books,
+    duplicateBooksCount,
+    removeDuplicateBooks,
     bookmarks,
     annotations,
     notes,
@@ -64,19 +75,21 @@ export const ProfileModal: React.FC = () => {
         const img = new Image();
         img.onerror = () => resolve(rawUrl);
         img.onload = () => {
-          const maxSide = 256;
-          const scale = Math.min(1, maxSide / Math.max(img.width || 1, img.height || 1));
-          const w = Math.max(1, Math.round(img.width * scale));
-          const h = Math.max(1, Math.round(img.height * scale));
+          const outSize = 256;
+          const iw = img.width || 1;
+          const ih = img.height || 1;
+          const crop = Math.min(iw, ih);
+          const sx = Math.round((iw - crop) / 2);
+          const sy = Math.round((ih - crop) / 2);
           const canvas = document.createElement('canvas');
-          canvas.width = w;
-          canvas.height = h;
+          canvas.width = outSize;
+          canvas.height = outSize;
           const ctx = canvas.getContext('2d');
           if (!ctx) {
             resolve(rawUrl);
             return;
           }
-          ctx.drawImage(img, 0, 0, w, h);
+          ctx.drawImage(img, sx, sy, crop, crop, 0, 0, outSize, outSize);
           try {
             const webp = canvas.toDataURL('image/webp', 0.82);
             if (webp.startsWith('data:image/webp')) {
@@ -122,6 +135,23 @@ export const ProfileModal: React.FC = () => {
     if (!file) return;
     await importBackupJson(file);
     e.target.value = '';
+  };
+
+  const handleImportBackupClick = async () => {
+    if (supportsNativeBackupPicker()) {
+      try {
+        showToast('Abriendo selector seguro de copias...');
+        const picked = await pickExternalBackupNatively((info) => {
+          showToast(`Leyendo ${info.fileName || 'copia'}...`);
+        });
+        if (!picked) return;
+        await importBackupJson(picked.file);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'No se pudo leer el archivo seleccionado');
+      }
+      return;
+    }
+    backupFileRef.current?.click();
   };
 
   const completed = books.filter((b) => b.progress >= 98).length;
@@ -187,13 +217,25 @@ export const ProfileModal: React.FC = () => {
           </div>
         </div>
 
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+            gap: 8,
+          }}
+        >
           {EMOJIS.map((em) => (
             <button
               key={em}
+              type="button"
               className="circle-arrow-btn"
               style={{
-                fontSize: 18,
+                width: 36,
+                height: 36,
+                fontSize: 19,
+                padding: 0,
+                lineHeight: 1,
                 background:
                   !profile.avatarImageUrl && profile.avatarEmoji === em
                     ? 'var(--accent-secondary)'
@@ -201,7 +243,9 @@ export const ProfileModal: React.FC = () => {
               }}
               onClick={() => updateProfile({ avatarEmoji: em, avatarImageUrl: undefined })}
             >
-              {em}
+              <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1 }}>
+                {em}
+              </span>
             </button>
           ))}
         </div>
@@ -292,7 +336,7 @@ export const ProfileModal: React.FC = () => {
               <input
                 type="password"
                 className="studio-input"
-                style={{ width: 120 }}
+                style={{ flex: '1 1 110px', minWidth: 0 }}
                 placeholder="PIN (opcional)"
                 value={pinInput}
                 onChange={(e) => setPinInput(e.target.value)}
@@ -359,39 +403,101 @@ export const ProfileModal: React.FC = () => {
             </div>
           )}
 
+          {linkedEmail && books.length > 0 && (
+            <div
+              style={{
+                background: 'var(--card-bg)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 12,
+                padding: '9px 11px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 7,
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11.5, fontWeight: 800 }}>
+                  Lectura sin internet en este dispositivo
+                </span>
+                <span className="section-count" style={{ fontSize: 10.5 }}>
+                  {books.filter((b) => b.hasLocalFile).length} / {books.length} guardados offline
+                </span>
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                Sube los libros locales de este equipo a tu cuenta y descarga los que subiste desde tu tablet/teléfono para abrirlos siempre, con o sin internet.
+              </div>
+              <button
+                type="button"
+                className="pill-btn"
+                style={{
+                  height: 32,
+                  justifyContent: 'center',
+                  background: 'var(--accent-secondary)',
+                  color: 'var(--accent-secondary-contrast)',
+                  borderColor: 'transparent',
+                  fontSize: 11.5,
+                }}
+                disabled={Boolean(offlineSyncProgress) || busy}
+                onClick={() => void syncAllBookFilesForOffline()}
+              >
+                <Download size={13} />{' '}
+                {offlineSyncProgress || 'Sincronizar archivos para leer offline'}
+              </button>
+            </div>
+          )}
+
           {/* Local JSON Backup Export / Import & Logout */}
-          <div
-            style={{
-              display: 'flex',
-              gap: 6,
-              flexWrap: 'wrap',
-              paddingTop: 6,
-              borderTop: '1px dashed var(--border-subtle)',
-            }}
-          >
+          <div className="profile-backup-actions">
             <button
               type="button"
               className="pill-btn"
               style={{ height: 29, fontSize: 11, background: 'var(--card-bg)' }}
               onClick={exportBackupJson}
             >
-              <Download size={12} /> Descargar copia (.json)
+              <Download size={12} /> Guardar copia (.json)
             </button>
             <button
               type="button"
               className="pill-btn"
               style={{ height: 29, fontSize: 11, background: 'var(--card-bg)' }}
-              onClick={() => backupFileRef.current?.click()}
+              onClick={() => void shareBackupJson()}
+              title="Enviar o guardar tu copia local en Drive, Telegram, WhatsApp o archivos"
             >
-              <FolderUp size={12} /> Restaurar archivo (.json)
+              <Share2 size={12} /> Compartir copia
+            </button>
+            <button
+              type="button"
+              className="pill-btn"
+              style={{ height: 29, fontSize: 11, background: 'var(--card-bg)' }}
+              onClick={() => void handleImportBackupClick()}
+              title="Restaura una copia de KomoLib (.json) o importa libros, progresos y marcadores de otra app"
+            >
+              <FolderUp size={12} /> Importar copia / otra app
             </button>
             <input
               ref={backupFileRef}
               type="file"
-              accept=".json,application/json"
+              accept="*/*"
               hidden
               onChange={handleRestoreFile}
             />
+
+            {duplicateBooksCount > 0 && (
+              <button
+                type="button"
+                className="pill-btn"
+                style={{
+                  height: 29,
+                  fontSize: 11,
+                  background: 'rgba(242, 186, 89, 0.18)',
+                  borderColor: 'rgba(242, 186, 89, 0.6)',
+                  color: 'var(--text-primary)',
+                }}
+                onClick={() => void removeDuplicateBooks()}
+              >
+                Limpiar {duplicateBooksCount} duplicado{duplicateBooksCount === 1 ? '' : 's'}
+              </button>
+            )}
 
             {(linkedEmail || books.length > 0) && (
               <button

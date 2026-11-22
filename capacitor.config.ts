@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.komolib.reader',
-  appName: 'KomoLib',
+  appName: 'Komolib',
   webDir: 'dist',
   server: {
     androidScheme: 'http',
