@@ -59,6 +59,7 @@ import {
 } from '../utils/nativeBridge';
 import {
   buildGoogleOAuthStartUrl,
+  clearGoogleDriveMemoryCache,
   deleteBookFileFromGoogleDrive,
   downloadBookFileFromGoogleDrive,
   ensureKomolibDriveFolders,
@@ -146,6 +147,15 @@ import type {
 } from '../types/library';
 
 export type RightPanelTab = 'chat' | 'notes';
+
+export interface SyncPopupState {
+  visible: boolean;
+  phase: 'syncing' | 'done' | 'error';
+  progress: number;
+  title: string;
+  detail: string;
+  summary?: string;
+}
 
 interface LibraryContextValue {
   ready: boolean;
@@ -265,6 +275,8 @@ interface LibraryContextValue {
   dismissRemoteSession: () => void;
   syncStatus: 'idle' | 'syncing' | 'ok' | 'error';
   syncMessage: string;
+  syncPopup: SyncPopupState;
+  dismissSyncPopup: () => void;
   offlineSyncProgress: string;
   triggerSync: (silent?: boolean) => Promise<void>;
   syncAllBookFilesForOffline: () => Promise<{ uploaded: number; downloaded: number; failed: number }>;
@@ -601,6 +613,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [aiOnline, setAiOnline] = useState(false);
   const [aiModelName, setAiModelName] = useState('');
   const [googleDriveAuth, setGoogleDriveAuth] = useState<GoogleDriveAuth | null>(null);
+  const [syncPopup, setSyncPopup] = useState<SyncPopupState>({
+    visible: false,
+    phase: 'syncing',
+    progress: 0,
+    title: 'Sincronizando...',
+    detail: '',
+  });
+  const syncPopupCloseTimerRef = useRef<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const deletedIdsRef = useRef<string[]>([]);
   const deletedBookmarkIdsRef = useRef<string[]>([]);
@@ -701,6 +721,63 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setToast(msg);
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(null), 3200);
+  }, []);
+
+  const dismissSyncPopup = useCallback(() => {
+    if (syncPopupCloseTimerRef.current) {
+      window.clearTimeout(syncPopupCloseTimerRef.current);
+      syncPopupCloseTimerRef.current = null;
+    }
+    setSyncPopup((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+  }, []);
+
+  const showSyncPopupProgress = useCallback(
+    (progress: number, detail: string, title = 'Sincronizando biblioteca') => {
+      if (syncPopupCloseTimerRef.current) {
+        window.clearTimeout(syncPopupCloseTimerRef.current);
+        syncPopupCloseTimerRef.current = null;
+      }
+      setSyncPopup({
+        visible: true,
+        phase: 'syncing',
+        progress: Math.min(98, Math.max(0, Math.round(progress))),
+        title,
+        detail,
+      });
+    },
+    []
+  );
+
+  const completeSyncPopup = useCallback((detail: string, summary?: string) => {
+    if (syncPopupCloseTimerRef.current) {
+      window.clearTimeout(syncPopupCloseTimerRef.current);
+    }
+    setSyncPopup({
+      visible: true,
+      phase: 'done',
+      progress: 100,
+      title: '¡Sincronización lista!',
+      detail,
+      summary,
+    });
+    syncPopupCloseTimerRef.current = window.setTimeout(() => {
+      syncPopupCloseTimerRef.current = null;
+      setSyncPopup((prev) => (prev.phase === 'done' ? { ...prev, visible: false } : prev));
+    }, 1500);
+  }, []);
+
+  const failSyncPopup = useCallback((detail: string) => {
+    if (syncPopupCloseTimerRef.current) {
+      window.clearTimeout(syncPopupCloseTimerRef.current);
+      syncPopupCloseTimerRef.current = null;
+    }
+    setSyncPopup({
+      visible: true,
+      phase: 'error',
+      progress: 100,
+      title: 'Error de sincronización',
+      detail,
+    });
   }, []);
 
   // Bootstrap from IndexedDB (100% local-first & per-user independent!)
@@ -1367,12 +1444,19 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setBooks(nextBooks);
         }
 
-        // Background auto-download book files from Google Drive (or Render vault) so they are ready offline!
+        // Background auto-download ONLY the 3 most recently read books so low-end phones never freeze or flicker!
         if (booksToAutoDownload.length > 0) {
+          const priorityDownloads = [...booksToAutoDownload]
+            .sort(
+              (a, b) =>
+                Math.max(b.lastReadAt || 0, b.updatedAt || 0, b.addedAt || 0) -
+                Math.max(a.lastReadAt || 0, a.updatedAt || 0, a.addedAt || 0)
+            )
+            .slice(0, 3);
           (async () => {
-            let downloadedOk = 0;
+            const downloadedPatches = new Map<string, string | undefined>();
             let activeDrive = stateRef.current.googleDriveAuth;
-            for (const target of booksToAutoDownload) {
+            for (const target of priorityDownloads) {
               try {
                 let resolvedDriveId = target.driveFileId;
                 if (activeDrive?.accessToken) {
@@ -1393,21 +1477,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                   driveFileId: resolvedDriveId,
                 };
                 await dbPutBook(patched);
-                setBooks((prev) =>
-                  prev.map((x) =>
-                    x.id === target.id ? { ...x, hasLocalFile: true, driveFileId: resolvedDriveId } : x
-                  )
-                );
-                downloadedOk++;
+                downloadedPatches.set(target.id, resolvedDriveId);
               } catch {
                 // will retry when book is clicked or via offline sync button
               }
             }
-            if (downloadedOk > 0) {
-              showToast(
-                downloadedOk === 1
-                  ? '1 libro descargado y guardado para leer sin internet'
-                  : `${downloadedOk} libros descargados y guardados para leer sin internet`
+            if (downloadedPatches.size > 0) {
+              setBooks((prev) =>
+                prev.map((x) =>
+                  downloadedPatches.has(x.id)
+                    ? { ...x, hasLocalFile: true, driveFileId: downloadedPatches.get(x.id) || x.driveFileId }
+                    : x
+                )
               );
             }
           })();
@@ -1548,11 +1629,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
         }
 
-        if (merged.categories?.length) {
+        if (
+          merged.categories?.length &&
+          JSON.stringify(merged.categories) !== JSON.stringify(current.categories)
+        ) {
           setCategories(merged.categories);
           await dbSetKV('categories', merged.categories);
         }
-        if (merged.collections?.length) {
+        if (
+          merged.collections?.length &&
+          JSON.stringify(merged.collections) !== JSON.stringify(current.collections)
+        ) {
           setCollections(merged.collections);
           await dbSetKV('collections', merged.collections);
         }
@@ -1563,8 +1650,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             (merged.themeUpdatedAt || 0) >= themeUpdatedAtRef.current)
         ) {
           const mergedReader = { ...DEFAULT_READER_SETTINGS, ...merged.readerSettings };
-          setReaderSettings(mergedReader);
-          await dbSetKV('readerSettings', mergedReader);
+          if (JSON.stringify(mergedReader) !== JSON.stringify(current.readerSettings)) {
+            setReaderSettings(mergedReader);
+            await dbSetKV('readerSettings', mergedReader);
+          }
         }
         if (merged.theme && merged.theme.customWallpaperUrl !== '__KEEP__') {
           lastSyncedWallpaperRef.current = merged.theme.customWallpaperUrl || '';
@@ -1592,10 +1681,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             readingFilter: merged.theme.readingFilter || current.theme.readingFilter || DEFAULT_THEME.readingFilter,
             customWallpaperUrl: resolvedWallpaper,
           };
-          setTheme(mergedTheme);
-          applyThemeCssVars(mergedTheme);
-          writeStoredShelfPrefs(mergedTheme, themeUpdatedAtRef.current || Date.now());
-          await dbSetKV('theme', mergedTheme);
+          // Only mutate CSS variables & React state when theme actually changed (prevents screen flicker!)
+          if (JSON.stringify(mergedTheme) !== JSON.stringify(current.theme)) {
+            setTheme(mergedTheme);
+            applyThemeCssVars(mergedTheme);
+            writeStoredShelfPrefs(mergedTheme, themeUpdatedAtRef.current || Date.now());
+            await dbSetKV('theme', mergedTheme);
+          }
           await dbSetKV('themeUpdatedAt', themeUpdatedAtRef.current);
         }
         if (
@@ -1609,8 +1701,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             merged.profileUpdatedAt || (isProfileCustomized(merged.profile) ? profileUpdatedAtRef.current : 0);
           profileUpdatedAtRef.current = nextProfileTs;
           const mergedProfile = { ...DEFAULT_PROFILE, ...merged.profile };
-          setProfile(mergedProfile);
-          await dbSetKV('profile', mergedProfile);
+          if (JSON.stringify(mergedProfile) !== JSON.stringify(current.profile)) {
+            setProfile(mergedProfile);
+            await dbSetKV('profile', mergedProfile);
+          }
           await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
         }
         if (
@@ -3681,7 +3775,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       if (!silent) {
         setSyncStatus('syncing');
-        setSyncMessage('Sincronizando con el servidor...');
+        setSyncMessage('Sincronizando con Google Drive...');
+        showSyncPopupProgress(
+          10,
+          activeDrive?.accessToken ? 'Conectando con Google Drive...' : 'Conectando con tu nube...',
+          'Sincronizando biblioteca'
+        );
       }
       try {
         const s = stateRef.current;
@@ -3775,18 +3874,32 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         };
 
         let merged: RemoteSyncPayload;
+        const noLocalChanges =
+          hasBaseline &&
+          scopes.size === 0 &&
+          booksToSend.length === 0 &&
+          sentBooks.length === 0 &&
+          sentBookmarks.length === 0 &&
+          sentAnnotations.length === 0 &&
+          sentNotes.length === 0 &&
+          sentDesigns.length === 0 &&
+          sentChats.length === 0;
+
         if (activeDrive?.accessToken) {
           const driveRes = await syncStateWithGoogleDrive(
             cfg,
             activeDrive,
             triggerPayloadData,
-            persistGoogleDriveAuth
+            persistGoogleDriveAuth,
+            silent ? undefined : (pct, detail) => showSyncPopupProgress(pct, detail, 'Sincronizando con Google Drive'),
+            noLocalChanges
           );
           merged = driveRes.merged;
           if (driveRes.modifiedTime) {
             lastDriveModifiedTimeRef.current = driveRes.modifiedTime;
           }
         } else {
+          if (!silent) showSyncPopupProgress(45, 'Enviando y combinando datos...');
           merged = await syncFullState(
             cfg,
             triggerPayloadData,
@@ -3796,6 +3909,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             keepCoverIds,
             lastRemoteUpdatedAtRef.current
           );
+          if (!silent) showSyncPopupProgress(85, 'Aplicando datos sincronizados...');
         }
 
         for (const sc of scopes) dirtyScopesRef.current.delete(sc);
@@ -3830,26 +3944,34 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         updateSyncConfig({ lastSyncedAt: now });
         setServerOnline(true);
         setSyncStatus('ok');
-        setSyncMessage(
-          activeDrive?.accessToken
-            ? `Google Drive sincronizado (${nextBooks.length} títulos)`
-            : `Sincronizado (${nextBooks.length} títulos)`
-        );
+        const doneMsg = activeDrive?.accessToken
+          ? `Google Drive sincronizado (${nextBooks.length} títulos)`
+          : `Sincronizado (${nextBooks.length} títulos)`;
+        setSyncMessage(doneMsg);
         if (!silent) {
-          showToast(
-            activeDrive?.accessToken
-              ? 'Biblioteca sincronizada con Google Drive'
-              : 'Biblioteca sincronizada con el servidor'
+          completeSyncPopup(
+            'Tu biblioteca, progreso y personalización ya están al día.',
+            `${nextBooks.length} títulos · ${activeDrive?.accessToken ? 'Google Drive' : 'Nube'}`
           );
         }
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'No se pudo conectar con la nube';
         if (!silent) {
           setSyncStatus('error');
-          setSyncMessage(err instanceof Error ? err.message : 'No se pudo conectar al servidor');
+          setSyncMessage(errMsg);
+          failSyncPopup(errMsg);
         }
       }
     },
-    [applyRemotePayload, persistPendingTombstones, showToast, updateSyncConfig]
+    [
+      applyRemotePayload,
+      completeSyncPopup,
+      failSyncPopup,
+      persistPendingTombstones,
+      showSyncPopupProgress,
+      showToast,
+      updateSyncConfig,
+    ]
   );
 
   /**
@@ -3875,29 +3997,43 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     let downloaded = 0;
     let failed = 0;
 
-    setOfflineSyncProgress(
-      useDrive
-        ? 'Conectando con tu carpeta Komolib/Libros en Google Drive...'
-        : 'Conectando con tu bóveda en la nube...'
-    );
+    const initLabel = useDrive
+      ? 'Conectando con tu carpeta Komolib/Libros en Google Drive...'
+      : 'Conectando con tu bóveda en la nube...';
+    setOfflineSyncProgress(initLabel);
+    showSyncPopupProgress(5, initLabel, 'Sincronizando libros offline');
     try {
       await triggerSync(true);
 
       const currentBooks = stateRef.current.books.filter((b) => !b.isDemo);
-      const localBooks: BookItem[] = [];
+      const localBooksToUpload: BookItem[] = [];
       const missingLocalBooks: BookItem[] = [];
 
       for (const b of currentBooks) {
         const rec = await dbGetBookFile(b.id);
-        if (rec || b.nativeFileUri) localBooks.push(b);
-        else missingLocalBooks.push(b);
+        if (rec || b.nativeFileUri) {
+          // Skip books that are already confirmed uploaded in Drive / cloud!
+          const alreadyUploaded = useDrive ? Boolean(b.driveFileId && b.hasRemoteFile) : Boolean(b.hasRemoteFile);
+          if (!alreadyUploaded) {
+            localBooksToUpload.push(b);
+          }
+        } else {
+          missingLocalBooks.push(b);
+        }
       }
 
-      // Step 1: Upload all local book files from this device to Google Drive (or Render fallback)
-      for (let i = 0; i < localBooks.length; i++) {
-        const b = localBooks[i];
-        setOfflineSyncProgress(
-          `${useDrive ? 'Subiendo a Google Drive' : 'Subiendo a la nube'} (${i + 1}/${localBooks.length}): ${b.title}`
+      const totalSteps = Math.max(1, localBooksToUpload.length + missingLocalBooks.length);
+      let completedSteps = 0;
+
+      // Step 1: Upload only local book files not yet in Google Drive (or Render fallback)
+      for (let i = 0; i < localBooksToUpload.length; i++) {
+        const b = localBooksToUpload[i];
+        const stepLabel = `${useDrive ? 'Subiendo a Drive' : 'Subiendo a la nube'} (${i + 1}/${localBooksToUpload.length}): ${b.title}`;
+        setOfflineSyncProgress(stepLabel);
+        showSyncPopupProgress(
+          10 + Math.round((completedSteps / totalSteps) * 80),
+          stepLabel,
+          'Sincronizando libros offline'
         );
         try {
           if (useDrive && activeDrive) {
@@ -3944,13 +4080,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } catch {
           failed++;
         }
+        completedSteps++;
       }
 
       // Step 2: Download all missing books from Google Drive (or Render) to local IndexedDB
       for (let i = 0; i < missingLocalBooks.length; i++) {
         const b = missingLocalBooks[i];
-        setOfflineSyncProgress(
-          `${useDrive ? 'Descargando de Drive' : 'Descargando offline'} (${i + 1}/${missingLocalBooks.length}): ${b.title}`
+        const stepLabel = `${useDrive ? 'Descargando de Drive' : 'Descargando offline'} (${i + 1}/${missingLocalBooks.length}): ${b.title}`;
+        setOfflineSyncProgress(stepLabel);
+        showSyncPopupProgress(
+          10 + Math.round((completedSteps / totalSteps) * 80),
+          stepLabel,
+          'Sincronizando libros offline'
         );
         try {
           let resolvedDriveId = b.driveFileId;
@@ -3978,32 +4119,41 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } catch {
           failed++;
         }
+        completedSteps++;
       }
 
-      dirtyScopesRef.current.add('books');
-      await triggerSync(true);
+      if (uploaded > 0 || downloaded > 0) {
+        showSyncPopupProgress(94, 'Guardando registro actualizado...', 'Sincronizando libros offline');
+        dirtyScopesRef.current.add('books');
+        await triggerSync(true);
+      }
 
       const parts: string[] = [];
       if (uploaded > 0) parts.push(`${uploaded} subido(s)`);
       if (downloaded > 0) parts.push(`${downloaded} guardado(s) offline`);
       if (parts.length > 0) {
-        showToast(
-          `${useDrive ? 'Google Drive listo' : 'Sincronización offline lista'}: ${parts.join(' · ')}`
+        completeSyncPopup(
+          'Todos los archivos sincronizados correctamente.',
+          parts.join(' · ')
         );
       } else if (failed > 0) {
-        showToast(
-          useDrive
-            ? 'Algunos libros aún no han sido subidos a Google Drive desde el otro dispositivo'
-            : 'Algunos libros aún no han sido subidos desde el otro dispositivo'
+        completeSyncPopup(
+          'Algunos libros aún no han sido subidos desde el otro dispositivo.',
+          `${failed} pendiente(s)`
         );
       } else {
-        showToast('Todos tus libros ya están disponibles sin internet en este dispositivo');
+        completeSyncPopup(
+          'Todos tus libros ya están disponibles sin internet en este dispositivo.'
+        );
       }
+      return { uploaded, downloaded, failed };
+    } catch (err) {
+      failSyncPopup(err instanceof Error ? err.message : 'Error al sincronizar archivos offline');
       return { uploaded, downloaded, failed };
     } finally {
       setOfflineSyncProgress('');
     }
-  }, [persistGoogleDriveAuth, showToast, triggerSync]);
+  }, [completeSyncPopup, failSyncPopup, persistGoogleDriveAuth, showSyncPopupProgress, showToast, triggerSync]);
 
   const connectGoogleDrive = useCallback(
     (opts?: { switchAccount?: boolean; forceConsent?: boolean }) => {
@@ -4037,6 +4187,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   );
 
   const disconnectGoogleDrive = useCallback(async () => {
+    clearGoogleDriveMemoryCache();
+    lastDriveModifiedTimeRef.current = '';
     persistGoogleDriveAuth(null);
     syncedBookUpdatedAtRef.current.clear();
     syncedCoverSigRef.current.clear();
@@ -4055,6 +4207,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       setSyncStatus('syncing');
       setSyncMessage(`Conectando Google Drive (${parsed.email})...`);
+      showSyncPopupProgress(15, `Conectando con ${parsed.email}...`, 'Conectando Google Drive');
       try {
         const cfg = stateRef.current.syncConfig;
         const prevAuth = stateRef.current.googleDriveAuth;
@@ -4088,8 +4241,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setProfile(nextProfile);
         await dbSetKV('profile', nextProfile);
 
-        const pulled = await pullStateFromGoogleDrive(cfg, initialized, persistGoogleDriveAuth);
+        const pulled = await pullStateFromGoogleDrive(
+          cfg,
+          initialized,
+          persistGoogleDriveAuth,
+          (pct, detail) => showSyncPopupProgress(pct, detail, 'Sincronizando Google Drive')
+        );
+        if (pulled.modifiedTime) {
+          lastDriveModifiedTimeRef.current = pulled.modifiedTime;
+        }
         if (pulled.state) {
+          showSyncPopupProgress(75, 'Restaurando libros, progreso y personalización...', 'Sincronizando Google Drive');
           await applyRemotePayload(pulled.state, s.books.filter((b) => !b.isDemo).length === 0);
           // Sync saved PIN automatically from Drive profile if present
           const remotePin = pulled.state.profile?.accountPin?.trim();
@@ -4097,16 +4259,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             updateSyncConfig({ savedPin: remotePin, accountEmail: initialized.email });
           }
         }
-        dirtyScopesRef.current.add('books');
-        dirtyScopesRef.current.add('personalization');
-        await triggerSync(true);
-        showToast(`¡Google Drive conectado (${initialized.email})! Carpeta Komolib lista.`);
-      } catch (err) {
-        setSyncStatus('error');
-        setSyncMessage(
-          err instanceof Error ? err.message : 'Error al inicializar la carpeta en Google Drive'
+        if (s.books.filter((b) => !b.isDemo).length > 0 || !pulled.state) {
+          dirtyScopesRef.current.add('books');
+          dirtyScopesRef.current.add('personalization');
+          await triggerSync(true);
+        }
+        const totalTitles = stateRef.current.books.filter((b) => !b.isDemo).length;
+        completeSyncPopup(
+          `Conectado a Google Drive (${initialized.email}).`,
+          `${totalTitles} títulos listos en Komolib/Libros`
         );
-        showToast('No se pudo configurar la carpeta Komolib en Google Drive');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Error al inicializar la carpeta en Google Drive';
+        setSyncStatus('error');
+        setSyncMessage(msg);
+        failSyncPopup(msg);
       }
     },
     [applyRemotePayload, persistGoogleDriveAuth, showToast, triggerSync]
@@ -4173,17 +4340,38 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             return;
           }
         }
+        // Only show sync popup when pulling genuinely NEW remote changes!
+        const prevModTime = lastDriveModifiedTimeRef.current;
+        let popupShown = false;
         const pulled = await pullStateFromGoogleDrive(
           stateRef.current.syncConfig,
           stateRef.current.googleDriveAuth || auth,
-          persistGoogleDriveAuth
+          persistGoogleDriveAuth,
+          (pct, detail) => {
+            if (!checkVersionOnly && prevModTime && pct < 30) return;
+            if (pct >= 35) {
+              popupShown = true;
+              showSyncPopupProgress(pct, detail, 'Recibiendo cambios de otro dispositivo');
+            }
+          }
         );
         if (!active) return;
+        const hasNewRemoteData = Boolean(pulled.state && !pulled.fromCache && pulled.modifiedTime !== prevModTime);
         if (pulled.modifiedTime) {
           lastDriveModifiedTimeRef.current = pulled.modifiedTime;
         }
-        if (pulled.state) {
-          await applyRemotePayload(pulled.state);
+        if (pulled.state && hasNewRemoteData) {
+          if (!popupShown) {
+            popupShown = true;
+            showSyncPopupProgress(80, 'Aplicando cambios recibidos...', 'Recibiendo cambios de otro dispositivo');
+          }
+          const updatedBooks = await applyRemotePayload(pulled.state);
+          completeSyncPopup(
+            'Cambios recibidos y aplicados correctamente.',
+            `${updatedBooks.length} títulos · Google Drive`
+          );
+        } else if (popupShown) {
+          dismissSyncPopup();
         }
         setSyncStatus('ok');
         setSyncMessage(`Google Drive activo (${auth.email})`);
@@ -6057,6 +6245,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dismissRemoteSession,
         syncStatus,
         syncMessage,
+        syncPopup,
+        dismissSyncPopup,
         offlineSyncProgress,
         triggerSync,
         syncAllBookFilesForOffline,

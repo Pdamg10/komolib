@@ -20,6 +20,7 @@ import { RightPanel } from './components/RightPanel';
 import { SharedReadingView } from './components/SharedReadingView';
 import { Sidebar } from './components/Sidebar';
 import { StudioModal } from './components/StudioModal';
+import { SyncProgressModal } from './components/SyncProgressModal';
 import { TopBar } from './components/TopBar';
 import { LibraryProvider, useLibrary } from './context/LibraryContext';
 import { extractFilesFromDataTransfer, isImageFile } from './utils/fileFolderImport';
@@ -369,6 +370,7 @@ const AppWorkspace: React.FC = () => {
       {editingBook && <BookDetailModal />}
       {missingFileBook && <MissingFileModal />}
       {profileModalOpen && <ProfileModal />}
+      <SyncProgressModal />
       <AudioPlayerBar />
 
       {/* Toast */}

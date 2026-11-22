@@ -32,6 +32,22 @@ const KOMOLIB_ROOT_FOLDER_NAME = 'Komolib';
 const KOMOLIB_BOOKS_FOLDER_NAME = 'Libros';
 const KOMOLIB_STATE_FILE_NAME = 'komolib-state.json';
 
+// In-memory speed caches: eliminate redundant folder checks & multi-MB state downloads when Drive hasn't changed!
+const verifiedFoldersCache = new Map<string, { rootFolderId: string; booksFolderId: string; verifiedAt: number }>();
+let lastDriveStateCache: {
+  email: string;
+  fileId: string;
+  modifiedTime: string;
+  state: RemoteSyncPayload;
+} | null = null;
+
+export function clearGoogleDriveMemoryCache(): void {
+  verifiedFoldersCache.clear();
+  lastDriveStateCache = null;
+}
+
+export type DriveSyncProgressCallback = (pct: number, detail: string) => void;
+
 function base64UrlDecodeUtf8(input: string): string {
   const padded = input.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(input.length / 4) * 4, '=');
   const bin = atob(padded);
@@ -226,6 +242,16 @@ export async function ensureKomolibDriveFolders(
   onAuthUpdated?: (next: GoogleDriveAuth) => void
 ): Promise<GoogleDriveAuth> {
   let cur = auth;
+  const cacheKey = (cur.email || '').toLowerCase();
+  const cached = cacheKey ? verifiedFoldersCache.get(cacheKey) : undefined;
+  if (
+    cached &&
+    Date.now() - cached.verifiedAt < 10 * 60 * 1000 &&
+    cur.rootFolderId === cached.rootFolderId &&
+    cur.booksFolderId === cached.booksFolderId
+  ) {
+    return cur;
+  }
 
   // Verify or find/create root `Komolib` folder
   let rootId = cur.rootFolderId || '';
@@ -320,6 +346,13 @@ export async function ensureKomolibDriveFolders(
     rootFolderId: rootId,
     booksFolderId,
   };
+  if (cacheKey) {
+    verifiedFoldersCache.set(cacheKey, {
+      rootFolderId: rootId,
+      booksFolderId,
+      verifiedAt: Date.now(),
+    });
+  }
   if (updated.rootFolderId !== auth.rootFolderId || updated.booksFolderId !== auth.booksFolderId) {
     onAuthUpdated?.(updated);
   }
@@ -359,11 +392,14 @@ export async function getGoogleDriveStateVersion(
 export async function pullStateFromGoogleDrive(
   config: SyncConfig,
   auth: GoogleDriveAuth,
-  onAuthUpdated?: (next: GoogleDriveAuth) => void
-): Promise<{ state: RemoteSyncPayload | null; modifiedTime: string; auth: GoogleDriveAuth }> {
+  onAuthUpdated?: (next: GoogleDriveAuth) => void,
+  onProgress?: DriveSyncProgressCallback
+): Promise<{ state: RemoteSyncPayload | null; modifiedTime: string; fromCache?: boolean; auth: GoogleDriveAuth }> {
+  onProgress?.(12, 'Verificando carpeta Komolib en Google Drive...');
   let cur = await ensureKomolibDriveFolders(config, auth, onAuthUpdated);
 
   // Always check for the newest komolib-state.json so Tablet & Phone never read different copies
+  onProgress?.(24, 'Comprobando versión en Google Drive...');
   const version = await getGoogleDriveStateVersion(config, cur, onAuthUpdated);
   cur = version.auth;
   const stateFileId = version.fileId || cur.stateFileId || '';
@@ -372,6 +408,24 @@ export async function pullStateFromGoogleDrive(
     return { state: null, modifiedTime: '', auth: cur };
   }
 
+  // Ultra-fast path: Drive modifiedTime matches our in-memory snapshot -> skip downloading multi-MB JSON!
+  if (
+    lastDriveStateCache &&
+    lastDriveStateCache.email === cur.email &&
+    lastDriveStateCache.fileId === stateFileId &&
+    version.modifiedTime &&
+    lastDriveStateCache.modifiedTime === version.modifiedTime
+  ) {
+    onProgress?.(45, 'Versión remota al día (caché local)...');
+    return {
+      state: lastDriveStateCache.state,
+      modifiedTime: version.modifiedTime,
+      fromCache: true,
+      auth: cur,
+    };
+  }
+
+  onProgress?.(38, 'Descargando datos desde Google Drive...');
   const dl = await driveFetch(
     config,
     cur,
@@ -382,6 +436,8 @@ export async function pullStateFromGoogleDrive(
   cur = dl.auth;
   if (dl.res.status === 404) {
     cur = { ...cur, stateFileId: '' };
+    verifiedFoldersCache.delete((cur.email || '').toLowerCase());
+    if (lastDriveStateCache?.fileId === stateFileId) lastDriveStateCache = null;
     onAuthUpdated?.(cur);
     return { state: null, modifiedTime: '', auth: cur };
   }
@@ -393,6 +449,15 @@ export async function pullStateFromGoogleDrive(
   if (!text.trim()) return { state: null, modifiedTime: version.modifiedTime, auth: cur };
   try {
     const parsed = JSON.parse(text) as RemoteSyncPayload;
+    if (version.modifiedTime) {
+      lastDriveStateCache = {
+        email: cur.email,
+        fileId: stateFileId,
+        modifiedTime: version.modifiedTime,
+        state: parsed,
+      };
+    }
+    onProgress?.(55, 'Datos descargados de Google Drive...');
     return { state: parsed, modifiedTime: version.modifiedTime, auth: cur };
   } catch {
     return { state: null, modifiedTime: version.modifiedTime, auth: cur };
@@ -631,16 +696,28 @@ export async function syncStateWithGoogleDrive(
   config: SyncConfig,
   auth: GoogleDriveAuth,
   localData: Parameters<typeof mergeSyncStatesClientSide>[1],
-  onAuthUpdated?: (next: GoogleDriveAuth) => void
+  onAuthUpdated?: (next: GoogleDriveAuth) => void,
+  onProgress?: DriveSyncProgressCallback,
+  skipUploadIfNoLocalChanges = false
 ): Promise<{ merged: RemoteSyncPayload; modifiedTime: string; auth: GoogleDriveAuth }> {
-  const pulled = await pullStateFromGoogleDrive(config, auth, onAuthUpdated);
+  const pulled = await pullStateFromGoogleDrive(config, auth, onAuthUpdated, onProgress);
   let cur = pulled.auth;
+
+  // Fast exit: if caller has zero local mutations and Drive already has state, no need to re-upload!
+  if (skipUploadIfNoLocalChanges && pulled.state) {
+    onProgress?.(85, 'Aplicando datos sincronizados...');
+    return { merged: pulled.state, modifiedTime: pulled.modifiedTime, auth: cur };
+  }
+
+  onProgress?.(60, 'Combinando libros, progreso y personalización...');
   const merged = mergeSyncStatesClientSide(pulled.state, localData);
   const bodyJson = JSON.stringify(merged);
   const bodyBytes = new TextEncoder().encode(bodyJson);
+  const sizeMb = (bodyBytes.byteLength / (1024 * 1024)).toFixed(1);
 
   if (cur.stateFileId) {
     const existingStateId = cur.stateFileId;
+    onProgress?.(72, `Subiendo cambios a Google Drive (${sizeMb} MB)...`);
     // Use resumable PATCH so updates work reliably even when komolib-state.json exceeds 5 MB!
     const initPatch = await driveFetch(
       config,
@@ -674,7 +751,12 @@ export async function syncStateWithGoogleDrive(
           throw new Error(`Error al subir actualización a Drive (${putPatch.status}): ${errText.slice(0, 140)}`);
         }
         const savedMeta = (await putPatch.json().catch(() => ({}))) as { id?: string; modifiedTime?: string };
-        return { merged, modifiedTime: savedMeta.modifiedTime || '', auth: cur };
+        const modTime = savedMeta.modifiedTime || '';
+        if (modTime) {
+          lastDriveStateCache = { email: cur.email, fileId: existingStateId, modifiedTime: modTime, state: merged };
+        }
+        onProgress?.(88, 'Actualizando biblioteca local...');
+        return { merged, modifiedTime: modTime, auth: cur };
       }
     }
     if (initPatch.res.status !== 404) {
@@ -696,12 +778,18 @@ export async function syncStateWithGoogleDrive(
         throw new Error(`No se pudo actualizar estado en Drive (${up.res.status}): ${errText.slice(0, 140)}`);
       }
       const savedMeta = (await up.res.json().catch(() => ({}))) as { id?: string; modifiedTime?: string };
-      return { merged, modifiedTime: savedMeta.modifiedTime || '', auth: cur };
+      const modTime = savedMeta.modifiedTime || '';
+      if (modTime) {
+        lastDriveStateCache = { email: cur.email, fileId: existingStateId, modifiedTime: modTime, state: merged };
+      }
+      onProgress?.(88, 'Actualizando biblioteca local...');
+      return { merged, modifiedTime: modTime, auth: cur };
     }
     // File was deleted externally -> recreate below
     cur = { ...cur, stateFileId: '' };
   }
 
+  onProgress?.(72, `Creando respaldo inicial en Google Drive (${sizeMb} MB)...`);
   // Create new `Komolib/komolib-state.json` via resumable upload (handles any library size cleanly!)
   const initRes = await driveFetch(
     config,
@@ -743,7 +831,12 @@ export async function syncStateWithGoogleDrive(
   const created = (await putRes.json()) as { id: string; modifiedTime?: string };
   cur = { ...cur, stateFileId: created.id };
   onAuthUpdated?.(cur);
-  return { merged, modifiedTime: created.modifiedTime || '', auth: cur };
+  const modTime = created.modifiedTime || '';
+  if (modTime) {
+    lastDriveStateCache = { email: cur.email, fileId: created.id, modifiedTime: modTime, state: merged };
+  }
+  onProgress?.(88, 'Actualizando biblioteca local...');
+  return { merged, modifiedTime: modTime, auth: cur };
 }
 
 function sanitizeDriveFileName(raw: string, fallback: string): string {
