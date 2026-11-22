@@ -49,11 +49,24 @@ import {
   isImageFile,
 } from '../utils/fileFolderImport';
 import {
+  consumePendingNativeGoogleAuth,
+  isKomoAndroidNative,
+  openExternalUrlNatively,
   readNativeUriAsBlob,
   saveTextFileLocally,
   shareTextFileNatively,
   type NativeScannedFolderBook,
 } from '../utils/nativeBridge';
+import {
+  buildGoogleOAuthStartUrl,
+  deleteBookFileFromGoogleDrive,
+  downloadBookFileFromGoogleDrive,
+  ensureKomolibDriveFolders,
+  parseGoogleAuthPayloadString,
+  pullStateFromGoogleDrive,
+  syncStateWithGoogleDrive,
+  uploadBookFileToGoogleDrive,
+} from '../services/googleDriveService';
 import {
   getCoverSignature,
   hasDisplayableOriginalCover,
@@ -108,6 +121,7 @@ import type {
   CustomStationeryKit,
   CustomStickerItem,
   CustomSwatchItem,
+  GoogleDriveAuth,
   NavSection,
   NoteItem,
   ReaderJumpTarget,
@@ -240,7 +254,10 @@ interface LibraryContextValue {
   offlineSyncProgress: string;
   triggerSync: (silent?: boolean) => Promise<void>;
   syncAllBookFilesForOffline: () => Promise<{ uploaded: number; downloaded: number; failed: number }>;
-  // Cloud Account by Email & Full Backup/Restore
+  // Cloud Account by Email & Google Drive Personal Cloud + Backup/Restore
+  googleDriveAuth: GoogleDriveAuth | null;
+  connectGoogleDrive: () => void;
+  disconnectGoogleDrive: () => Promise<void>;
   loginWithEmail: (email: string, pin?: string) => Promise<boolean>;
   logoutAccount: () => Promise<void>;
   exportBackupJson: () => void;
@@ -511,6 +528,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [pendingShelfCode, setPendingShelfCode] = useState('');
   const [aiOnline, setAiOnline] = useState(false);
   const [aiModelName, setAiModelName] = useState('');
+  const [googleDriveAuth, setGoogleDriveAuth] = useState<GoogleDriveAuth | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const deletedIdsRef = useRef<string[]>([]);
   const deletedBookmarkIdsRef = useRef<string[]>([]);
@@ -559,6 +577,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     theme,
     profile,
     syncConfig,
+    googleDriveAuth,
     deviceId,
     sharedRooms,
     sharedShelves,
@@ -578,10 +597,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     theme,
     profile,
     syncConfig,
+    googleDriveAuth,
     deviceId,
     sharedRooms,
     sharedShelves,
   };
+
+  const persistGoogleDriveAuth = useCallback((next: GoogleDriveAuth | null) => {
+    stateRef.current.googleDriveAuth = next;
+    setGoogleDriveAuth(next);
+    dbSetKV('googleDriveAuth', next).catch(console.error);
+  }, []);
 
   const allBookmarkDesigns = React.useMemo(
     () => [...BUILTIN_BOOKMARK_DESIGNS, ...customBookmarkDesigns],
@@ -626,6 +652,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         savedPendingTombstones,
         savedThemeTs,
         savedProfileTs,
+        savedGoogleDriveAuth,
       ] = await Promise.all([
         dbGetKV<ThemeConfig>('theme'),
         dbGetKV<CategoryItem[]>('categories'),
@@ -652,7 +679,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }>('pendingTombstones'),
         dbGetKV<number>('themeUpdatedAt'),
         dbGetKV<number>('profileUpdatedAt'),
+        dbGetKV<GoogleDriveAuth | null>('googleDriveAuth'),
       ]);
+
+      if (savedGoogleDriveAuth && savedGoogleDriveAuth.accessToken) {
+        stateRef.current.googleDriveAuth = savedGoogleDriveAuth;
+        setGoogleDriveAuth(savedGoogleDriveAuth);
+      }
 
       if (typeof savedThemeTs === 'number') themeUpdatedAtRef.current = savedThemeTs;
       if (typeof savedProfileTs === 'number') profileUpdatedAtRef.current = savedProfileTs;
@@ -1477,11 +1510,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dirtyScopesRef.current.add(scope);
       }
       const cfg = stateRef.current.syncConfig;
-      if (cfg.liveSync === false || !cfg.serverUrl.trim()) return;
+      const driveAuth = stateRef.current.googleDriveAuth;
+      if (!driveAuth?.accessToken && (cfg.liveSync === false || !cfg.serverUrl.trim())) return;
       if (autoSyncTimerRef.current) window.clearTimeout(autoSyncTimerRef.current);
       autoSyncTimerRef.current = window.setTimeout(async () => {
         const s = stateRef.current;
-        if (s.syncConfig.liveSync === false || !s.syncConfig.serverUrl.trim()) return;
+        const activeDrive = s.googleDriveAuth;
+        if (!activeDrive?.accessToken && (s.syncConfig.liveSync === false || !s.syncConfig.serverUrl.trim())) {
+          return;
+        }
 
         // Snapshot tombstones & dirty scopes before network call so mutations made during flight are NEVER lost!
         const sentBooks = [...deletedIdsRef.current];
@@ -1540,38 +1577,49 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             }
           }
 
-          const merged = await syncFullState(
-            s.syncConfig,
-            {
-              deviceId: s.deviceId,
-              books: booksToSend,
-              bookmarks: sendMarks ? s.bookmarks : undefined,
-              annotations: sendMarks ? s.annotations : undefined,
-              notes: sendNotes ? s.notes : undefined,
-              chatSessions: syncableChats,
-              customBookmarkDesigns: sendMarks ? s.customBookmarkDesigns : undefined,
-              customStationery: sendMarks ? s.customStationery : undefined,
-              categories: sendPersonalization ? s.categories : undefined,
-              collections: sendPersonalization ? s.collections : undefined,
-              readerSettings: sendPersonalization ? s.readerSettings : undefined,
-              theme: pushTheme ? s.theme : null,
-              themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
-              profile: pushProfile ? s.profile : null,
-              profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
-              lastActiveSession: localActiveSessionRef.current,
-              deletedBookIds: sentBooks,
-              deletedBookmarkIds: sentBookmarks,
-              deletedAnnotationIds: sentAnnotations,
-              deletedNoteIds: sentNotes,
-              deletedBookmarkDesignIds: sentDesigns,
-              deletedChatSessionIds: sentChats,
-            },
-            false,
-            true,
-            keepWallpaper,
-            keepCoverIds,
-            lastRemoteUpdatedAtRef.current
-          );
+          const syncPayloadData = {
+            deviceId: s.deviceId,
+            books: booksToSend,
+            bookmarks: sendMarks ? s.bookmarks : undefined,
+            annotations: sendMarks ? s.annotations : undefined,
+            notes: sendNotes ? s.notes : undefined,
+            chatSessions: syncableChats,
+            customBookmarkDesigns: sendMarks ? s.customBookmarkDesigns : undefined,
+            customStationery: sendMarks ? s.customStationery : undefined,
+            categories: sendPersonalization ? s.categories : undefined,
+            collections: sendPersonalization ? s.collections : undefined,
+            readerSettings: sendPersonalization ? s.readerSettings : undefined,
+            theme: pushTheme ? s.theme : null,
+            themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
+            profile: pushProfile ? s.profile : null,
+            profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
+            lastActiveSession: localActiveSessionRef.current,
+            deletedBookIds: sentBooks,
+            deletedBookmarkIds: sentBookmarks,
+            deletedAnnotationIds: sentAnnotations,
+            deletedNoteIds: sentNotes,
+            deletedBookmarkDesignIds: sentDesigns,
+            deletedChatSessionIds: sentChats,
+          };
+
+          const merged = activeDrive?.accessToken
+            ? (
+                await syncStateWithGoogleDrive(
+                  s.syncConfig,
+                  activeDrive,
+                  syncPayloadData,
+                  persistGoogleDriveAuth
+                )
+              ).merged
+            : await syncFullState(
+                s.syncConfig,
+                syncPayloadData,
+                false,
+                true,
+                keepWallpaper,
+                keepCoverIds,
+                lastRemoteUpdatedAtRef.current
+              );
 
           for (const sc of scopes) dirtyScopesRef.current.delete(sc);
 
@@ -2554,13 +2602,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const deleteBook = useCallback(
     async (id: string) => {
+      const victim = stateRef.current.books.find((b) => b.id === id);
       await dbDeleteBook(id);
       if (!deletedIdsRef.current.includes(id)) deletedIdsRef.current.push(id);
       persistPendingTombstones();
       setBooks((prev) => prev.filter((b) => b.id !== id));
       if (activeBook?.id === id) setActiveBook(null);
       if (editingBook?.id === id) setEditingBook(null);
-      if (syncConfig.autoSync && syncConfig.serverUrl) {
+      if (stateRef.current.googleDriveAuth?.accessToken) {
+        deleteBookFileFromGoogleDrive(
+          stateRef.current.syncConfig,
+          stateRef.current.googleDriveAuth,
+          { id, driveFileId: victim?.driveFileId },
+          persistGoogleDriveAuth
+        ).catch(() => undefined);
+      } else if (syncConfig.autoSync && syncConfig.serverUrl) {
         deleteBookFromServer(syncConfig, id).catch(() => undefined);
       }
       showToast('Título eliminado');
@@ -2626,7 +2682,23 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setBooks((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
 
       const cfg = stateRef.current.syncConfig;
-      if ((cfg.autoSync || cfg.liveSync) && cfg.serverUrl) {
+      const driveAuth = stateRef.current.googleDriveAuth;
+      if (driveAuth?.accessToken) {
+        uploadBookFileToGoogleDrive(cfg, driveAuth, updated, persistGoogleDriveAuth)
+          .then((up) => {
+            if (!up.ok) return;
+            const synced: BookItem = {
+              ...updated,
+              hasRemoteFile: true,
+              driveFileId: up.driveFileId || updated.driveFileId,
+              remoteFileName: up.remoteFileName || updated.remoteFileName,
+              format: up.format || updated.format,
+            };
+            dbPutBook(synced).catch(() => undefined);
+            setBooks((prev) => prev.map((b) => (b.id === synced.id ? synced : b)));
+          })
+          .catch(() => undefined);
+      } else if ((cfg.autoSync || cfg.liveSync) && cfg.serverUrl) {
         uploadBookToServer(cfg, updated, stateRef.current.deviceId)
           .then((up) => {
             if (!up.ok) return;
@@ -2662,18 +2734,47 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
-      // 2. If not stored locally yet, try downloading from user's cloud vault (even if hasRemoteFile flag was stale)
+      // 2. If not stored locally yet, try downloading from user's Google Drive first, then Render cloud vault
       const cfg = stateRef.current.syncConfig;
+      const driveAuth = stateRef.current.googleDriveAuth;
       const canTryCloud =
-        Boolean(cfg.serverUrl?.trim()) &&
-        (book.hasRemoteFile || Boolean(cfg.accountEmail) || Boolean(cfg.liveSync));
+        Boolean(driveAuth?.accessToken) ||
+        (Boolean(cfg.serverUrl?.trim()) &&
+          (book.hasRemoteFile || Boolean(cfg.accountEmail) || Boolean(cfg.liveSync)));
 
       if (!fileRecord && canTryCloud) {
         try {
-          showToast(`Descargando "${book.title}" para leer sin internet...`);
-          const blob = await downloadBookFromServer(cfg, book);
+          showToast(
+            driveAuth?.accessToken
+              ? `Descargando "${book.title}" desde tu Google Drive...`
+              : `Descargando "${book.title}" para leer sin internet...`
+          );
+          let blob: Blob | null = null;
+          let resolvedDriveId = book.driveFileId;
+          if (driveAuth?.accessToken) {
+            try {
+              const dl = await downloadBookFileFromGoogleDrive(
+                cfg,
+                driveAuth,
+                book,
+                persistGoogleDriveAuth
+              );
+              blob = dl.blob;
+              resolvedDriveId = dl.driveFileId;
+            } catch {
+              // Fallback to Render server if available
+            }
+          }
+          if (!blob && cfg.serverUrl?.trim()) {
+            blob = await downloadBookFromServer(cfg, book);
+          }
+          if (!blob) throw new Error('Archivo no disponible');
           fileRecord = { id: book.id, blob };
-          await updateBook(book.id, { hasLocalFile: true, hasRemoteFile: true });
+          await updateBook(book.id, {
+            hasLocalFile: true,
+            hasRemoteFile: true,
+            driveFileId: resolvedDriveId,
+          });
           // Extract cover AND repair missing/swapped title/author from the freshly downloaded file!
           const needsCover = !hasDisplayableOriginalCover(book) && book.hasOriginalCover !== false;
           const needsMeta =
@@ -3324,10 +3425,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const triggerSync = useCallback(
     async (silent = false) => {
       const cfg = stateRef.current.syncConfig;
-      if (!cfg.serverUrl.trim()) {
+      const activeDrive = stateRef.current.googleDriveAuth;
+      if (!activeDrive?.accessToken && !cfg.serverUrl.trim()) {
         if (!silent) {
           setSyncStatus('error');
-          setSyncMessage('Configura la URL del servidor primero');
+          setSyncMessage('Conecta Google Drive o configura la URL del servidor primero');
         }
         return;
       }
@@ -3401,38 +3503,49 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           Boolean(s.theme.customWallpaperUrl) &&
           s.theme.customWallpaperUrl === lastSyncedWallpaperRef.current;
 
-        const merged = await syncFullState(
-          cfg,
-          {
-            deviceId: s.deviceId,
-            books: booksToSend,
-            bookmarks: sendMarks ? s.bookmarks : undefined,
-            annotations: sendMarks ? s.annotations : undefined,
-            notes: sendNotes ? s.notes : undefined,
-            chatSessions: syncableChats,
-            customBookmarkDesigns: sendMarks ? s.customBookmarkDesigns : undefined,
-            customStationery: sendMarks ? s.customStationery : undefined,
-            categories: sendPersonalization ? s.categories : undefined,
-            collections: sendPersonalization ? s.collections : undefined,
-            readerSettings: sendPersonalization ? s.readerSettings : undefined,
-            theme: pushTheme ? s.theme : null,
-            themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
-            profile: pushProfile ? s.profile : null,
-            profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
-            lastActiveSession: localActiveSessionRef.current,
-            deletedBookIds: sentBooks,
-            deletedBookmarkIds: sentBookmarks,
-            deletedAnnotationIds: sentAnnotations,
-            deletedNoteIds: sentNotes,
-            deletedBookmarkDesignIds: sentDesigns,
-            deletedChatSessionIds: sentChats,
-          },
-          false,
-          keepCoverIds.size > 0,
-          keepWallpaper,
-          keepCoverIds,
-          lastRemoteUpdatedAtRef.current
-        );
+        const triggerPayloadData = {
+          deviceId: s.deviceId,
+          books: booksToSend,
+          bookmarks: sendMarks ? s.bookmarks : undefined,
+          annotations: sendMarks ? s.annotations : undefined,
+          notes: sendNotes ? s.notes : undefined,
+          chatSessions: syncableChats,
+          customBookmarkDesigns: sendMarks ? s.customBookmarkDesigns : undefined,
+          customStationery: sendMarks ? s.customStationery : undefined,
+          categories: sendPersonalization ? s.categories : undefined,
+          collections: sendPersonalization ? s.collections : undefined,
+          readerSettings: sendPersonalization ? s.readerSettings : undefined,
+          theme: pushTheme ? s.theme : null,
+          themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
+          profile: pushProfile ? s.profile : null,
+          profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
+          lastActiveSession: localActiveSessionRef.current,
+          deletedBookIds: sentBooks,
+          deletedBookmarkIds: sentBookmarks,
+          deletedAnnotationIds: sentAnnotations,
+          deletedNoteIds: sentNotes,
+          deletedBookmarkDesignIds: sentDesigns,
+          deletedChatSessionIds: sentChats,
+        };
+
+        const merged = activeDrive?.accessToken
+          ? (
+              await syncStateWithGoogleDrive(
+                cfg,
+                activeDrive,
+                triggerPayloadData,
+                persistGoogleDriveAuth
+              )
+            ).merged
+          : await syncFullState(
+              cfg,
+              triggerPayloadData,
+              false,
+              keepCoverIds.size > 0,
+              keepWallpaper,
+              keepCoverIds,
+              lastRemoteUpdatedAtRef.current
+            );
 
         for (const sc of scopes) dirtyScopesRef.current.delete(sc);
 
@@ -3466,8 +3579,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         updateSyncConfig({ lastSyncedAt: now });
         setServerOnline(true);
         setSyncStatus('ok');
-        setSyncMessage(`Sincronizado (${nextBooks.length} títulos)`);
-        if (!silent) showToast('Biblioteca sincronizada con el servidor');
+        setSyncMessage(
+          activeDrive?.accessToken
+            ? `Google Drive sincronizado (${nextBooks.length} títulos)`
+            : `Sincronizado (${nextBooks.length} títulos)`
+        );
+        if (!silent) {
+          showToast(
+            activeDrive?.accessToken
+              ? 'Biblioteca sincronizada con Google Drive'
+              : 'Biblioteca sincronizada con el servidor'
+          );
+        }
       } catch (err) {
         if (!silent) {
           setSyncStatus('error');
@@ -3490,8 +3613,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     failed: number;
   }> => {
     const cfg = stateRef.current.syncConfig;
-    if (!cfg.serverUrl.trim() || !cfg.accountEmail) {
-      showToast('Conecta primero tu correo en la nube para sincronizar archivos entre dispositivos');
+    let activeDrive = stateRef.current.googleDriveAuth;
+    const useDrive = Boolean(activeDrive?.accessToken);
+    if (!useDrive && (!cfg.serverUrl.trim() || !cfg.accountEmail)) {
+      showToast('Conecta primero Google Drive o tu correo en la nube para sincronizar archivos');
       return { uploaded: 0, downloaded: 0, failed: 0 };
     }
 
@@ -3499,7 +3624,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     let downloaded = 0;
     let failed = 0;
 
-    setOfflineSyncProgress('Conectando con tu bóveda en la nube...');
+    setOfflineSyncProgress(
+      useDrive
+        ? 'Conectando con tu carpeta Komolib/Libros en Google Drive...'
+        : 'Conectando con tu bóveda en la nube...'
+    );
     try {
       await triggerSync(true);
 
@@ -3513,39 +3642,86 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         else missingLocalBooks.push(b);
       }
 
-      // Step 1: Upload all local book files from this device (re-uploads if Render restarted)
+      // Step 1: Upload all local book files from this device to Google Drive (or Render fallback)
       for (let i = 0; i < localBooks.length; i++) {
         const b = localBooks[i];
-        setOfflineSyncProgress(`Subiendo a la nube (${i + 1}/${localBooks.length}): ${b.title}`);
+        setOfflineSyncProgress(
+          `${useDrive ? 'Subiendo a Google Drive' : 'Subiendo a la nube'} (${i + 1}/${localBooks.length}): ${b.title}`
+        );
         try {
-          const up = await uploadBookToServer(cfg, b, stateRef.current.deviceId);
-          if (up.ok) {
-            uploaded++;
-            const patched: BookItem = {
-              ...b,
-              hasLocalFile: true,
-              hasRemoteFile: true,
-              remoteFileName: up.remoteFileName || b.remoteFileName,
-              format: up.format || b.format,
-            };
-            await dbPutBook(patched);
-            setBooks((prev) => prev.map((x) => (x.id === b.id ? patched : x)));
+          if (useDrive && activeDrive) {
+            const up = await uploadBookFileToGoogleDrive(
+              cfg,
+              activeDrive,
+              b,
+              persistGoogleDriveAuth
+            );
+            activeDrive = up.auth;
+            if (up.ok) {
+              uploaded++;
+              const patched: BookItem = {
+                ...b,
+                hasLocalFile: true,
+                hasRemoteFile: true,
+                driveFileId: up.driveFileId || b.driveFileId,
+                remoteFileName: up.remoteFileName || b.remoteFileName,
+                format: up.format || b.format,
+                updatedAt: Date.now(),
+              };
+              await dbPutBook(patched);
+              setBooks((prev) => prev.map((x) => (x.id === b.id ? patched : x)));
+            } else {
+              failed++;
+            }
           } else {
-            failed++;
+            const up = await uploadBookToServer(cfg, b, stateRef.current.deviceId);
+            if (up.ok) {
+              uploaded++;
+              const patched: BookItem = {
+                ...b,
+                hasLocalFile: true,
+                hasRemoteFile: true,
+                remoteFileName: up.remoteFileName || b.remoteFileName,
+                format: up.format || b.format,
+              };
+              await dbPutBook(patched);
+              setBooks((prev) => prev.map((x) => (x.id === b.id ? patched : x)));
+            } else {
+              failed++;
+            }
           }
         } catch {
           failed++;
         }
       }
 
-      // Step 2: Download all missing books from the cloud vault to this device's local offline storage
+      // Step 2: Download all missing books from Google Drive (or Render) to local IndexedDB
       for (let i = 0; i < missingLocalBooks.length; i++) {
         const b = missingLocalBooks[i];
-        setOfflineSyncProgress(`Descargando offline (${i + 1}/${missingLocalBooks.length}): ${b.title}`);
+        setOfflineSyncProgress(
+          `${useDrive ? 'Descargando de Drive' : 'Descargando offline'} (${i + 1}/${missingLocalBooks.length}): ${b.title}`
+        );
         try {
-          await downloadBookFromServer(cfg, b);
+          let resolvedDriveId = b.driveFileId;
+          if (useDrive && activeDrive) {
+            const dl = await downloadBookFileFromGoogleDrive(
+              cfg,
+              activeDrive,
+              b,
+              persistGoogleDriveAuth
+            );
+            activeDrive = dl.auth;
+            resolvedDriveId = dl.driveFileId;
+          } else {
+            await downloadBookFromServer(cfg, b);
+          }
           downloaded++;
-          const patched: BookItem = { ...b, hasLocalFile: true, hasRemoteFile: true };
+          const patched: BookItem = {
+            ...b,
+            hasLocalFile: true,
+            hasRemoteFile: true,
+            driveFileId: resolvedDriveId,
+          };
           await dbPutBook(patched);
           setBooks((prev) => prev.map((x) => (x.id === b.id ? patched : x)));
         } catch {
@@ -3553,15 +3729,22 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
+      dirtyScopesRef.current.add('books');
       await triggerSync(true);
 
       const parts: string[] = [];
       if (uploaded > 0) parts.push(`${uploaded} subido(s)`);
       if (downloaded > 0) parts.push(`${downloaded} guardado(s) offline`);
       if (parts.length > 0) {
-        showToast(`Sincronización offline lista: ${parts.join(' · ')}`);
+        showToast(
+          `${useDrive ? 'Google Drive listo' : 'Sincronización offline lista'}: ${parts.join(' · ')}`
+        );
       } else if (failed > 0) {
-        showToast('Algunos libros aún no han sido subidos desde el otro dispositivo');
+        showToast(
+          useDrive
+            ? 'Algunos libros aún no han sido subidos a Google Drive desde el otro dispositivo'
+            : 'Algunos libros aún no han sido subidos desde el otro dispositivo'
+        );
       } else {
         showToast('Todos tus libros ya están disponibles sin internet en este dispositivo');
       }
@@ -3569,7 +3752,154 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     } finally {
       setOfflineSyncProgress('');
     }
-  }, [showToast, triggerSync]);
+  }, [persistGoogleDriveAuth, showToast, triggerSync]);
+
+  const connectGoogleDrive = useCallback(() => {
+    const cfg = stateRef.current.syncConfig;
+    const isAndroid = isKomoAndroidNative();
+    const startUrl = buildGoogleOAuthStartUrl(cfg, isAndroid ? 'android' : 'web');
+    if (isAndroid) {
+      const opened = openExternalUrlNatively(startUrl);
+      if (!opened) {
+        window.location.href = startUrl;
+      }
+      return;
+    }
+    window.location.href = startUrl;
+  }, []);
+
+  const disconnectGoogleDrive = useCallback(async () => {
+    persistGoogleDriveAuth(null);
+    syncedBookUpdatedAtRef.current.clear();
+    syncedCoverSigRef.current.clear();
+    lastRemoteUpdatedAtRef.current = 0;
+    setSyncStatus('idle');
+    setSyncMessage('Google Drive desconectado');
+    showToast('Google Drive desconectado en este dispositivo');
+  }, [persistGoogleDriveAuth, showToast]);
+
+  const completeGoogleDriveAuth = useCallback(
+    async (encodedPayload: string) => {
+      const parsed = parseGoogleAuthPayloadString(encodedPayload);
+      if (!parsed) {
+        showToast('No se pudo completar el inicio de sesión con Google Drive');
+        return;
+      }
+      setSyncStatus('syncing');
+      setSyncMessage(`Conectando Google Drive (${parsed.email})...`);
+      try {
+        const cfg = stateRef.current.syncConfig;
+        const initialized = await ensureKomolibDriveFolders(cfg, parsed, persistGoogleDriveAuth);
+        persistGoogleDriveAuth(initialized);
+
+        // Auto-detect & fill email / name / avatar from Google account (zero manual typing!)
+        const s = stateRef.current;
+        const nextProfile: UserProfile = {
+          ...s.profile,
+          email: initialized.email,
+          name:
+            !s.profile.name || s.profile.name === DEFAULT_PROFILE.name
+              ? initialized.name || s.profile.name
+              : s.profile.name,
+          avatarImageUrl: s.profile.avatarImageUrl || initialized.picture || undefined,
+        };
+        setProfile(nextProfile);
+        await dbSetKV('profile', nextProfile);
+
+        const pulled = await pullStateFromGoogleDrive(cfg, initialized, persistGoogleDriveAuth);
+        if (pulled.state) {
+          await applyRemotePayload(pulled.state, s.books.filter((b) => !b.isDemo).length === 0);
+        }
+        dirtyScopesRef.current.add('books');
+        dirtyScopesRef.current.add('personalization');
+        await triggerSync(true);
+        showToast(`¡Google Drive conectado (${initialized.email})! Carpeta Komolib lista.`);
+      } catch (err) {
+        setSyncStatus('error');
+        setSyncMessage(
+          err instanceof Error ? err.message : 'Error al inicializar la carpeta en Google Drive'
+        );
+        showToast('No se pudo configurar la carpeta Komolib en Google Drive');
+      }
+    },
+    [applyRemotePayload, persistGoogleDriveAuth, showToast, triggerSync]
+  );
+
+  // Capture Google Drive OAuth callback from BOTH Web URL hash (#gdrive_auth=...) and Android deep link
+  useEffect(() => {
+    if (!ready) return;
+    const win = window as unknown as {
+      __komoGoogleAuthResult?: (payload: { encoded?: string }) => void;
+    };
+    win.__komoGoogleAuthResult = (payload) => {
+      if (payload?.encoded) {
+        void completeGoogleDriveAuth(payload.encoded);
+      }
+    };
+
+    // 1. Check Web URL fragment #gdrive_auth=...
+    if (typeof window !== 'undefined' && window.location.hash.includes('gdrive_auth=')) {
+      const m = window.location.hash.match(/gdrive_auth=([^&]+)/);
+      if (m?.[1]) {
+        const decoded = decodeURIComponent(m[1]);
+        try {
+          window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+        } catch {
+          // ignore
+        }
+        void completeGoogleDriveAuth(decoded);
+      }
+    }
+
+    // 2. Check pending Android deep-link payload captured during Activity launch
+    const pendingNative = consumePendingNativeGoogleAuth();
+    if (pendingNative) {
+      void completeGoogleDriveAuth(pendingNative);
+    }
+
+    return () => {
+      delete win.__komoGoogleAuthResult;
+    };
+  }, [ready, completeGoogleDriveAuth]);
+
+  // Pull latest state from Google Drive on startup & resume when Drive is connected (0% Render traffic!)
+  useEffect(() => {
+    if (!ready || !googleDriveAuth?.accessToken) return;
+    let active = true;
+    const syncDriveNow = async () => {
+      const auth = stateRef.current.googleDriveAuth;
+      if (!active || !auth?.accessToken) return;
+      try {
+        const pulled = await pullStateFromGoogleDrive(
+          stateRef.current.syncConfig,
+          auth,
+          persistGoogleDriveAuth
+        );
+        if (!active) return;
+        if (pulled.state) {
+          await applyRemotePayload(pulled.state);
+        }
+        setSyncStatus('ok');
+        setSyncMessage(`Google Drive activo (${auth.email})`);
+      } catch {
+        // offline or transient Drive hiccup
+      }
+    };
+    void syncDriveNow();
+    const onResume = () => {
+      if (document.visibilityState === 'hidden') return;
+      void syncDriveNow();
+    };
+    window.addEventListener('online', onResume);
+    window.addEventListener('focus', onResume);
+    document.addEventListener('visibilitychange', onResume);
+    return () => {
+      active = false;
+      window.removeEventListener('online', onResume);
+      window.removeEventListener('focus', onResume);
+      document.removeEventListener('visibilitychange', onResume);
+    };
+  }, [ready, googleDriveAuth?.email, applyRemotePayload, persistGoogleDriveAuth]);
 
   // Cloud Account by Email + Required PIN + Full Backup / Restore
   const loginWithEmail = useCallback(
@@ -4498,8 +4828,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   );
 
   // Live SSE Sync Web <-> APK + Foreground/Online Recovery + Initial silent sync on startup
+  // Automatically paused when Google Drive Personal Cloud is connected so Render Free stays idle!
   useEffect(() => {
-    if (!ready || !deviceId || syncConfig.liveSync === false || !syncConfig.serverUrl.trim()) {
+    if (
+      !ready ||
+      !deviceId ||
+      googleDriveAuth?.accessToken ||
+      syncConfig.liveSync === false ||
+      !syncConfig.serverUrl.trim()
+    ) {
       setLiveConnected(false);
       return;
     }
@@ -4614,6 +4951,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, [
     ready,
     deviceId,
+    googleDriveAuth?.accessToken,
     syncConfig.serverUrl,
     syncConfig.token,
     syncConfig.liveSync,
@@ -5303,6 +5641,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         offlineSyncProgress,
         triggerSync,
         syncAllBookFilesForOffline,
+        googleDriveAuth,
+        connectGoogleDrive,
+        disconnectGoogleDrive,
         loginWithEmail,
         logoutAccount,
         exportBackupJson,

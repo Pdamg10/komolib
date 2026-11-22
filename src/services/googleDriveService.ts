@@ -1,0 +1,870 @@
+import JSZip from 'jszip';
+import type {
+  ActiveReadingSession,
+  BookAnnotation,
+  BookItem,
+  BookmarkDesign,
+  BookmarkItem,
+  CategoryItem,
+  ChatSession,
+  CollectionCard,
+  CustomStationeryKit,
+  GoogleDriveAuth,
+  NoteItem,
+  ReaderSettings,
+  SyncConfig,
+  ThemeConfig,
+  UserProfile,
+} from '../types/library';
+import { dbGetBookFile, dbPutBookFile } from '../db/localDb';
+import { readNativeUriAsBlob } from '../utils/nativeBridge';
+import { isRasterCoverDataUrl } from '../utils/coverHelpers';
+import {
+  fetchApi,
+  parseJsonResponse,
+  resolveServerUrl,
+  type RemoteSyncPayload,
+} from './syncService';
+
+const DRIVE_API = 'https://www.googleapis.com/drive/v3';
+const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3';
+const KOMOLIB_ROOT_FOLDER_NAME = 'Komolib';
+const KOMOLIB_BOOKS_FOLDER_NAME = 'Libros';
+const KOMOLIB_STATE_FILE_NAME = 'komolib-state.json';
+
+function base64UrlDecodeUtf8(input: string): string {
+  const padded = input.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(input.length / 4) * 4, '=');
+  const bin = atob(padded);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+export function parseGoogleAuthPayloadString(rawEncoded: string): GoogleDriveAuth | null {
+  try {
+    const clean = rawEncoded.trim();
+    if (!clean) return null;
+    const json = base64UrlDecodeUtf8(clean);
+    const parsed = JSON.parse(json) as Partial<GoogleDriveAuth> & { error?: string };
+    if (parsed.error || !parsed.accessToken || !parsed.email) return null;
+    return {
+      email: parsed.email.trim().toLowerCase(),
+      name: parsed.name || parsed.email.split('@')[0] || 'Lector Komolib',
+      picture: parsed.picture || '',
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken || '',
+      expiresAt: parsed.expiresAt || Date.now() + 55 * 60 * 1000,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function buildGoogleOAuthStartUrl(
+  config: SyncConfig,
+  platform: 'android' | 'web'
+): string {
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
+  const params = new URLSearchParams();
+  params.set('platform', platform);
+  if (platform === 'web' && typeof window !== 'undefined') {
+    params.set('returnTo', `${window.location.origin}${window.location.pathname}`);
+  }
+  return `${base}/api/google/start?${params.toString()}`;
+}
+
+export async function refreshGoogleAccessToken(
+  config: SyncConfig,
+  auth: GoogleDriveAuth
+): Promise<GoogleDriveAuth> {
+  if (!auth.refreshToken) {
+    throw new Error('Tu sesión de Google Drive expiró. Vuelve a pulsar "Conectar con Google Drive".');
+  }
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
+  const url = `${base}/api/google/refresh`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refreshToken: auth.refreshToken }),
+  });
+  const data = await parseJsonResponse<{ accessToken?: string; expiresAt?: number; error?: string }>(
+    res,
+    url
+  );
+  if (!data.accessToken) {
+    throw new Error(data.error || 'No se pudo renovar el acceso a Google Drive.');
+  }
+  return {
+    ...auth,
+    accessToken: data.accessToken,
+    expiresAt: data.expiresAt || Date.now() + 55 * 60 * 1000,
+  };
+}
+
+export async function ensureFreshDriveAuth(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  onUpdated?: (next: GoogleDriveAuth) => void
+): Promise<GoogleDriveAuth> {
+  if (auth.accessToken && auth.expiresAt > Date.now() + 90_000) {
+    return auth;
+  }
+  const refreshed = await refreshGoogleAccessToken(config, auth);
+  onUpdated?.(refreshed);
+  return refreshed;
+}
+
+async function driveFetch(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  url: string,
+  init: RequestInit = {},
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<{ res: Response; auth: GoogleDriveAuth }> {
+  let current = await ensureFreshDriveAuth(config, auth, onAuthUpdated);
+  const makeHeaders = (token: string) => {
+    const h = new Headers(init.headers || {});
+    h.set('Authorization', `Bearer ${token}`);
+    return h;
+  };
+
+  let res = await fetch(url, { ...init, headers: makeHeaders(current.accessToken) });
+  if (res.status === 401 && current.refreshToken) {
+    current = await refreshGoogleAccessToken(config, current);
+    onAuthUpdated?.(current);
+    res = await fetch(url, { ...init, headers: makeHeaders(current.accessToken) });
+  }
+  return { res, auth: current };
+}
+
+function escapeDriveQuery(val: string): string {
+  return val.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function findDriveFileByQuery(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  q: string,
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<{ file: { id: string; name: string; modifiedTime?: string } | null; auth: GoogleDriveAuth }> {
+  const params = new URLSearchParams({
+    q,
+    fields: 'files(id,name,modifiedTime)',
+    pageSize: '5',
+    orderBy: 'modifiedTime desc',
+    spaces: 'drive',
+  });
+  const { res, auth: nextAuth } = await driveFetch(
+    config,
+    auth,
+    `${DRIVE_API}/files?${params.toString()}`,
+    { method: 'GET' },
+    onAuthUpdated
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Error al consultar Google Drive (${res.status}): ${errText.slice(0, 140)}`);
+  }
+  const data = (await res.json()) as { files?: Array<{ id: string; name: string; modifiedTime?: string }> };
+  return { file: data.files?.[0] || null, auth: nextAuth };
+}
+
+async function createDriveFolder(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  name: string,
+  parentId?: string,
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<{ id: string; auth: GoogleDriveAuth }> {
+  const metadata: Record<string, unknown> = {
+    name,
+    mimeType: 'application/vnd.google-apps.folder',
+  };
+  if (parentId) metadata.parents = [parentId];
+
+  const { res, auth: nextAuth } = await driveFetch(
+    config,
+    auth,
+    `${DRIVE_API}/files?fields=id`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(metadata),
+    },
+    onAuthUpdated
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`No se pudo crear la carpeta "${name}" en Drive (${res.status}): ${errText.slice(0, 140)}`);
+  }
+  const created = (await res.json()) as { id: string };
+  return { id: created.id, auth: nextAuth };
+}
+
+/**
+ * Ensures `Komolib/` and `Komolib/Libros/` exist inside the user's personal Google Drive.
+ */
+export async function ensureKomolibDriveFolders(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<GoogleDriveAuth> {
+  let cur = auth;
+
+  // Verify or find/create root `Komolib` folder
+  let rootId = cur.rootFolderId || '';
+  if (rootId) {
+    const check = await driveFetch(
+      config,
+      cur,
+      `${DRIVE_API}/files/${encodeURIComponent(rootId)}?fields=id,trashed`,
+      { method: 'GET' },
+      onAuthUpdated
+    );
+    cur = check.auth;
+    if (check.res.ok) {
+      const meta = (await check.res.json().catch(() => ({}))) as { trashed?: boolean };
+      if (meta.trashed) rootId = '';
+    } else {
+      rootId = '';
+    }
+  }
+  if (!rootId) {
+    const found = await findDriveFileByQuery(
+      config,
+      cur,
+      `name='${escapeDriveQuery(KOMOLIB_ROOT_FOLDER_NAME)}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      onAuthUpdated
+    );
+    cur = found.auth;
+    if (found.file?.id) {
+      rootId = found.file.id;
+    } else {
+      const created = await createDriveFolder(config, cur, KOMOLIB_ROOT_FOLDER_NAME, undefined, onAuthUpdated);
+      cur = created.auth;
+      rootId = created.id;
+    }
+  }
+
+  // Verify or find/create subfolder `Komolib/Libros`
+  let booksFolderId = cur.booksFolderId || '';
+  if (booksFolderId) {
+    const check = await driveFetch(
+      config,
+      cur,
+      `${DRIVE_API}/files/${encodeURIComponent(booksFolderId)}?fields=id,trashed`,
+      { method: 'GET' },
+      onAuthUpdated
+    );
+    cur = check.auth;
+    if (check.res.ok) {
+      const meta = (await check.res.json().catch(() => ({}))) as { trashed?: boolean };
+      if (meta.trashed) booksFolderId = '';
+    } else {
+      booksFolderId = '';
+    }
+  }
+  if (!booksFolderId) {
+    const found = await findDriveFileByQuery(
+      config,
+      cur,
+      `name='${escapeDriveQuery(KOMOLIB_BOOKS_FOLDER_NAME)}' and '${escapeDriveQuery(rootId)}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      onAuthUpdated
+    );
+    cur = found.auth;
+    if (found.file?.id) {
+      booksFolderId = found.file.id;
+    } else {
+      const created = await createDriveFolder(config, cur, KOMOLIB_BOOKS_FOLDER_NAME, rootId, onAuthUpdated);
+      cur = created.auth;
+      booksFolderId = created.id;
+    }
+  }
+
+  const updated: GoogleDriveAuth = {
+    ...cur,
+    rootFolderId: rootId,
+    booksFolderId,
+  };
+  if (updated.rootFolderId !== auth.rootFolderId || updated.booksFolderId !== auth.booksFolderId) {
+    onAuthUpdated?.(updated);
+  }
+  return updated;
+}
+
+export async function pullStateFromGoogleDrive(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<{ state: RemoteSyncPayload | null; auth: GoogleDriveAuth }> {
+  let cur = await ensureKomolibDriveFolders(config, auth, onAuthUpdated);
+  let stateFileId = cur.stateFileId || '';
+
+  if (!stateFileId) {
+    const found = await findDriveFileByQuery(
+      config,
+      cur,
+      `name='${escapeDriveQuery(KOMOLIB_STATE_FILE_NAME)}' and '${escapeDriveQuery(cur.rootFolderId!)}' in parents and trashed=false`,
+      onAuthUpdated
+    );
+    cur = found.auth;
+    if (found.file?.id) {
+      stateFileId = found.file.id;
+      cur = { ...cur, stateFileId };
+      onAuthUpdated?.(cur);
+    }
+  }
+
+  if (!stateFileId) {
+    return { state: null, auth: cur };
+  }
+
+  const dl = await driveFetch(
+    config,
+    cur,
+    `${DRIVE_API}/files/${encodeURIComponent(stateFileId)}?alt=media`,
+    { method: 'GET' },
+    onAuthUpdated
+  );
+  cur = dl.auth;
+  if (dl.res.status === 404) {
+    cur = { ...cur, stateFileId: '' };
+    onAuthUpdated?.(cur);
+    return { state: null, auth: cur };
+  }
+  if (!dl.res.ok) {
+    const errText = await dl.res.text().catch(() => '');
+    throw new Error(`No se pudo leer Komolib/komolib-state.json (${dl.res.status}): ${errText.slice(0, 120)}`);
+  }
+  const text = await dl.res.text();
+  if (!text.trim()) return { state: null, auth: cur };
+  try {
+    const parsed = JSON.parse(text) as RemoteSyncPayload;
+    return { state: parsed, auth: cur };
+  } catch {
+    return { state: null, auth: cur };
+  }
+}
+
+function mergeSyncStatesClientSide(
+  remote: RemoteSyncPayload | null,
+  localData: {
+    books: BookItem[];
+    bookmarks?: BookmarkItem[];
+    annotations?: BookAnnotation[];
+    notes?: NoteItem[];
+    chatSessions?: ChatSession[];
+    customBookmarkDesigns?: BookmarkDesign[];
+    customStationery?: CustomStationeryKit;
+    categories?: CategoryItem[];
+    collections?: CollectionCard[];
+    readerSettings?: ReaderSettings;
+    theme: ThemeConfig | null;
+    themeUpdatedAt?: number;
+    profile: UserProfile | null;
+    profileUpdatedAt?: number;
+    lastActiveSession?: ActiveReadingSession | null;
+    deletedBookIds?: string[];
+    deletedBookmarkIds?: string[];
+    deletedAnnotationIds?: string[];
+    deletedNoteIds?: string[];
+    deletedBookmarkDesignIds?: string[];
+    deletedChatSessionIds?: string[];
+  }
+): RemoteSyncPayload {
+  const current: RemoteSyncPayload = remote || {
+    updatedAt: 0,
+    books: {},
+    bookmarks: [],
+    annotations: [],
+    notes: [],
+    chatSessions: [],
+    customBookmarkDesigns: [],
+    customStationery: null,
+    categories: null,
+    collections: null,
+    readerSettings: null,
+    theme: null,
+    themeUpdatedAt: 0,
+    profile: null,
+    profileUpdatedAt: 0,
+    lastActiveSession: null,
+    deletedBookIds: [],
+    deletedBookmarkIds: [],
+    deletedAnnotationIds: [],
+    deletedNoteIds: [],
+    deletedBookmarkDesignIds: [],
+    deletedChatSessionIds: [],
+  };
+
+  const mergeTombstones = (a: string[] = [], b: string[] = []) =>
+    Array.from(new Set([...a, ...b])).slice(-500);
+
+  const deletedBookIds = mergeTombstones(current.deletedBookIds, localData.deletedBookIds);
+  const deletedBookmarkIds = mergeTombstones(current.deletedBookmarkIds, localData.deletedBookmarkIds);
+  const deletedAnnotationIds = mergeTombstones(current.deletedAnnotationIds, localData.deletedAnnotationIds);
+  const deletedNoteIds = mergeTombstones(current.deletedNoteIds, localData.deletedNoteIds);
+  const deletedBookmarkDesignIds = mergeTombstones(
+    current.deletedBookmarkDesignIds,
+    localData.deletedBookmarkDesignIds
+  );
+  const deletedChatSessionIds = mergeTombstones(
+    current.deletedChatSessionIds,
+    localData.deletedChatSessionIds
+  );
+
+  const incomingDeletedBooksSet = new Set(localData.deletedBookIds || []);
+  const deletedBooksSet = new Set(deletedBookIds);
+  const deletedBookmarksSet = new Set(deletedBookmarkIds);
+  const deletedAnnotationsSet = new Set(deletedAnnotationIds);
+  const deletedNotesSet = new Set(deletedNoteIds);
+  const deletedDesignsSet = new Set(deletedBookmarkDesignIds);
+  const deletedChatsSet = new Set(deletedChatSessionIds);
+
+  const mergedBooks: Record<string, BookItem> = {};
+  for (const [id, b] of Object.entries(current.books || {})) {
+    if (b && !b.isDemo && !incomingDeletedBooksSet.has(id)) {
+      mergedBooks[id] = b;
+    }
+  }
+
+  for (const rawBook of localData.books || []) {
+    if (!rawBook || rawBook.isDemo) continue;
+    if (incomingDeletedBooksSet.has(rawBook.id)) continue;
+    if (deletedBooksSet.has(rawBook.id) && !current.books?.[rawBook.id]) continue;
+
+    const { nativeFileUri: _ignoreLocalUri, ...book } = rawBook;
+    const prev = mergedBooks[book.id];
+    const prevHasRaster = isRasterCoverDataUrl(prev?.coverDataUrl);
+    const incHasRaster = isRasterCoverDataUrl(book.coverDataUrl);
+    const incomingNewer = !prev || (book.updatedAt || 0) >= (prev.updatedAt || 0);
+
+    if (incomingNewer) {
+      let resolvedCover =
+        book.coverDataUrl === '__KEEP__'
+          ? prev?.coverDataUrl || ''
+          : book.coverDataUrl || prev?.coverDataUrl || '';
+      let resolvedHasOriginal = book.hasOriginalCover;
+      let resolvedSpine = book.spineColor || prev?.spineColor || '#4c6c8a';
+      let resolvedRibbon = book.ribbonColor || prev?.ribbonColor || '#f2ba59';
+
+      if (prevHasRaster && !incHasRaster && book.hasOriginalCover !== false && prev) {
+        resolvedCover = prev.coverDataUrl;
+        resolvedHasOriginal = true;
+        resolvedSpine = prev.spineColor || resolvedSpine;
+        resolvedRibbon = prev.ribbonColor || resolvedRibbon;
+      } else if (incHasRaster && resolvedHasOriginal === undefined) {
+        resolvedHasOriginal = true;
+      }
+
+      mergedBooks[book.id] = {
+        ...prev,
+        ...book,
+        coverDataUrl: resolvedCover,
+        hasOriginalCover: resolvedHasOriginal,
+        spineColor: resolvedSpine,
+        ribbonColor: resolvedRibbon,
+        driveFileId: book.driveFileId || prev?.driveFileId,
+        hasRemoteFile: Boolean(prev?.hasRemoteFile || book.hasRemoteFile || book.driveFileId || prev?.driveFileId),
+        remoteFileName: prev?.remoteFileName || book.remoteFileName,
+      };
+    } else if (prev) {
+      mergedBooks[book.id] = {
+        ...prev,
+        driveFileId: prev.driveFileId || book.driveFileId,
+        hasRemoteFile: Boolean(prev.hasRemoteFile || book.hasRemoteFile || prev.driveFileId || book.driveFileId),
+        ...(incHasRaster && !prevHasRaster
+          ? {
+              coverDataUrl: book.coverDataUrl,
+              hasOriginalCover: true,
+              spineColor: book.spineColor || prev.spineColor,
+              ribbonColor: book.ribbonColor || prev.ribbonColor,
+            }
+          : {}),
+      };
+    }
+  }
+
+  for (const id of incomingDeletedBooksSet) {
+    delete mergedBooks[id];
+  }
+
+  const mergeById = <T extends { id: string; updatedAt?: number; createdAt?: number }>(
+    a: T[] = [],
+    b: T[] | undefined,
+    delSet: Set<string>
+  ): T[] => {
+    if (!b) return a.filter((x) => x?.id && !delSet.has(x.id));
+    const map = new Map<string, T>();
+    for (const item of a) {
+      if (item?.id && !delSet.has(item.id)) map.set(item.id, item);
+    }
+    for (const item of b) {
+      if (!item?.id || delSet.has(item.id)) continue;
+      const prev = map.get(item.id);
+      if (!prev || (item.updatedAt || item.createdAt || 0) >= (prev.updatedAt || prev.createdAt || 0)) {
+        map.set(item.id, item);
+      }
+    }
+    return Array.from(map.values());
+  };
+
+  const incomingThemeTs = Number(localData.themeUpdatedAt || 0);
+  const currentThemeTs = Number(current.themeUpdatedAt || 0);
+  const useIncomingTheme = Boolean(
+    localData.theme && (!current.theme || (incomingThemeTs > 0 && incomingThemeTs >= currentThemeTs))
+  );
+  const resolvedTheme =
+    useIncomingTheme && localData.theme
+      ? {
+          ...localData.theme,
+          customWallpaperUrl:
+            localData.theme.customWallpaperUrl === '__KEEP__'
+              ? current.theme?.customWallpaperUrl || ''
+              : localData.theme.customWallpaperUrl,
+        }
+      : current.theme;
+
+  const incomingProfileTs = Number(localData.profileUpdatedAt || 0);
+  const currentProfileTs = Number(current.profileUpdatedAt || 0);
+  const useIncomingProfile = Boolean(
+    localData.profile && (!current.profile || (incomingProfileTs > 0 && incomingProfileTs >= currentProfileTs))
+  );
+
+  const incomingSession = localData.lastActiveSession;
+  const currentSession = current.lastActiveSession;
+  const mergedSession =
+    incomingSession && (!currentSession || (incomingSession.updatedAt || 0) >= (currentSession.updatedAt || 0))
+      ? incomingSession
+      : currentSession || null;
+
+  return {
+    updatedAt: Date.now(),
+    books: mergedBooks,
+    bookmarks: mergeById(current.bookmarks, localData.bookmarks, deletedBookmarksSet),
+    annotations: mergeById(current.annotations || [], localData.annotations, deletedAnnotationsSet),
+    notes: mergeById(current.notes, localData.notes, deletedNotesSet),
+    chatSessions: mergeById(current.chatSessions || [], localData.chatSessions, deletedChatsSet)
+      .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+      .slice(0, 60),
+    customBookmarkDesigns: mergeById(
+      current.customBookmarkDesigns || [],
+      localData.customBookmarkDesigns,
+      deletedDesignsSet
+    ),
+    customStationery: localData.customStationery || current.customStationery || null,
+    categories: localData.categories || current.categories || null,
+    collections: localData.collections || current.collections || null,
+    readerSettings: localData.readerSettings || current.readerSettings || null,
+    theme: resolvedTheme,
+    themeUpdatedAt: useIncomingTheme ? incomingThemeTs : currentThemeTs,
+    profile: useIncomingProfile ? localData.profile : current.profile,
+    profileUpdatedAt: useIncomingProfile ? incomingProfileTs : currentProfileTs,
+    lastActiveSession: mergedSession,
+    deletedBookIds,
+    deletedBookmarkIds,
+    deletedAnnotationIds,
+    deletedNoteIds,
+    deletedBookmarkDesignIds,
+    deletedChatSessionIds,
+  };
+}
+
+/**
+ * Pulls latest `Komolib/komolib-state.json` from Google Drive, merges changes cleanly,
+ * and writes it back directly to Google Drive (0% load on Render!).
+ */
+export async function syncStateWithGoogleDrive(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  localData: Parameters<typeof mergeSyncStatesClientSide>[1],
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<{ merged: RemoteSyncPayload; auth: GoogleDriveAuth }> {
+  const pulled = await pullStateFromGoogleDrive(config, auth, onAuthUpdated);
+  let cur = pulled.auth;
+  const merged = mergeSyncStatesClientSide(pulled.state, localData);
+  const bodyJson = JSON.stringify(merged);
+
+  if (cur.stateFileId) {
+    const up = await driveFetch(
+      config,
+      cur,
+      `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(cur.stateFileId)}?uploadType=media&fields=id`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+        body: bodyJson,
+      },
+      onAuthUpdated
+    );
+    cur = up.auth;
+    if (!up.res.ok) {
+      const errText = await up.res.text().catch(() => '');
+      throw new Error(`No se pudo actualizar estado en Drive (${up.res.status}): ${errText.slice(0, 140)}`);
+    }
+    return { merged, auth: cur };
+  }
+
+  // Create new `Komolib/komolib-state.json` via resumable upload (handles any library size cleanly!)
+  const initRes = await driveFetch(
+    config,
+    cur,
+    `${DRIVE_UPLOAD_API}/files?uploadType=resumable&fields=id`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: KOMOLIB_STATE_FILE_NAME,
+        parents: [cur.rootFolderId],
+        mimeType: 'application/json',
+      }),
+    },
+    onAuthUpdated
+  );
+  cur = initRes.auth;
+  if (!initRes.res.ok) {
+    const errText = await initRes.res.text().catch(() => '');
+    throw new Error(`No se pudo crear estado en Drive (${initRes.res.status}): ${errText.slice(0, 140)}`);
+  }
+  const uploadLocation = initRes.res.headers.get('location');
+  if (!uploadLocation) {
+    throw new Error('Google Drive no devolvió URL de subida para el respaldo.');
+  }
+  const putRes = await fetch(uploadLocation, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+    body: bodyJson,
+  });
+  if (!putRes.ok) {
+    const errText = await putRes.text().catch(() => '');
+    throw new Error(`Error al subir estado a Drive (${putRes.status}): ${errText.slice(0, 140)}`);
+  }
+  const created = (await putRes.json()) as { id: string };
+  cur = { ...cur, stateFileId: created.id };
+  onAuthUpdated?.(cur);
+  return { merged, auth: cur };
+}
+
+function sanitizeDriveFileName(raw: string, fallback: string): string {
+  const clean = (raw || fallback)
+    .replace(/[\\/:*?"<>|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 140);
+  return clean || fallback;
+}
+
+/**
+ * Uploads a single book file directly from device (IndexedDB or Android SAF nativeFileUri)
+ * into the user's `Google Drive / Komolib / Libros/` folder using resumable upload.
+ */
+export async function uploadBookFileToGoogleDrive(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  book: BookItem,
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<{ ok: boolean; driveFileId?: string; remoteFileName?: string; format?: BookItem['format']; auth: GoogleDriveAuth }> {
+  let cur = await ensureKomolibDriveFolders(config, auth, onAuthUpdated);
+
+  // Check if already present in `Komolib/Libros` by driveFileId or appProperties.komolibBookId
+  if (book.driveFileId) {
+    const check = await driveFetch(
+      config,
+      cur,
+      `${DRIVE_API}/files/${encodeURIComponent(book.driveFileId)}?fields=id,name,trashed`,
+      { method: 'GET' },
+      onAuthUpdated
+    );
+    cur = check.auth;
+    if (check.res.ok) {
+      const info = (await check.res.json().catch(() => ({}))) as { id?: string; name?: string; trashed?: boolean };
+      if (info.id && !info.trashed) {
+        return {
+          ok: true,
+          driveFileId: info.id,
+          remoteFileName: info.name || book.fileName,
+          format: book.format,
+          auth: cur,
+        };
+      }
+    }
+  }
+
+  const existingByProp = await findDriveFileByQuery(
+    config,
+    cur,
+    `'${escapeDriveQuery(cur.booksFolderId!)}' in parents and appProperties has { key='komolibBookId' and value='${escapeDriveQuery(book.id)}' } and trashed=false`,
+    onAuthUpdated
+  );
+  cur = existingByProp.auth;
+  if (existingByProp.file?.id) {
+    return {
+      ok: true,
+      driveFileId: existingByProp.file.id,
+      remoteFileName: existingByProp.file.name,
+      format: book.format,
+      auth: cur,
+    };
+  }
+
+  const stored = await dbGetBookFile(book.id);
+  let uploadBlob: Blob | null = stored?.blob || null;
+  if (!uploadBlob && book.nativeFileUri) {
+    uploadBlob = await readNativeUriAsBlob(book.nativeFileUri, book.mimeType);
+  }
+  if (!uploadBlob) return { ok: false, auth: cur };
+
+  let uploadName = sanitizeDriveFileName(book.fileName || `${book.title}.${book.format}`, `${book.id}.${book.format}`);
+  let uploadFormat: BookItem['format'] = book.format;
+  let uploadMime = book.mimeType || uploadBlob.type || 'application/octet-stream';
+
+  if (book.format === 'images' && stored?.extraImages && stored.extraImages.length > 0) {
+    const zip = new JSZip();
+    for (let i = 0; i < stored.extraImages.length; i++) {
+      const img = stored.extraImages[i];
+      const ext = img.type.includes('png') ? 'png' : img.type.includes('webp') ? 'webp' : 'jpg';
+      zip.file(`page_${String(i + 1).padStart(4, '0')}.${ext}`, img);
+    }
+    uploadBlob = await zip.generateAsync({ type: 'blob' });
+    uploadName = sanitizeDriveFileName(`${book.title}.cbz`, `${book.id}.cbz`);
+    uploadFormat = 'cbz';
+    uploadMime = 'application/vnd.comicbook+zip';
+  }
+
+  const initRes = await driveFetch(
+    config,
+    cur,
+    `${DRIVE_UPLOAD_API}/files?uploadType=resumable&fields=id,name`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': uploadMime,
+        'X-Upload-Content-Length': String(uploadBlob.size),
+      },
+      body: JSON.stringify({
+        name: uploadName,
+        parents: [cur.booksFolderId],
+        mimeType: uploadMime,
+        appProperties: {
+          komolibBookId: book.id,
+        },
+      }),
+    },
+    onAuthUpdated
+  );
+  cur = initRes.auth;
+  if (!initRes.res.ok) {
+    return { ok: false, auth: cur };
+  }
+  const uploadUrl = initRes.res.headers.get('location');
+  if (!uploadUrl) return { ok: false, auth: cur };
+
+  const putRes = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': uploadMime },
+    body: uploadBlob,
+  });
+  if (!putRes.ok) return { ok: false, auth: cur };
+  const uploaded = (await putRes.json()) as { id: string; name?: string };
+  return {
+    ok: true,
+    driveFileId: uploaded.id,
+    remoteFileName: uploaded.name || uploadName,
+    format: uploadFormat,
+    auth: cur,
+  };
+}
+
+/**
+ * Downloads a book file directly from the user's `Google Drive / Komolib / Libros/`
+ * into local IndexedDB so it can be read 100% offline.
+ */
+export async function downloadBookFileFromGoogleDrive(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  book: BookItem,
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<{ blob: Blob; driveFileId: string; auth: GoogleDriveAuth }> {
+  let cur = await ensureKomolibDriveFolders(config, auth, onAuthUpdated);
+  let fileId = book.driveFileId || '';
+
+  if (!fileId) {
+    const byProp = await findDriveFileByQuery(
+      config,
+      cur,
+      `'${escapeDriveQuery(cur.booksFolderId!)}' in parents and appProperties has { key='komolibBookId' and value='${escapeDriveQuery(book.id)}' } and trashed=false`,
+      onAuthUpdated
+    );
+    cur = byProp.auth;
+    if (byProp.file?.id) fileId = byProp.file.id;
+  }
+
+  if (!fileId && book.fileName) {
+    const safeName = sanitizeDriveFileName(book.fileName, '');
+    if (safeName) {
+      const byName = await findDriveFileByQuery(
+        config,
+        cur,
+        `'${escapeDriveQuery(cur.booksFolderId!)}' in parents and name='${escapeDriveQuery(safeName)}' and trashed=false`,
+        onAuthUpdated
+      );
+      cur = byName.auth;
+      if (byName.file?.id) fileId = byName.file.id;
+    }
+  }
+
+  if (!fileId) {
+    throw new Error('Archivo no encontrado en tu carpeta Komolib/Libros de Google Drive (404)');
+  }
+
+  const dl = await driveFetch(
+    config,
+    cur,
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`,
+    { method: 'GET' },
+    onAuthUpdated
+  );
+  cur = dl.auth;
+  if (!dl.res.ok) {
+    throw new Error(`No se pudo descargar desde Google Drive (${dl.res.status})`);
+  }
+  const blob = await dl.res.blob();
+  await dbPutBookFile(book.id, blob);
+  return { blob, driveFileId: fileId, auth: cur };
+}
+
+export async function deleteBookFileFromGoogleDrive(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  book: Pick<BookItem, 'id' | 'driveFileId'>,
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<void> {
+  try {
+    let cur = auth;
+    let fileId = book.driveFileId || '';
+    if (!fileId && cur.booksFolderId) {
+      const found = await findDriveFileByQuery(
+        config,
+        cur,
+        `'${escapeDriveQuery(cur.booksFolderId)}' in parents and appProperties has { key='komolibBookId' and value='${escapeDriveQuery(book.id)}' } and trashed=false`,
+        onAuthUpdated
+      );
+      cur = found.auth;
+      fileId = found.file?.id || '';
+    }
+    if (!fileId) return;
+    await driveFetch(
+      config,
+      cur,
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
+      { method: 'DELETE' },
+      onAuthUpdated
+    );
+  } catch {
+    // ignore cleanup failure
+  }
+}

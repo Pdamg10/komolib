@@ -9,6 +9,8 @@ interface KomoAndroidBridge {
   pickLibraryFolder?: () => boolean;
   getNativeUriSize?: (uri: string) => number;
   readNativeUriChunk?: (uri: string, chunkIndex: number) => string;
+  openExternalUrl?: (url: string) => boolean;
+  consumePendingGoogleAuth?: () => string;
 }
 
 export interface NativeScannedFolderBook {
@@ -51,6 +53,30 @@ function getBridge(): KomoAndroidBridge | undefined {
 
 export function isKomoAndroidNative(): boolean {
   return Boolean(getBridge()?.saveFile);
+}
+
+export function openExternalUrlNatively(url: string): boolean {
+  const bridge = getBridge();
+  if (bridge?.openExternalUrl) {
+    try {
+      return Boolean(bridge.openExternalUrl(url));
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export function consumePendingNativeGoogleAuth(): string {
+  const bridge = getBridge();
+  if (bridge?.consumePendingGoogleAuth) {
+    try {
+      return bridge.consumePendingGoogleAuth() || '';
+    } catch {
+      return '';
+    }
+  }
+  return '';
 }
 
 export function supportsNativeBackupPicker(): boolean {

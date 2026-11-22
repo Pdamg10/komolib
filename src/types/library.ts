@@ -82,6 +82,7 @@ export interface BookItem {
   nativeFileUri?: string; // Persistent Android SAF content:// URI for zero-duplication folder imports
   hasRemoteFile?: boolean;
   remoteFileName?: string;
+  driveFileId?: string; // Google Drive file ID inside user's Komolib/Libros folder
   addedAt: number;
   lastReadAt?: number;
   updatedAt: number;
@@ -298,6 +299,18 @@ export interface UserProfile {
   goalsUpdatedAt?: number;
   booksGoalPerYear?: number;
   pagesGoalPerYear?: number;
+}
+
+export interface GoogleDriveAuth {
+  email: string;
+  name: string;
+  picture?: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  rootFolderId?: string;
+  booksFolderId?: string;
+  stateFileId?: string;
 }
 
 export interface SyncConfig {

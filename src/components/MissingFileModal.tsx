@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { CloudDownload, FolderOpen, HardDrive, Smartphone, X } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import { ACCEPTED_EXTENSIONS } from '../parsers';
+import { downloadBookFileFromGoogleDrive } from '../services/googleDriveService';
 import { downloadBookFromServer, requestBookUploadFromPeer } from '../services/syncService';
 import { BookCoverVisual } from './BookCoverVisual';
 
@@ -13,6 +14,7 @@ export const MissingFileModal: React.FC = () => {
     updateBook,
     openBook,
     syncConfig,
+    googleDriveAuth,
     deviceId,
     showToast,
   } = useLibrary();
@@ -25,61 +27,89 @@ export const MissingFileModal: React.FC = () => {
   if (!missingFileBook) return null;
 
   const book = missingFileBook;
-  const hasCloudAccount = Boolean(syncConfig.accountEmail && syncConfig.serverUrl?.trim());
+  const hasDrive = Boolean(googleDriveAuth?.accessToken);
+  const hasCloudAccount = hasDrive || Boolean(syncConfig.accountEmail && syncConfig.serverUrl?.trim());
 
   const handleRetryCloud = async () => {
     if (busy) return;
     setBusy('cloud');
     setErrorMsg('');
-    setStatusMsg('Buscando archivo en tu nube...');
+    setStatusMsg(hasDrive ? 'Descargando desde tu Google Drive...' : 'Buscando archivo en tu nube...');
     try {
-      // 1. Try direct cloud download first
       let downloaded = false;
-      try {
-        await downloadBookFromServer(syncConfig, book);
-        downloaded = true;
-      } catch (firstErr) {
-        const msg = firstErr instanceof Error ? firstErr.message : '';
-        const isNotFound = msg.includes('404');
-        if (!isNotFound) {
-          throw firstErr;
+      let resolvedDriveId = book.driveFileId;
+
+      // 0. If connected to Google Drive, download directly from `Komolib/Libros` (0% Render traffic!)
+      if (hasDrive && googleDriveAuth) {
+        try {
+          const res = await downloadBookFileFromGoogleDrive(syncConfig, googleDriveAuth, book);
+          resolvedDriveId = res.driveFileId;
+          downloaded = true;
+        } catch {
+          // Fall back to Render / peer relay if file was uploaded before connecting Drive
         }
+      }
 
-        // 2. File is not yet on the cloud server -> ask tablet/other connected device to upload it live!
-        setStatusMsg('Solicitando el libro a tu otro dispositivo conectado...');
-        const reqRes = await requestBookUploadFromPeer(syncConfig, book, deviceId).catch(() => ({
-          ok: false,
-          peersNotified: 0,
-          totalClients: 0,
-        }));
+      // 1. Try direct Render cloud download if not yet downloaded from Drive
+      if (!downloaded && syncConfig.serverUrl?.trim()) {
+        try {
+          await downloadBookFromServer(syncConfig, book);
+          downloaded = true;
+        } catch (firstErr) {
+          const msg = firstErr instanceof Error ? firstErr.message : '';
+          const isNotFound = msg.includes('404');
+          if (!isNotFound && !hasDrive) {
+            throw firstErr;
+          }
 
-        if (reqRes.peersNotified > 0) {
-          for (let attempt = 1; attempt <= 12; attempt++) {
-            setStatusMsg(
-              `Tu otro dispositivo está subiendo el archivo (${attempt * 2}s)...`
-            );
-            await new Promise((r) => setTimeout(r, 2000));
-            try {
-              await downloadBookFromServer(syncConfig, book);
-              downloaded = true;
-              break;
-            } catch {
-              // keep waiting while tablet uploads
+          if (isNotFound) {
+            setStatusMsg('Solicitando el libro a tu otro dispositivo conectado...');
+            const reqRes = await requestBookUploadFromPeer(syncConfig, book, deviceId).catch(() => ({
+              ok: false,
+              peersNotified: 0,
+              totalClients: 0,
+            }));
+
+            if (reqRes.peersNotified > 0) {
+              for (let attempt = 1; attempt <= 12; attempt++) {
+                setStatusMsg(
+                  `Tu otro dispositivo está subiendo el archivo (${attempt * 2}s)...`
+                );
+                await new Promise((r) => setTimeout(r, 2000));
+                try {
+                  await downloadBookFromServer(syncConfig, book);
+                  downloaded = true;
+                  break;
+                } catch {
+                  // keep waiting while tablet uploads
+                }
+              }
             }
           }
         }
       }
 
       if (downloaded) {
-        const readyBook = { ...book, hasLocalFile: true, hasRemoteFile: true };
-        await updateBook(book.id, { hasLocalFile: true, hasRemoteFile: true });
+        const readyBook = {
+          ...book,
+          hasLocalFile: true,
+          hasRemoteFile: true,
+          driveFileId: resolvedDriveId,
+        };
+        await updateBook(book.id, {
+          hasLocalFile: true,
+          hasRemoteFile: true,
+          driveFileId: resolvedDriveId,
+        });
         setMissingFileBook(null);
         await openBook(readyBook);
         return;
       }
 
       setErrorMsg(
-        'Este libro todavía no está subido en tu nube. Abre Komolib en tu tablet con internet y toca de nuevo este botón (se transferirá automático), o pulsa "Sincronizar archivos para leer offline" en Perfil de tu tablet.'
+        hasDrive
+          ? 'Este libro aún no está en tu carpeta Google Drive / Komolib / Libros. En tu tablet, pulsa "Sincronizar libros con Google Drive" en Perfil para subirlo.'
+          : 'Este libro todavía no está subido en tu nube. Abre Komolib en tu tablet con internet y toca de nuevo este botón, o pulsa "Sincronizar archivos para leer offline" en Perfil de tu tablet.'
       );
     } catch (err) {
       setErrorMsg(
@@ -181,6 +211,8 @@ export const MissingFileModal: React.FC = () => {
               <CloudDownload size={15} />{' '}
               {busy === 'cloud'
                 ? statusMsg || 'Descargando...'
+                : hasDrive
+                ? 'Descargar desde mi Google Drive'
                 : 'Descargar desde mi cuenta en la nube'}
             </button>
           )}

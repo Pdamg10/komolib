@@ -36,6 +36,9 @@ const PORT = Number(process.env.PORT || 4123);
 const AUTH_TOKEN = process.env.KOMOLIB_TOKEN || '';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
+const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || 'https://komolib-reader.netlify.app').trim().replace(/\/+$/, '');
 let runtimePublicUrl = (process.env.PUBLIC_URL || '').trim().replace(/\/+$/, '');
 
 function getEffectivePublicUrl(req) {
@@ -372,7 +375,9 @@ app.use(express.json({ limit: '150mb' }));
 // so friends can share/read books mutually without needing the host's private token or seeing private vaults.
 app.use('/api', (req, res, next) => {
   if (!AUTH_TOKEN) return next();
-  if (req.path === '/health' || req.path === '/network-info') return next();
+  if (req.path === '/health' || req.path === '/network-info' || req.path.startsWith('/google/')) {
+    return next();
+  }
 
   const isGuestRoomEndpoint =
     (req.method === 'GET' && /^\/rooms\/[A-Za-z0-9-]+$/.test(req.path)) ||
@@ -581,6 +586,192 @@ ${notesSummary}`;
   } catch (err) {
     return res.status(502).json({
       error: err instanceof Error ? err.message : 'No se pudo contactar a la API de IA',
+    });
+  }
+});
+
+/* -------- Stateless Google Drive OAuth Helper (0 bytes stored on Render!) -------- */
+
+function isAllowedGoogleReturnUrl(raw) {
+  if (!raw || typeof raw !== 'string') return false;
+  try {
+    const u = new URL(raw);
+    if (u.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/i.test(u.hostname)) return true;
+    if (u.protocol === 'https:' && /\.netlify\.app$/i.test(u.hostname)) return true;
+    if (PUBLIC_APP_URL) {
+      const pub = new URL(PUBLIC_APP_URL);
+      if (u.origin === pub.origin) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+app.get('/api/google/status', (_req, res) => {
+  res.json({
+    ok: true,
+    configured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET),
+    clientId: GOOGLE_CLIENT_ID || '',
+  });
+});
+
+app.get('/api/google/start', (req, res) => {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return res.status(503).send(
+      '<html><body style="font-family:sans-serif;padding:24px;max-width:480px;margin:auto;">' +
+        '<h2>Google Drive aún no configurado en el servidor</h2>' +
+        '<p>Agrega <code>GOOGLE_CLIENT_ID</code> y <code>GOOGLE_CLIENT_SECRET</code> en las variables de entorno de Render y vuelve a intentar.</p>' +
+        '</body></html>'
+    );
+  }
+  const platform = req.query.platform === 'android' ? 'android' : 'web';
+  const rawReturn = typeof req.query.returnTo === 'string' ? req.query.returnTo : '';
+  const returnTo = isAllowedGoogleReturnUrl(rawReturn) ? rawReturn : PUBLIC_APP_URL;
+  const publicBase = getEffectivePublicUrl(req) || `http://localhost:${PORT}`;
+  const redirectUri = `${publicBase}/api/google/callback`;
+
+  const statePayload = Buffer.from(
+    JSON.stringify({ platform, returnTo, ts: Date.now() }),
+    'utf8'
+  ).toString('base64url');
+
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: [
+      'https://www.googleapis.com/auth/drive.file',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile',
+    ].join(' '),
+    access_type: 'offline',
+    prompt: 'consent select_account',
+    state: statePayload,
+  });
+
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+});
+
+app.get('/api/google/callback', async (req, res) => {
+  let stateObj = { platform: 'web', returnTo: PUBLIC_APP_URL };
+  try {
+    if (typeof req.query.state === 'string' && req.query.state) {
+      const parsed = JSON.parse(Buffer.from(req.query.state, 'base64url').toString('utf8'));
+      stateObj = {
+        platform: parsed.platform === 'android' ? 'android' : 'web',
+        returnTo: isAllowedGoogleReturnUrl(parsed.returnTo) ? parsed.returnTo : PUBLIC_APP_URL,
+      };
+    }
+  } catch {
+    // fallback default state
+  }
+
+  const sendBack = (payloadObj) => {
+    const encoded = Buffer.from(JSON.stringify(payloadObj), 'utf8').toString('base64url');
+    if (stateObj.platform === 'android') {
+      const deepLink = `com.komolib.reader://oauth#gdrive_auth=${encodeURIComponent(encoded)}`;
+      const ok = !payloadObj.error;
+      return res
+        .status(200)
+        .setHeader('Content-Type', 'text/html; charset=utf-8')
+        .send(
+          `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>` +
+            `<title>Volviendo a Komolib...</title>` +
+            `<style>body{font-family:system-ui,-apple-system,sans-serif;background:#f3ede4;color:#2c2520;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px;text-align:center}` +
+            `.card{background:#fffaf4;border:1px solid #e2d6c8;border-radius:20px;padding:24px;max-width:380px;box-shadow:0 12px 30px rgba(0,0,0,.08)}` +
+            `a.btn{display:inline-block;margin-top:14px;background:#e06d53;color:#fff;text-decoration:none;font-weight:700;padding:12px 20px;border-radius:999px}</style>` +
+            `</head><body><div class="card"><h2>${ok ? '¡Google Drive conectado!' : 'No se pudo conectar'}</h2>` +
+            `<p>${ok ? 'Volviendo automáticamente a Komolib...' : String(payloadObj.error || 'Error de autenticación')}</p>` +
+            `<a class="btn" href="${deepLink}">Abrir Komolib</a></div>` +
+            `<script>window.location.replace(${JSON.stringify(deepLink)});</script></body></html>`
+        );
+    }
+    const baseTarget = stateObj.returnTo.split('#')[0];
+    return res.redirect(`${baseTarget}#gdrive_auth=${encodeURIComponent(encoded)}`);
+  };
+
+  if (req.query.error) {
+    return sendBack({ error: String(req.query.error) });
+  }
+  const code = typeof req.query.code === 'string' ? req.query.code : '';
+  if (!code || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return sendBack({ error: 'Código OAuth faltante o credenciales de Google no configuradas' });
+  }
+
+  try {
+    const publicBase = getEffectivePublicUrl(req) || `http://localhost:${PORT}`;
+    const redirectUri = `${publicBase}/api/google/callback`;
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenData.access_token) {
+      return sendBack({ error: tokenData.error_description || tokenData.error || 'Error al obtener token de Google' });
+    }
+
+    const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const userInfo = await userRes.json().catch(() => ({}));
+
+    return sendBack({
+      email: String(userInfo.email || '').trim().toLowerCase(),
+      name: String(userInfo.name || '').trim(),
+      picture: String(userInfo.picture || '').trim(),
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token || '',
+      expiresAt: Date.now() + Math.max(300, Number(tokenData.expires_in || 3600) - 120) * 1000,
+    });
+  } catch (err) {
+    return sendBack({
+      error: err instanceof Error ? err.message : 'Error de red con Google OAuth',
+    });
+  }
+});
+
+app.post('/api/google/refresh', async (req, res) => {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return res.status(503).json({ error: 'Google Drive OAuth no configurado en el servidor' });
+  }
+  const refreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken.trim() : '';
+  if (!refreshToken) {
+    return res.status(400).json({ error: 'refreshToken requerido' });
+  }
+  try {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+    });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenData.access_token) {
+      return res.status(401).json({
+        error: tokenData.error_description || tokenData.error || 'Sesión de Google Drive expirada',
+      });
+    }
+    return res.json({
+      ok: true,
+      accessToken: tokenData.access_token,
+      expiresAt: Date.now() + Math.max(300, Number(tokenData.expires_in || 3600) - 120) * 1000,
+    });
+  } catch (err) {
+    return res.status(502).json({
+      error: err instanceof Error ? err.message : 'No se pudo refrescar el token de Google',
     });
   }
 });

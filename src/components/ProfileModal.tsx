@@ -38,6 +38,9 @@ export const ProfileModal: React.FC = () => {
     offlineSyncProgress,
     triggerSync,
     syncAllBookFilesForOffline,
+    googleDriveAuth,
+    connectGoogleDrive,
+    disconnectGoogleDrive,
     refreshServerHealth,
     loginWithEmail,
     logoutAccount,
@@ -299,6 +302,114 @@ export const ProfileModal: React.FC = () => {
               </span>
             </button>
           ))}
+        </div>
+
+        {/* Google Drive Personal Cloud (15 GB free per user, 0% Render storage/bandwidth!) */}
+        <div
+          style={{
+            background: 'color-mix(in srgb, var(--accent-secondary) 10%, var(--banner-bg))',
+            border: '1px solid color-mix(in srgb, var(--accent-secondary) 38%, var(--border-subtle))',
+            borderRadius: 16,
+            padding: 14,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 13, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Cloud size={15} style={{ color: 'var(--accent-secondary)' }} />
+              Google Drive Personal (Recomendado · 15 GB gratis)
+            </div>
+            {googleDriveAuth?.email && (
+              <span
+                className="pill-btn"
+                style={{
+                  height: 24,
+                  fontSize: 10.5,
+                  padding: '0 9px',
+                  background: 'color-mix(in srgb, #52b788 20%, var(--card-bg))',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                <CheckCircle2 size={11} style={{ color: '#2d936c' }} /> {googleDriveAuth.email}
+              </span>
+            )}
+          </div>
+
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+            {googleDriveAuth?.email ? (
+              <>
+                Conectado directamente a tu carpeta <strong>Google Drive / Komolib / Libros</strong>. Tus libros, portadas, progreso, marcas y personalización se sincronizan sin pasar por Render.
+              </>
+            ) : (
+              <>
+                Inicia sesión con tu cuenta de Google con un toque: detecta tu correo automáticamente, crea la carpeta <strong>Komolib/Libros</strong> en tu propio Drive y sincroniza tu tablet, teléfono y web gratis.
+              </>
+            )}
+          </div>
+
+          {!googleDriveAuth?.email ? (
+            <button
+              type="button"
+              className="coral-cta-btn"
+              style={{ height: 38, justifyContent: 'center', fontSize: 12.5 }}
+              onClick={connectGoogleDrive}
+            >
+              <Cloud size={15} /> Conectar con Google Drive
+            </button>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="coral-cta-btn"
+                  disabled={busy}
+                  style={{ flex: '1 1 160px', height: 34, fontSize: 12, justifyContent: 'center' }}
+                  onClick={async () => {
+                    if (busy) return;
+                    setBusy(true);
+                    try {
+                      await triggerSync(false);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  <RefreshCw size={13} /> {busy ? 'Sincronizando...' : 'Guardar / Sincronizar Drive'}
+                </button>
+                <button
+                  type="button"
+                  className="pill-btn"
+                  style={{ height: 34, fontSize: 11.5, color: '#c92a2a', background: 'var(--card-bg)' }}
+                  onClick={() => void disconnectGoogleDrive()}
+                >
+                  <LogOut size={12} /> Desconectar Drive
+                </button>
+              </div>
+
+              {books.length > 0 && (
+                <button
+                  type="button"
+                  className="pill-btn"
+                  style={{
+                    height: 34,
+                    justifyContent: 'center',
+                    background: 'var(--accent-secondary)',
+                    color: 'var(--accent-secondary-contrast)',
+                    borderColor: 'transparent',
+                    fontSize: 11.5,
+                  }}
+                  disabled={Boolean(offlineSyncProgress) || busy}
+                  onClick={() => void syncAllBookFilesForOffline()}
+                >
+                  <Download size={13} />{' '}
+                  {offlineSyncProgress ||
+                    `Sincronizar libros con Google Drive (${books.filter((b) => b.hasLocalFile).length}/${books.length} offline)`}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Cloud Account by Email + Automatic Backup */}

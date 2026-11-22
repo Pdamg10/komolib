@@ -73,6 +73,7 @@ public class MainActivity extends BridgeActivity {
 
     private ActivityResultLauncher<Intent> backupPickerLauncher;
     private ActivityResultLauncher<Intent> folderPickerLauncher;
+    private volatile String pendingGoogleAuthPayload = "";
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -139,6 +140,51 @@ public class MainActivity extends BridgeActivity {
                 }
             }
         });
+
+        handleOAuthIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleOAuthIntent(intent);
+    }
+
+    private void handleOAuthIntent(Intent intent) {
+        if (intent == null) return;
+        Uri data = intent.getData();
+        if (data == null) return;
+        if (!"com.komolib.reader".equalsIgnoreCase(data.getScheme())) return;
+        String fragment = data.getFragment();
+        String encoded = "";
+        if (fragment != null && fragment.contains("gdrive_auth=")) {
+            for (String part : fragment.split("&")) {
+                if (part.startsWith("gdrive_auth=")) {
+                    encoded = Uri.decode(part.substring("gdrive_auth=".length()));
+                    break;
+                }
+            }
+        }
+        if (encoded.isEmpty()) {
+            String q = data.getQueryParameter("gdrive_auth");
+            if (q != null) encoded = q;
+        }
+        if (!encoded.isEmpty()) {
+            pendingGoogleAuthPayload = encoded;
+            JSONObject payload = new JSONObject();
+            try {
+                payload.put("encoded", encoded);
+            } catch (Exception ignored) {
+            }
+            emitJsCallback("__komoGoogleAuthResult", payload);
+        }
+    }
+
+    private String takePendingGoogleAuthPayload() {
+        String val = pendingGoogleAuthPayload;
+        pendingGoogleAuthPayload = "";
+        return val != null ? val : "";
     }
 
     private File getBackupTempFile() {
@@ -2455,6 +2501,24 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception e) {
                 return false;
             }
+        }
+
+        @JavascriptInterface
+        public boolean openExternalUrl(String url) {
+            if (url == null || url.trim().isEmpty()) return false;
+            try {
+                Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url.trim()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activity.runOnUiThread(() -> activity.startActivity(intent));
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String consumePendingGoogleAuth() {
+            return activity.takePendingGoogleAuthPayload();
         }
 
         @JavascriptInterface
