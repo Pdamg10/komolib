@@ -590,6 +590,126 @@ ${notesSummary}`;
   }
 });
 
+/* -------- Gemini Multimodal Book Identification (Cover + Opening Pages -> Title, Author, Synopsis) -------- */
+
+app.post('/api/ai/identify-book', async (req, res) => {
+  if (!GEMINI_API_KEY) {
+    return res.status(503).json({ error: 'GEMINI_API_KEY no configurada en el servidor' });
+  }
+
+  const {
+    fileName = '',
+    currentTitle = '',
+    currentAuthor = '',
+    currentDescription = '',
+    coverDataUrl = '',
+    textExcerpt = '',
+  } = req.body || {};
+
+  const parts = [];
+  const promptLines = [
+    'Eres un catalogador bibliográfico experto para la app KomoLib.',
+    'Analiza la imagen de portada (si se proporciona), el extracto de las primeras páginas del libro y los metadatos actuales para determinar:',
+    '1. "title": El título exacto y limpio del libro/manga/audiolibro (sin extensión de archivo, sin etiquetas de descarga ni el autor pegado).',
+    '2. "author": El nombre completo y correcto del autor o autora (formato "Nombre Apellido", no "Apellido, Nombre"). Si realmente no se puede determinar, devuelve "".',
+    '3. "description": Una sinopsis limpia, clara y atractiva en español (entre 2 y 4 frases, sin spoilers, sin números/códigos basura ni etiquetas HTML).',
+    'Responde ÚNICAMENTE con un objeto JSON válido con las claves exactas: {"title":"...","author":"...","description":"..."}.',
+    '',
+    `Archivo: ${String(fileName || '').slice(0, 220)}`,
+    `Título actual: ${String(currentTitle || '').slice(0, 200)}`,
+    `Autor actual: ${String(currentAuthor || '').slice(0, 160)}`,
+  ];
+
+  if (currentDescription && typeof currentDescription === 'string') {
+    promptLines.push(`Sinopsis actual (puede contener ruido o estar incompleta): ${currentDescription.slice(0, 700)}`);
+  }
+  if (textExcerpt && typeof textExcerpt === 'string' && textExcerpt.trim()) {
+    promptLines.push(`\nExtracto de las primeras páginas del libro:\n${textExcerpt.trim().slice(0, 2600)}`);
+  }
+
+  parts.push({ text: promptLines.join('\n') });
+
+  // Attach raster cover image as multimodal inlineData so Gemini can read text from the cover
+  if (typeof coverDataUrl === 'string') {
+    const imgMatch = coverDataUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i);
+    if (imgMatch && imgMatch[2].length < 4 * 1024 * 1024) {
+      const mimeType = imgMatch[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : imgMatch[1].toLowerCase();
+      parts.push({
+        inlineData: {
+          mimeType,
+          data: imgMatch[2].replace(/\s+/g, ''),
+        },
+      });
+    }
+  }
+
+  try {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+      GEMINI_MODEL
+    )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts }],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 600,
+          responseMimeType: 'application/json',
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      return res.status(response.status).json({
+        error: `Error de Gemini (${response.status})`,
+        detail: errText.slice(0, 300),
+      });
+    }
+
+    const data = await response.json();
+    const rawText = (data?.candidates?.[0]?.content?.parts || [])
+      .map((p) => (typeof p?.text === 'string' ? p.text : ''))
+      .join('')
+      .trim();
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          parsed = null;
+        }
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      return res.status(502).json({ error: 'Respuesta inválida del modelo de IA' });
+    }
+
+    return res.json({
+      ok: true,
+      model: GEMINI_MODEL,
+      title: typeof parsed.title === 'string' ? parsed.title.trim() : '',
+      author: typeof parsed.author === 'string' ? parsed.author.trim() : '',
+      description: typeof parsed.description === 'string' ? parsed.description.trim() : '',
+    });
+  } catch (err) {
+    return res.status(502).json({
+      error: err instanceof Error ? err.message : 'No se pudo analizar el libro con IA',
+    });
+  }
+});
+
 /* -------- Stateless Google Drive OAuth Helper (0 bytes stored on Render!) -------- */
 
 function isAllowedGoogleReturnUrl(raw) {
@@ -628,6 +748,9 @@ app.get('/api/google/start', (req, res) => {
   const platform = req.query.platform === 'android' ? 'android' : 'web';
   const rawReturn = typeof req.query.returnTo === 'string' ? req.query.returnTo : '';
   const returnTo = isAllowedGoogleReturnUrl(rawReturn) ? rawReturn : PUBLIC_APP_URL;
+  const loginHint = typeof req.query.loginHint === 'string' ? req.query.loginHint.trim() : '';
+  const forceConsent = req.query.forceConsent === '1';
+  const switchAccount = req.query.switchAccount === '1';
   const publicBase = getEffectivePublicUrl(req) || `http://localhost:${PORT}`;
   const redirectUri = `${publicBase}/api/google/callback`;
 
@@ -646,9 +769,20 @@ app.get('/api/google/start', (req, res) => {
       'https://www.googleapis.com/auth/userinfo.profile',
     ].join(' '),
     access_type: 'offline',
-    prompt: 'consent select_account',
+    include_granted_scopes: 'true',
     state: statePayload,
   });
+
+  if (loginHint) {
+    params.set('login_hint', loginHint);
+  }
+  // Only force consent/account chooser when explicitly requested; otherwise Google
+  // auto-detects the already authorized account on other devices without re-confirming.
+  if (forceConsent) {
+    params.set('prompt', 'consent select_account');
+  } else if (switchAccount) {
+    params.set('prompt', 'select_account');
+  }
 
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
 });

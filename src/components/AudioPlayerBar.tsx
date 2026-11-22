@@ -11,8 +11,9 @@ function fmtTime(sec: number) {
 }
 
 export const AudioPlayerBar: React.FC = () => {
-  const { audioBook, audioUrl, closeAudioPlayer, updateBook } = useLibrary();
+  const { audioBook, audioUrl, closeAudioPlayer, updateBook, showToast } = useLibrary();
   const audioRef = useRef<HTMLAudioElement>(null);
+  const lastSavedSecRef = useRef<number>(-10);
   const [playing, setPlaying] = useState(true);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -21,6 +22,7 @@ export const AudioPlayerBar: React.FC = () => {
   useEffect(() => {
     const el = audioRef.current;
     if (!el || !audioBook || !audioUrl) return;
+    lastSavedSecRef.current = Math.floor(audioBook.audioTime || 0);
     el.currentTime = audioBook.audioTime || 0;
     el.playbackRate = rate;
     el.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
@@ -124,12 +126,29 @@ export const AudioPlayerBar: React.FC = () => {
         ref={audioRef}
         src={audioUrl}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+        onError={() => {
+          setPlaying(false);
+          showToast('Tu dispositivo no soporta este códec de audio nativamente (prueba MP3, M4B, M4A, OGG, OPUS, WAV o FLAC)');
+        }}
+        onEnded={() => {
+          const d = audioRef.current?.duration || duration || 1;
+          setPlaying(false);
+          void updateBook(audioBook.id, {
+            audioTime: d,
+            durationSec: d,
+            progress: 100,
+            readingStatus: 'completed',
+            finishedAt: Date.now(),
+          });
+        }}
         onTimeUpdate={(e) => {
           const t = e.currentTarget.currentTime;
           const d = e.currentTarget.duration || 1;
           setCurrent(t);
-          if (Math.floor(t) % 5 === 0) {
-            updateBook(audioBook.id, {
+          const sec = Math.floor(t);
+          if (Math.abs(sec - lastSavedSecRef.current) >= 10) {
+            lastSavedSecRef.current = sec;
+            void updateBook(audioBook.id, {
               audioTime: t,
               durationSec: d,
               progress: Math.round((t / d) * 100),

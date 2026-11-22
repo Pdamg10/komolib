@@ -493,9 +493,20 @@ public class MainActivity extends BridgeActivity {
             lower.endsWith(".mp4") ||
             lower.endsWith(".m4a") ||
             lower.endsWith(".m4b") ||
+            lower.endsWith(".aac") ||
             lower.endsWith(".ogg") ||
+            lower.endsWith(".oga") ||
+            lower.endsWith(".opus") ||
             lower.endsWith(".wav") ||
             lower.endsWith(".flac") ||
+            lower.endsWith(".webm") ||
+            lower.endsWith(".wma") ||
+            lower.endsWith(".amr") ||
+            lower.endsWith(".3gp") ||
+            lower.endsWith(".aif") ||
+            lower.endsWith(".aiff") ||
+            lower.endsWith(".alac") ||
+            lower.endsWith(".mka") ||
             lower.endsWith(".gif") ||
             lower.endsWith(".ttf") ||
             lower.endsWith(".otf") ||
@@ -1965,9 +1976,23 @@ public class MainActivity extends BridgeActivity {
             low.endsWith(".mp3") ||
             low.endsWith(".m4b") ||
             low.endsWith(".m4a") ||
+            low.endsWith(".aac") ||
             low.endsWith(".ogg") ||
+            low.endsWith(".oga") ||
+            low.endsWith(".opus") ||
             low.endsWith(".wav") ||
             low.endsWith(".flac") ||
+            low.endsWith(".webm") ||
+            low.endsWith(".wma") ||
+            low.endsWith(".amr") ||
+            low.endsWith(".3gp") ||
+            low.endsWith(".aif") ||
+            low.endsWith(".aiff") ||
+            low.endsWith(".caf") ||
+            low.endsWith(".alac") ||
+            low.endsWith(".ac3") ||
+            low.endsWith(".mp2") ||
+            low.endsWith(".mka") ||
             (mimeType != null && mimeType.startsWith("audio/"))
         ) {
             return "audio";

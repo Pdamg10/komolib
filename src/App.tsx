@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { BookOpen, Smartphone, X } from 'lucide-react';
+import { ArrowUp, BookOpen, Smartphone, X } from 'lucide-react';
 import { AnnotationsView } from './components/AnnotationsView';
 import { AudioPlayerBar } from './components/AudioPlayerBar';
 import { BookDetailModal } from './components/BookDetailModal';
@@ -31,6 +31,7 @@ const AppWorkspace: React.FC = () => {
     setNavSection,
     books,
     activeBook,
+    audioBook,
     closeReader,
     openBook,
     importModalOpen,
@@ -50,6 +51,36 @@ const AppWorkspace: React.FC = () => {
     ready,
   } = useLibrary();
   const [globalDragging, setGlobalDragging] = useState(false);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const mainCanvasRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const el = mainCanvasRef.current;
+    if (!el) return;
+    let visible = false;
+    const onScroll = () => {
+      const y = el.scrollTop || window.scrollY || 0;
+      const next = y > 320;
+      if (next !== visible) {
+        visible = next;
+        setShowScrollTop(next);
+      }
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      window.removeEventListener('scroll', onScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = mainCanvasRef.current;
+    if (el && el.scrollTop > 0) {
+      el.scrollTop = 0;
+    }
+    setShowScrollTop(false);
+  }, [navSection]);
 
   // Unified back-gesture handler for BOTH Android APK (MainActivity OnBackPressedCallback) and Web PWA
   const handleAppBack = useCallback((): boolean => {
@@ -210,7 +241,7 @@ const AppWorkspace: React.FC = () => {
       <div className={shellClasses}>
         <Sidebar />
 
-        <main className="main-canvas">
+        <main ref={mainCanvasRef} className="main-canvas">
           <TopBar />
 
           {remoteActiveSession && (
@@ -269,9 +300,33 @@ const AppWorkspace: React.FC = () => {
             <SharedReadingView />
           ) : (
             <>
-              <CategoryStrip />
+              {navSection !== 'audiobooks' && <CategoryStrip />}
               <BookShelf />
             </>
+          )}
+
+          {showScrollTop && !activeBook && (
+            <div
+              className={`scroll-top-anchor ${audioBook ? 'with-audio' : ''}`}
+              aria-hidden="false"
+            >
+              <button
+                type="button"
+                className="scroll-top-btn"
+                onClick={() => {
+                  const behavior: ScrollBehavior = isPerfLite ? 'auto' : 'smooth';
+                  mainCanvasRef.current?.scrollTo({ top: 0, behavior });
+                  if (window.scrollY > 0) {
+                    window.scrollTo({ top: 0, behavior });
+                  }
+                }}
+                title="Volver al inicio"
+                aria-label="Volver al inicio"
+              >
+                <ArrowUp size={17} />
+                <span>Subir</span>
+              </button>
+            </div>
           )}
         </main>
 

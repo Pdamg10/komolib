@@ -7,6 +7,7 @@ import {
   Download,
   Flame,
   FolderUp,
+  KeyRound,
   LogOut,
   Mail,
   RefreshCw,
@@ -43,6 +44,7 @@ export const ProfileModal: React.FC = () => {
     disconnectGoogleDrive,
     refreshServerHealth,
     loginWithEmail,
+    resetAccountPin,
     logoutAccount,
     exportBackupJson,
     shareBackupJson,
@@ -59,17 +61,29 @@ export const ProfileModal: React.FC = () => {
   const imgRef = useRef<HTMLInputElement>(null);
   const backupFileRef = useRef<HTMLInputElement>(null);
   const pinInputRef = useRef<HTMLInputElement>(null);
+  const savedPin = (syncConfig.savedPin || profile.accountPin || '').trim();
   const [emailInput, setEmailInput] = useState(profile.email || syncConfig.accountEmail || '');
-  const [pinInput, setPinInput] = useState('');
+  const [pinInput, setPinInput] = useState(savedPin);
   const [pinError, setPinError] = useState('');
+  const [showEmailFallback, setShowEmailFallback] = useState(false);
+  const [showResetPin, setShowResetPin] = useState(false);
+  const [newPinInput, setNewPinInput] = useState('');
+  const [confirmPinInput, setConfirmPinInput] = useState('');
+  const [resetPinError, setResetPinError] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (profileModalOpen) {
       setEmailInput(profile.email || syncConfig.accountEmail || '');
+      setPinInput((syncConfig.savedPin || profile.accountPin || '').trim());
       setPinError('');
+      setShowEmailFallback(false);
+      setShowResetPin(false);
+      setNewPinInput('');
+      setConfirmPinInput('');
+      setResetPinError('');
     }
-  }, [profileModalOpen, profile.email, syncConfig.accountEmail]);
+  }, [profileModalOpen, profile.email, syncConfig.accountEmail, syncConfig.savedPin, profile.accountPin]);
 
   if (!profileModalOpen) return null;
 
@@ -126,24 +140,29 @@ export const ProfileModal: React.FC = () => {
     }
   };
 
-  const requirePinOrWarn = (): boolean => {
-    if (!pinInput.trim()) {
+  const resolveEffectivePin = (): string => (pinInput.trim() || savedPin).trim();
+
+  const requirePinOrWarn = (): string | null => {
+    const effective = resolveEffectivePin();
+    if (!effective) {
       setPinError('Se requiere PIN');
       showToast('Se requiere PIN');
       pinInputRef.current?.focus();
-      return false;
+      return null;
     }
     setPinError('');
-    return true;
+    return effective;
   };
 
   const handleConnectEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!emailInput.trim() || busy) return;
-    if (!requirePinOrWarn()) return;
+    const effectivePin = requirePinOrWarn();
+    if (!effectivePin) return;
     setBusy(true);
     try {
-      await loginWithEmail(emailInput, pinInput);
+      await loginWithEmail(emailInput, effectivePin);
+      setPinInput(effectivePin);
     } finally {
       setBusy(false);
     }
@@ -151,7 +170,8 @@ export const ProfileModal: React.FC = () => {
 
   const handleSaveNow = async () => {
     if (busy) return;
-    if (!requirePinOrWarn()) return;
+    const effectivePin = requirePinOrWarn();
+    if (!effectivePin) return;
     const targetEmail = (emailInput.trim() || linkedEmail).toLowerCase();
     if (!targetEmail) {
       showToast('Ingresa tu correo electrónico o nombre de usuario');
@@ -159,12 +179,13 @@ export const ProfileModal: React.FC = () => {
     }
     setBusy(true);
     try {
-      const derivedSpace = deriveEmailSpaceId(targetEmail, pinInput);
+      const derivedSpace = deriveEmailSpaceId(targetEmail, effectivePin);
       if (syncConfig.spaceId === derivedSpace && syncConfig.accountEmail === targetEmail) {
         await triggerSync(false);
       } else {
-        await loginWithEmail(targetEmail, pinInput);
+        await loginWithEmail(targetEmail, effectivePin);
       }
+      setPinInput(effectivePin);
     } finally {
       setBusy(false);
     }
@@ -172,16 +193,45 @@ export const ProfileModal: React.FC = () => {
 
   const handleSyncOfflineFiles = async () => {
     if (busy || offlineSyncProgress) return;
-    if (!requirePinOrWarn()) return;
+    const effectivePin = requirePinOrWarn();
+    if (!effectivePin) return;
     const targetEmail = (emailInput.trim() || linkedEmail).toLowerCase();
     if (targetEmail) {
-      const derivedSpace = deriveEmailSpaceId(targetEmail, pinInput);
+      const derivedSpace = deriveEmailSpaceId(targetEmail, effectivePin);
       if (syncConfig.spaceId !== derivedSpace || syncConfig.accountEmail !== targetEmail) {
-        const ok = await loginWithEmail(targetEmail, pinInput);
+        const ok = await loginWithEmail(targetEmail, effectivePin);
         if (!ok) return;
       }
     }
     await syncAllBookFilesForOffline();
+  };
+
+  const handleResetPinSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    const p1 = newPinInput.trim();
+    const p2 = confirmPinInput.trim();
+    if (p1.length < 4) {
+      setResetPinError('El nuevo PIN debe tener al menos 4 caracteres');
+      return;
+    }
+    if (p1 !== p2) {
+      setResetPinError('Los PIN no coinciden');
+      return;
+    }
+    setResetPinError('');
+    setBusy(true);
+    try {
+      const ok = await resetAccountPin(p1, emailInput.trim() || undefined);
+      if (ok) {
+        setPinInput(p1);
+        setNewPinInput('');
+        setConfirmPinInput('');
+        setShowResetPin(false);
+      }
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -210,7 +260,11 @@ export const ProfileModal: React.FC = () => {
 
   const completed = books.filter((b) => b.progress >= 98).length;
   const favorites = books.filter((b) => b.favorite).length;
+  const localFilesCount = books.filter((b) => b.hasLocalFile).length;
+  const isDriveConnected = Boolean(googleDriveAuth?.email);
   const linkedEmail = syncConfig.accountEmail || profile.email || '';
+  const isCloudConnected = isDriveConnected || Boolean(linkedEmail);
+  const showEmailForm = !isDriveConnected && (Boolean(linkedEmail) || showEmailFallback);
   const appOrigin = typeof window !== 'undefined' ? window.location.origin.replace(/\/+$/, '') : '';
   const savedServer = syncConfig.serverUrl.trim().replace(/\/+$/, '');
   const cloudServerMissing =
@@ -304,11 +358,15 @@ export const ProfileModal: React.FC = () => {
           ))}
         </div>
 
-        {/* Google Drive Personal Cloud (15 GB free per user, 0% Render storage/bandwidth!) */}
+        {/* Unified Cloud & Sync Card (Google Drive primary, Email+PIN fallback) */}
         <div
           style={{
-            background: 'color-mix(in srgb, var(--accent-secondary) 10%, var(--banner-bg))',
-            border: '1px solid color-mix(in srgb, var(--accent-secondary) 38%, var(--border-subtle))',
+            background: isDriveConnected
+              ? 'color-mix(in srgb, var(--accent-secondary) 9%, var(--banner-bg))'
+              : 'var(--banner-bg)',
+            border: isDriveConnected
+              ? '1px solid color-mix(in srgb, var(--accent-secondary) 36%, var(--border-subtle))'
+              : '1px solid var(--border-subtle)',
             borderRadius: 16,
             padding: 14,
             display: 'flex',
@@ -318,54 +376,42 @@ export const ProfileModal: React.FC = () => {
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 13, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <Cloud size={15} style={{ color: 'var(--accent-secondary)' }} />
-              Google Drive Personal (Recomendado · 15 GB gratis)
+              <Cloud size={15} style={{ color: isDriveConnected ? 'var(--accent-secondary)' : 'var(--accent-primary)' }} />
+              Nube y Sincronización
             </div>
-            {googleDriveAuth?.email && (
+            {(isDriveConnected ? googleDriveAuth?.email : linkedEmail) && (
               <span
                 className="pill-btn"
                 style={{
                   height: 24,
                   fontSize: 10.5,
                   padding: '0 9px',
-                  background: 'color-mix(in srgb, #52b788 20%, var(--card-bg))',
+                  background: 'color-mix(in srgb, #52b788 18%, var(--card-bg))',
                   color: 'var(--text-primary)',
+                  maxWidth: '100%',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
                 }}
+                title={isDriveConnected ? `Google Drive: ${googleDriveAuth?.email}` : linkedEmail}
               >
-                <CheckCircle2 size={11} style={{ color: '#2d936c' }} /> {googleDriveAuth.email}
+                <CheckCircle2 size={11} style={{ color: '#2d936c', flexShrink: 0 }} />
+                {isDriveConnected ? `Drive · ${googleDriveAuth?.email}` : linkedEmail}
               </span>
             )}
           </div>
 
-          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
-            {googleDriveAuth?.email ? (
-              <>
-                Conectado directamente a tu carpeta <strong>Google Drive / Komolib / Libros</strong>. Tus libros, portadas, progreso, marcas y personalización se sincronizan sin pasar por Render.
-              </>
-            ) : (
-              <>
-                Inicia sesión con tu cuenta de Google con un toque: detecta tu correo automáticamente, crea la carpeta <strong>Komolib/Libros</strong> en tu propio Drive y sincroniza tu tablet, teléfono y web gratis.
-              </>
-            )}
-          </div>
+          {isDriveConnected ? (
+            <>
+              <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                Sincronizado con tu carpeta <strong>Google Drive / Komolib / Libros</strong> (15 GB gratis).
+              </div>
 
-          {!googleDriveAuth?.email ? (
-            <button
-              type="button"
-              className="coral-cta-btn"
-              style={{ height: 38, justifyContent: 'center', fontSize: 12.5 }}
-              onClick={connectGoogleDrive}
-            >
-              <Cloud size={15} /> Conectar con Google Drive
-            </button>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
               <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
                 <button
                   type="button"
                   className="coral-cta-btn"
                   disabled={busy}
-                  style={{ flex: '1 1 160px', height: 34, fontSize: 12, justifyContent: 'center' }}
+                  style={{ flex: '1 1 170px', height: 35, fontSize: 12, justifyContent: 'center' }}
                   onClick={async () => {
                     if (busy) return;
                     setBusy(true);
@@ -376,189 +422,286 @@ export const ProfileModal: React.FC = () => {
                     }
                   }}
                 >
-                  <RefreshCw size={13} /> {busy ? 'Sincronizando...' : 'Guardar / Sincronizar Drive'}
+                  <RefreshCw size={13} /> {busy ? 'Sincronizando...' : 'Guardar / Sincronizar ahora'}
                 </button>
                 <button
                   type="button"
                   className="pill-btn"
-                  style={{ height: 34, fontSize: 11.5, color: '#c92a2a', background: 'var(--card-bg)' }}
+                  style={{ height: 35, fontSize: 11.5, background: 'var(--card-bg)' }}
+                  onClick={() => setShowResetPin((v) => !v)}
+                  title="Configura o restablece el PIN guardado de tu cuenta"
+                >
+                  <KeyRound size={12} /> {savedPin ? 'Cambiar PIN' : 'Configurar PIN'}
+                </button>
+                <button
+                  type="button"
+                  className="pill-btn"
+                  style={{ height: 35, fontSize: 11.5, color: '#c92a2a', background: 'var(--card-bg)' }}
                   onClick={() => void disconnectGoogleDrive()}
                 >
-                  <LogOut size={12} /> Desconectar Drive
+                  <LogOut size={12} /> Desconectar
                 </button>
               </div>
+              {savedPin && !showResetPin && (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <CheckCircle2 size={11} style={{ color: '#2d936c' }} /> PIN guardado y sincronizado automáticamente.
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                {linkedEmail
+                  ? 'Sincronizado por correo y PIN. También puedes cambiar a Google Drive para guardar tus libros en tu propio espacio (15 GB gratis).'
+                  : 'Sincroniza tus libros, portadas, progreso, marcas y personalización entre tu tablet, teléfono y web.'}
+              </div>
 
-              {books.length > 0 && (
+              <button
+                type="button"
+                className={linkedEmail ? 'pill-btn' : 'coral-cta-btn'}
+                style={{
+                  height: linkedEmail ? 33 : 38,
+                  justifyContent: 'center',
+                  fontSize: linkedEmail ? 11.5 : 12.5,
+                  ...(linkedEmail ? { background: 'var(--card-bg)' } : {}),
+                }}
+                onClick={() => connectGoogleDrive()}
+              >
+                <Cloud size={15} />{' '}
+                {linkedEmail
+                  ? 'Cambiar a Google Drive (15 GB gratis)'
+                  : 'Conectar con Google Drive (15 GB gratis)'}
+              </button>
+
+              {!showEmailForm ? (
                 <button
                   type="button"
                   className="pill-btn"
                   style={{
-                    height: 34,
+                    height: 28,
+                    fontSize: 11,
                     justifyContent: 'center',
-                    background: 'var(--accent-secondary)',
-                    color: 'var(--accent-secondary-contrast)',
-                    borderColor: 'transparent',
-                    fontSize: 11.5,
+                    background: 'transparent',
+                    borderStyle: 'dashed',
+                    color: 'var(--text-muted)',
                   }}
-                  disabled={Boolean(offlineSyncProgress) || busy}
-                  onClick={() => void syncAllBookFilesForOffline()}
+                  onClick={() => setShowEmailFallback(true)}
                 >
-                  <Download size={13} />{' '}
-                  {offlineSyncProgress ||
-                    `Sincronizar libros con Google Drive (${books.filter((b) => b.hasLocalFile).length}/${books.length} offline)`}
+                  <Mail size={12} /> ¿Sin Google? Usar correo y PIN
                 </button>
+              ) : (
+                <>
+                  {cloudServerMissing && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 7,
+                        padding: '8px 10px',
+                        borderRadius: 10,
+                        background: 'color-mix(in srgb, #d9534f 10%, var(--card-bg))',
+                        border: '1px solid color-mix(in srgb, #d9534f 30%, var(--border-subtle))',
+                        fontSize: 11,
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      <AlertTriangle size={14} style={{ color: '#d9534f', flexShrink: 0, marginTop: 1 }} />
+                      <span>
+                        Falta configurar <strong>VITE_SYNC_SERVER_URL</strong> en Netlify con la URL del
+                        API de KomoLib.
+                      </span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleConnectEmail} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                      <div style={{ position: 'relative', flex: '1 1 200px' }}>
+                        <Mail
+                          size={14}
+                          style={{
+                            position: 'absolute',
+                            left: 11,
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            color: 'var(--text-muted)',
+                          }}
+                        />
+                        <input
+                          type="text"
+                          className="studio-input"
+                          style={{ paddingLeft: 32, width: '100%' }}
+                          placeholder="tucorreo@ejemplo.com o usuario"
+                          value={emailInput}
+                          onChange={(e) => setEmailInput(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <input
+                        ref={pinInputRef}
+                        type="password"
+                        className="studio-input"
+                        style={{
+                          flex: '1 1 100px',
+                          minWidth: 0,
+                          borderColor: pinError ? '#d9534f' : undefined,
+                        }}
+                        placeholder="PIN"
+                        value={pinInput}
+                        onChange={(e) => {
+                          setPinInput(e.target.value);
+                          if (pinError && e.target.value.trim()) setPinError('');
+                        }}
+                        title="PIN obligatorio para guardar y sincronizar tu bóveda en la nube"
+                      />
+                    </div>
+
+                    {pinError && (
+                      <div
+                        role="alert"
+                        style={{
+                          fontSize: 11.5,
+                          fontWeight: 800,
+                          color: '#d9534f',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                        }}
+                      >
+                        <AlertTriangle size={13} /> {pinError}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                      <button
+                        type="submit"
+                        className="coral-cta-btn"
+                        disabled={busy}
+                        style={{ flex: 1, height: 34, fontSize: 12, justifyContent: 'center' }}
+                      >
+                        <Cloud size={14} />{' '}
+                        {busy
+                          ? 'Sincronizando...'
+                          : linkedEmail && linkedEmail === emailInput.trim().toLowerCase()
+                          ? 'Actualizar / Restaurar'
+                          : 'Conectar con correo'}
+                      </button>
+
+                      {linkedEmail && (
+                        <button
+                          type="button"
+                          className="pill-btn"
+                          disabled={busy}
+                          style={{ height: 34, fontSize: 11.5 }}
+                          onClick={() => void handleSaveNow()}
+                          title="Guardar copia en la nube ahora usando tu PIN guardado"
+                        >
+                          <RefreshCw size={13} /> Guardar ahora
+                        </button>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                      {savedPin ? (
+                        <span style={{ fontSize: 10.5, color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          <CheckCircle2 size={11} style={{ color: '#2d936c' }} /> PIN guardado automáticamente
+                        </span>
+                      ) : (
+                        <span />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setShowResetPin((v) => !v)}
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: 'var(--accent-primary)',
+                          textDecoration: 'underline',
+                          padding: 0,
+                          background: 'transparent',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {showResetPin ? 'Ocultar restablecer PIN' : '¿Olvidaste tu PIN? Restablecer PIN'}
+                      </button>
+                    </div>
+                  </form>
+                </>
               )}
-            </div>
+            </>
           )}
-        </div>
 
-        {/* Cloud Account by Email + Automatic Backup */}
-        <div
-          style={{
-            background: 'var(--banner-bg)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 16,
-            padding: 14,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-            <div style={{ fontSize: 13, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <Cloud size={15} style={{ color: 'var(--accent-primary)' }} />
-              Cuenta en la Nube y Respaldo por Correo
-            </div>
-            {linkedEmail && (
-              <span
-                className="pill-btn"
-                style={{
-                  height: 24,
-                  fontSize: 10.5,
-                  padding: '0 9px',
-                  background: 'color-mix(in srgb, #52b788 18%, var(--card-bg))',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                <CheckCircle2 size={11} style={{ color: '#2d936c' }} /> {linkedEmail}
-              </span>
-            )}
-          </div>
-
-          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
-            Ingresa tu correo electrónico y tu PIN para guardar o sincronizar tus libros, progreso, marcas y personalización desde cualquier navegador, APK o internet.
-          </div>
-
-          {cloudServerMissing && (
-            <div
+          {showResetPin && (
+            <form
+              onSubmit={handleResetPinSubmit}
               style={{
+                background: 'var(--card-bg)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 12,
+                padding: '10px 12px',
                 display: 'flex',
-                alignItems: 'flex-start',
-                gap: 7,
-                padding: '8px 10px',
-                borderRadius: 10,
-                background: 'color-mix(in srgb, #d9534f 10%, var(--card-bg))',
-                border: '1px solid color-mix(in srgb, #d9534f 30%, var(--border-subtle))',
-                fontSize: 11,
-                lineHeight: 1.45,
+                flexDirection: 'column',
+                gap: 8,
               }}
             >
-              <AlertTriangle size={14} style={{ color: '#d9534f', flexShrink: 0, marginTop: 1 }} />
-              <span>
-                Falta configurar <strong>VITE_SYNC_SERVER_URL</strong> en Netlify con la URL del
-                API de KomoLib. Sin esa variable el respaldo por correo no puede guardarse en la
-                nube.
-              </span>
-            </div>
-          )}
-
-          <form onSubmit={handleConnectEmail} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-              <div style={{ position: 'relative', flex: '1 1 210px' }}>
-                <Mail
-                  size={14}
-                  style={{
-                    position: 'absolute',
-                    left: 11,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    color: 'var(--text-muted)',
+              <div style={{ fontSize: 12, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <KeyRound size={13} style={{ color: 'var(--accent-primary)' }} />
+                Restablecer PIN de cuenta
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                Crea un nuevo PIN (mínimo 4 caracteres). Se guardará automáticamente en este dispositivo y en tu nube para confirmar sin volver a escribirlo.
+              </div>
+              <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                <input
+                  type="password"
+                  className="studio-input"
+                  style={{ flex: '1 1 130px', minWidth: 0 }}
+                  placeholder="Nuevo PIN"
+                  value={newPinInput}
+                  onChange={(e) => {
+                    setNewPinInput(e.target.value);
+                    if (resetPinError) setResetPinError('');
                   }}
                 />
                 <input
-                  type="text"
+                  type="password"
                   className="studio-input"
-                  style={{ paddingLeft: 32, width: '100%' }}
-                  placeholder="tucorreo@ejemplo.com o usuario (ej. Sakura)"
-                  value={emailInput}
-                  onChange={(e) => setEmailInput(e.target.value)}
-                  required
+                  style={{ flex: '1 1 130px', minWidth: 0 }}
+                  placeholder="Confirmar nuevo PIN"
+                  value={confirmPinInput}
+                  onChange={(e) => {
+                    setConfirmPinInput(e.target.value);
+                    if (resetPinError) setResetPinError('');
+                  }}
                 />
               </div>
-              <input
-                ref={pinInputRef}
-                type="password"
-                className="studio-input"
-                style={{
-                  flex: '1 1 110px',
-                  minWidth: 0,
-                  borderColor: pinError ? '#d9534f' : undefined,
-                }}
-                placeholder="PIN"
-                value={pinInput}
-                onChange={(e) => {
-                  setPinInput(e.target.value);
-                  if (pinError && e.target.value.trim()) setPinError('');
-                }}
-                title="PIN obligatorio para guardar y sincronizar tu bóveda en la nube"
-              />
-            </div>
-
-            {pinError && (
-              <div
-                role="alert"
-                style={{
-                  fontSize: 11.5,
-                  fontWeight: 800,
-                  color: '#d9534f',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <AlertTriangle size={13} /> {pinError}
-              </div>
-            )}
-
-            <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-              <button
-                type="submit"
-                className="coral-cta-btn"
-                disabled={busy}
-                style={{ flex: 1, height: 34, fontSize: 12, justifyContent: 'center' }}
-              >
-                <Cloud size={14} />{' '}
-                {busy
-                  ? 'Sincronizando cuenta...'
-                  : linkedEmail && linkedEmail === emailInput.trim().toLowerCase()
-                  ? 'Actualizar / Restaurar desde la nube'
-                  : 'Conectar / Restaurar con mi correo'}
-              </button>
-
-              {linkedEmail && (
+              {resetPinError && (
+                <div role="alert" style={{ fontSize: 11, fontWeight: 800, color: '#d9534f', display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <AlertTriangle size={12} /> {resetPinError}
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
                 <button
                   type="button"
                   className="pill-btn"
-                  disabled={busy}
-                  style={{ height: 34, fontSize: 11.5 }}
-                  onClick={() => void handleSaveNow()}
-                  title="Guardar copia en la nube ahora (requiere PIN)"
+                  style={{ height: 30, fontSize: 11 }}
+                  onClick={() => {
+                    setShowResetPin(false);
+                    setResetPinError('');
+                  }}
                 >
-                  <RefreshCw size={13} /> Guardar ahora
+                  Cancelar
                 </button>
-              )}
-            </div>
-          </form>
+                <button
+                  type="submit"
+                  className="coral-cta-btn"
+                  disabled={busy}
+                  style={{ height: 30, fontSize: 11.5, padding: '0 13px' }}
+                >
+                  {busy ? 'Guardando...' : 'Guardar nuevo PIN'}
+                </button>
+              </div>
+            </form>
+          )}
 
           {syncMessage && (
             <div
@@ -574,7 +717,7 @@ export const ProfileModal: React.FC = () => {
             </div>
           )}
 
-          {syncStatus === 'error' && SYNC_SERVER_URL && savedServer && savedServer !== SYNC_SERVER_URL && (
+          {syncStatus === 'error' && !isDriveConnected && SYNC_SERVER_URL && savedServer && savedServer !== SYNC_SERVER_URL && (
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button
                 type="button"
@@ -590,51 +733,38 @@ export const ProfileModal: React.FC = () => {
             </div>
           )}
 
-          {linkedEmail && books.length > 0 && (
-            <div
+          {isCloudConnected && books.length > 0 && (
+            <button
+              type="button"
+              className="pill-btn"
               style={{
-                background: 'var(--card-bg)',
-                border: '1px solid var(--border-subtle)',
-                borderRadius: 12,
-                padding: '9px 11px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 7,
+                height: 34,
+                justifyContent: 'center',
+                background: 'var(--accent-secondary)',
+                color: 'var(--accent-secondary-contrast)',
+                borderColor: 'transparent',
+                fontSize: 11.5,
               }}
+              disabled={Boolean(offlineSyncProgress) || busy}
+              onClick={() =>
+                void (isDriveConnected ? syncAllBookFilesForOffline() : handleSyncOfflineFiles())
+              }
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 11.5, fontWeight: 800 }}>
-                  Lectura sin internet en este dispositivo
-                </span>
-                <span className="section-count" style={{ fontSize: 10.5 }}>
-                  {books.filter((b) => b.hasLocalFile).length} / {books.length} guardados offline
-                </span>
-              </div>
-              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.4 }}>
-                Sube los libros locales de este equipo a tu cuenta y descarga los que subiste desde tu tablet/teléfono para abrirlos siempre, con o sin internet.
-              </div>
-              <button
-                type="button"
-                className="pill-btn"
-                style={{
-                  height: 32,
-                  justifyContent: 'center',
-                  background: 'var(--accent-secondary)',
-                  color: 'var(--accent-secondary-contrast)',
-                  borderColor: 'transparent',
-                  fontSize: 11.5,
-                }}
-                disabled={Boolean(offlineSyncProgress) || busy}
-                onClick={() => void handleSyncOfflineFiles()}
-              >
-                <Download size={13} />{' '}
-                {offlineSyncProgress || 'Sincronizar archivos para leer offline'}
-              </button>
-            </div>
+              <Download size={13} />{' '}
+              {offlineSyncProgress ||
+                `Sincronizar libros offline (${localFilesCount}/${books.length} guardados)`}
+            </button>
           )}
 
           {/* Local JSON Backup Export / Import & Logout */}
-          <div className="profile-backup-actions">
+          <div
+            className="profile-backup-actions"
+            style={{
+              borderTop: '1px solid var(--border-subtle)',
+              paddingTop: 10,
+              marginTop: 2,
+            }}
+          >
             <button
               type="button"
               className="pill-btn"
@@ -686,7 +816,7 @@ export const ProfileModal: React.FC = () => {
               </button>
             )}
 
-            {(linkedEmail || books.length > 0) && (
+            {(isCloudConnected || books.length > 0) && (
               <button
                 type="button"
                 className="pill-btn"

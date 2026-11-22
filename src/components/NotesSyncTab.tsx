@@ -90,7 +90,7 @@ export const NotesSyncTab: React.FC = () => {
       <div className="studio-card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
           <h4>
-            <ClipboardList size={14} /> Reading Log rápido
+            <ClipboardList size={14} /> Diario rápido
           </h4>
           <button
             type="button"
@@ -213,7 +213,7 @@ export const NotesSyncTab: React.FC = () => {
         </h4>
         {notes.length === 0 ? (
           <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-            Tus notas y reseñas del Reading Log aparecerán aquí.
+            Tus notas y reseñas del Diario de Lectura aparecerán aquí.
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>

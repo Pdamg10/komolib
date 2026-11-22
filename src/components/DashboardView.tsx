@@ -83,23 +83,11 @@ export const DashboardView: React.FC = () => {
       {/* Header Banner */}
       <div className="tracker-header-card">
         <div>
-          <span className="tracker-kicker">Dashboard de Lectura</span>
-          <h2 className="tracker-heading">Mi Reading Tracker</h2>
+          <span className="tracker-kicker">Panel de Lectura</span>
+          <h2 className="tracker-heading">Mi Registro de Lectura</h2>
           <p className="tracker-quote">
             «Una habitación sin libros es como un cuerpo sin alma.» — Cicerón
           </p>
-        </div>
-        <div className="tracker-header-actions">
-          <button className="pill-btn" onClick={() => setNavSection('reading-log')}>
-            Ver Reading Log
-          </button>
-          <button
-            className="coral-cta-btn"
-            style={{ height: 32, padding: '0 14px', fontSize: 12 }}
-            onClick={() => setNavSection('home')}
-          >
-            Ir a estantería
-          </button>
         </div>
       </div>
 
@@ -408,7 +396,7 @@ export const DashboardView: React.FC = () => {
 
         {stats.topRated.length === 0 ? (
           <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '12px 0' }}>
-            Aún no has calificado ningún libro. Abre <strong>Reading Log</strong> o la pestaña{' '}
+            Aún no has calificado ningún libro. Abre <strong>Diario de Lectura</strong> o la pestaña{' '}
             <strong>Notas</strong> para asignar estrellas ★ a tus lecturas.
           </div>
         ) : (

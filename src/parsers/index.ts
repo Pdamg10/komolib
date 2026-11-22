@@ -1,7 +1,7 @@
 import type { BookFormat, BookItem, ContentKind } from '../types/library';
-import { resolveBookTitleAndAuthor } from '../utils/bookMetadata';
+import { cleanSynopsisText, resolveBookTitleAndAuthor } from '../utils/bookMetadata';
 import { isRasterCoverDataUrl } from '../utils/coverHelpers';
-import { extractAudioCover } from './audioCoverParser';
+import { extractAudioMetaAndCover } from './audioCoverParser';
 import { extractCbrCoverAndCount, extractCbzCoverAndCount } from './comicParser';
 import {
   blobToDataUrl,
@@ -15,8 +15,11 @@ import { extractPdfMetaAndCover } from './pdfParser';
 import { extractDocxCover, extractHtmlEmbeddedCover, parseFb2 } from './textParser';
 import { parseMobiBlob } from './mobiParser';
 
+export const ACCEPTED_AUDIO_EXTENSIONS =
+  '.mp3,.m4b,.m4a,.aac,.ogg,.oga,.opus,.wav,.flac,.webm,.wma,.amr,.3gp,.aif,.aiff,.caf,.alac,.ac3,.mp2,.mka';
+
 export const ACCEPTED_EXTENSIONS =
-  '.epub,.pdf,.cbz,.cbr,.zip,.rar,.txt,.md,.html,.htm,.fb2,.mobi,.azw,.azw3,.prc,.docx,.mp3,.m4b,.m4a,.ogg,.wav,.jpg,.jpeg,.png,.webp,.avif';
+  `.epub,.pdf,.cbz,.cbr,.zip,.rar,.txt,.md,.html,.htm,.fb2,.mobi,.azw,.azw3,.prc,.docx,${ACCEPTED_AUDIO_EXTENSIONS},.jpg,.jpeg,.png,.webp,.avif`;
 
 export function detectFormat(fileName: string, mimeType = ''): BookFormat | null {
   const lower = fileName.toLowerCase();
@@ -31,7 +34,12 @@ export function detectFormat(fileName: string, mimeType = ''): BookFormat | null
   if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'md';
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'html';
   if (lower.endsWith('.txt')) return 'txt';
-  if (/\.(mp3|m4b|m4a|ogg|wav|flac)$/i.test(lower) || mimeType.startsWith('audio/')) return 'audio';
+  if (
+    /\.(mp3|m4b|m4a|aac|ogg|oga|opus|wav|flac|webm|wma|amr|3gp|aiff?|caf|alac|ac3|mp2|mka|ra|au)$/i.test(lower) ||
+    mimeType.startsWith('audio/')
+  ) {
+    return 'audio';
+  }
   if (/\.(jpe?g|png|webp|gif|avif|bmp)$/i.test(lower) || mimeType.startsWith('image/')) return 'images';
   return null;
 }
@@ -115,8 +123,13 @@ export async function extractOriginalCoverFromBlob(
     return { coverDataUrl };
   }
   if (format === 'audio') {
-    const coverDataUrl = await extractAudioCover(blob);
-    return { coverDataUrl };
+    const meta = await extractAudioMetaAndCover(blob);
+    return {
+      title: meta.title,
+      author: meta.author,
+      description: cleanSynopsisText(meta.description),
+      coverDataUrl: meta.coverDataUrl,
+    };
   }
   if (format === 'images') {
     const first = extraImages?.length ? extraImages[0] : blob;
@@ -164,7 +177,7 @@ export async function importSingleFile(
   });
   if (!overrides?.title) title = resolvedMeta.title;
   if (!overrides?.author) author = resolvedMeta.author;
-  if (extracted.description) description = extracted.description;
+  if (extracted.description) description = cleanSynopsisText(extracted.description) || '';
   if (extracted.coverDataUrl) coverDataUrl = extracted.coverDataUrl;
   if (extracted.pageCount !== undefined) pageCount = extracted.pageCount;
 

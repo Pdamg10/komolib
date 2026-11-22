@@ -378,6 +378,35 @@ export async function sendAiChatViaServer(
   return parseJsonResponse<AiChatResponse>(res, url);
 }
 
+export interface AiIdentifyBookResponse {
+  ok: boolean;
+  model?: string;
+  title?: string;
+  author?: string;
+  description?: string;
+}
+
+export async function identifyBookWithAiApi(
+  config: SyncConfig,
+  payload: {
+    fileName?: string;
+    currentTitle?: string;
+    currentAuthor?: string;
+    currentDescription?: string;
+    coverDataUrl?: string;
+    textExcerpt?: string;
+  }
+): Promise<AiIdentifyBookResponse> {
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
+  const url = `${base}/api/ai/identify-book`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify(payload),
+  });
+  return parseJsonResponse<AiIdentifyBookResponse>(res, url);
+}
+
 export async function listInboxFiles(config: SyncConfig): Promise<InboxItem[]> {
   const base = resolveServerUrl(config.serverUrl);
   const url = `${base}/api/inbox`;

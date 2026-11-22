@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import { cleanSynopsisText } from '../utils/bookMetadata';
 import type {
   AnnotationTool,
   BookFormat,
@@ -663,7 +664,7 @@ function extractBookFromRecord(rec: Record<string, unknown>): ImportedExternalBo
   return {
     title,
     author,
-    description: str(pick(rec, ['description', 'synopsis', 'summary', 'descripcion', 'descripción'])) || undefined,
+    description: cleanSynopsisText(str(pick(rec, ['description', 'synopsis', 'summary', 'descripcion', 'descripción']))) || undefined,
     progress,
     currentPage: currentPage !== undefined ? Math.round(currentPage) : undefined,
     pageCount: pageCount !== undefined ? Math.round(pageCount) : undefined,
@@ -1589,7 +1590,7 @@ async function parseSqliteDatabase(
               author = 'Autor desconocido';
             }
           }
-          const description = str(pick(r, ['description', 'desc'])) || undefined;
+          const description = cleanSynopsisText(str(pick(r, ['description', 'desc']))) || undefined;
           const favorite = bool(pick(r, ['favorite', 'favourite', 'starred'])) || undefined;
           const groupName = str(pick(r, ['groupName', 'category', 'shelf']));
           let thumbFile = str(pick(r, ['thumbFile', 'thumb_file', 'thumbnail', 'thumb', 'thumbPath'])) || undefined;

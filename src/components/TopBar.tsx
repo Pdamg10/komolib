@@ -83,7 +83,7 @@ export const TopBar: React.FC = () => {
             updateTheme({ showRightPanel: !theme.showRightPanel });
           }
         }}
-        title={theme.showRightPanel ? 'Ocultar panel derecho' : 'Mostrar panel derecho (Chat IA / Log y Notas)'}
+        title={theme.showRightPanel ? 'Ocultar panel derecho' : 'Mostrar panel derecho (Chat IA / Diario y Notas)'}
       >
         <PanelRight size={18} />
       </button>

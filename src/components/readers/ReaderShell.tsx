@@ -1180,20 +1180,20 @@ export const ReaderShell: React.FC = () => {
           </div>
 
           {marksTab === 'separadores' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, maxWidth: '100%' }}>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
                 <button
                   type="button"
                   className="coral-cta-btn"
-                  style={{ flex: 1, height: 34, fontSize: 11.5, justifyContent: 'center' }}
+                  style={{ flex: '1 1 130px', height: 31, fontSize: 11, padding: '0 10px', justifyContent: 'center' }}
                   onClick={() => handlePlaceVisualBookmark()}
                 >
-                  <BookmarkPlus size={14} /> Marcar aquí ({livePos.page ? `Pág. ${livePos.page}` : `${livePos.pct}%`})
+                  <BookmarkPlus size={13} /> Marcar ({livePos.page ? `P.${livePos.page}` : `${livePos.pct}%`})
                 </button>
                 <button
                   type="button"
                   className="pill-btn"
-                  style={{ height: 34, fontSize: 11 }}
+                  style={{ height: 31, minHeight: 31, fontSize: 10.5, padding: '0 9px' }}
                   onClick={() =>
                     handleSelectBookmarkDesign(
                       activeBook.activeBookmarkDesignId === 'none'
@@ -1206,8 +1206,8 @@ export const ReaderShell: React.FC = () => {
                 </button>
               </div>
 
-              <div style={{ fontSize: 11.5, fontWeight: 800, opacity: 0.8 }}>
-                Elige tu separador de libro
+              <div style={{ fontSize: 11, fontWeight: 800, opacity: 0.8 }}>
+                Elige tu separador
               </div>
 
               <div className="bookmark-design-grid">
@@ -1220,6 +1220,7 @@ export const ReaderShell: React.FC = () => {
                       onClick={() => handleSelectBookmarkDesign(design.id)}
                       role="button"
                       tabIndex={0}
+                      title={design.name}
                     >
                       <div className="bookmark-design-thumb">
                         <img src={design.imageUrl} alt={design.name} loading="lazy" />
@@ -1233,7 +1234,7 @@ export const ReaderShell: React.FC = () => {
                               deleteCustomBookmarkDesign(design.id);
                             }}
                           >
-                            <Trash2 size={11} />
+                            <Trash2 size={10} />
                           </button>
                         )}
                       </div>
@@ -1247,27 +1248,28 @@ export const ReaderShell: React.FC = () => {
               <div
                 style={{
                   background: 'rgba(128,128,128,0.1)',
-                  borderRadius: 12,
-                  padding: 10,
+                  borderRadius: 11,
+                  padding: 8,
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: 7,
+                  gap: 6,
                 }}
               >
-                <div style={{ fontSize: 11.5, fontWeight: 800 }}>+ Agregar más separadores</div>
+                <div style={{ fontSize: 11, fontWeight: 800 }}>+ Separador personalizado</div>
                 <input
                   className="studio-input"
-                  placeholder="Nombre del separador (opcional)"
+                  style={{ height: 30, fontSize: 11, padding: '0 9px' }}
+                  placeholder="Nombre (opcional)"
                   value={customBmName}
                   onChange={(e) => setCustomBmName(e.target.value)}
                 />
                 <button
                   type="button"
                   className="pill-btn"
-                  style={{ justifyContent: 'center', height: 33 }}
+                  style={{ justifyContent: 'center', height: 30, minHeight: 30, fontSize: 11 }}
                   onClick={() => customBmInputRef.current?.click()}
                 >
-                  <ImagePlus size={13} /> Elegir imagen desde tu dispositivo
+                  <ImagePlus size={12} /> Elegir imagen
                 </button>
                 <input
                   ref={customBmInputRef}
@@ -1276,9 +1278,6 @@ export const ReaderShell: React.FC = () => {
                   hidden
                   onChange={handleUploadCustomBookmark}
                 />
-                <div style={{ fontSize: 10, opacity: 0.7 }}>
-                  Se comprime automáticamente a WebP ligero (~20 KB) en almacenamiento local.
-                </div>
               </div>
             </div>
           ) : marksTab === 'anotaciones' ? (

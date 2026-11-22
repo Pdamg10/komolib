@@ -1,17 +1,19 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   BarChart3,
+  BookCheck,
   Bookmark,
+  BookMarked,
   ClipboardList,
-  Heart,
+  Headphones,
   LayoutGrid,
   Palette,
-  Play,
   Star,
   Users,
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import type { NavSection } from '../types/library';
+import { getEffectiveStatus } from '../utils/readingStats';
 
 export const Sidebar: React.FC = () => {
   const {
@@ -26,7 +28,16 @@ export const Sidebar: React.FC = () => {
     setStudioModalOpen,
   } = useLibrary();
 
-  const readingCount = books.filter((b) => b.progress > 0 && b.progress < 100).length;
+  const { completedCount, audiobooksCount } = useMemo(() => {
+    let completed = 0;
+    let audio = 0;
+    for (const b of books) {
+      if (getEffectiveStatus(b) === 'completed' || (b.progress || 0) >= 98) completed++;
+      if (b.format === 'audio' || b.kind === 'audiobook') audio++;
+    }
+    return { completedCount: completed, audiobooksCount: audio };
+  }, [books]);
+
   const sharedTotalCount = sharedRooms.length + sharedShelves.length;
 
   const navItems: Array<{
@@ -36,8 +47,8 @@ export const Sidebar: React.FC = () => {
     badge?: number | string;
   }> = [
     { id: 'home', label: 'Biblioteca', icon: <LayoutGrid size={19} /> },
-    { id: 'dashboard', label: 'Dashboard y Estadísticas', icon: <BarChart3 size={19} /> },
-    { id: 'reading-log', label: 'Reading Log y Reseñas', icon: <ClipboardList size={19} /> },
+    { id: 'dashboard', label: 'Estadísticas de Lectura', icon: <BarChart3 size={19} /> },
+    { id: 'reading-log', label: 'Diario de Lectura y Reseñas', icon: <ClipboardList size={19} /> },
     {
       id: 'annotations',
       label: 'Marcadores, Separadores y Anotaciones',
@@ -50,12 +61,18 @@ export const Sidebar: React.FC = () => {
       badge: sharedTotalCount > 99 ? '99+' : sharedTotalCount || undefined,
     },
     { id: 'favorites', label: 'Favoritos', icon: <Star size={19} /> },
-    { id: 'wishlist', label: 'Wishlist / Por leer', icon: <Heart size={19} /> },
+    { id: 'wishlist', label: 'Por leer', icon: <BookMarked size={19} /> },
     {
       id: 'reading',
-      label: 'Leyendo y Audio',
-      icon: <Play size={19} />,
-      badge: readingCount > 99 ? '99+' : readingCount || undefined,
+      label: 'Lecturas terminadas',
+      icon: <BookCheck size={19} />,
+      badge: completedCount > 99 ? '99+' : completedCount || undefined,
+    },
+    {
+      id: 'audiobooks',
+      label: 'Audiolibros',
+      icon: <Headphones size={19} />,
+      badge: audiobooksCount > 99 ? '99+' : audiobooksCount || undefined,
     },
   ];
 

@@ -109,12 +109,12 @@ export const ReadingLogView: React.FC = () => {
   );
 
   return (
-    <section className="tracker-page" aria-label="Reading Log y Reseñas">
+    <section className="tracker-page" aria-label="Diario de Lectura y Reseñas">
       {/* Top Bar */}
       <div className="tracker-header-card">
         <div>
-          <span className="tracker-kicker">Registro & Reseñas</span>
-          <h2 className="tracker-heading">Reading Log</h2>
+          <span className="tracker-kicker">Registro y Reseñas</span>
+          <h2 className="tracker-heading">Diario de Lectura</h2>
           <p className="tracker-quote">
             Califica cada título, cambia su estado de lectura, registra fechas y escribe tus reseñas personales.
           </p>
@@ -398,7 +398,7 @@ export const ReadingLogView: React.FC = () => {
             <form onSubmit={handleSaveReview} style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               <div>
                 <label style={{ fontSize: 11, fontWeight: 700, display: 'block', marginBottom: 4 }}>
-                  Serie / Saga (para el Series Tracker)
+                  Serie / Saga (para el seguimiento de series)
                 </label>
                 <input
                   className="studio-input"
@@ -433,11 +433,11 @@ export const ReadingLogView: React.FC = () => {
         )}
       </div>
 
-      {/* Series Tracker (inspired by Series Tracker & REC in reference!) */}
+      {/* Series Tracker */}
       <div className="tracker-card">
         <div className="tracker-card-head">
           <h3>
-            <Layers size={15} /> Series Tracker
+            <Layers size={15} /> Seguimiento de Series
           </h3>
           <span className="section-count">{stats.seriesList.length} series</span>
         </div>

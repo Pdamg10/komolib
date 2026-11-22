@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { blobToDataUrl, optimizeCoverDataUrl } from './coverGenerator';
 import { isRasterCoverDataUrl } from '../utils/coverHelpers';
+import { cleanSynopsisText } from '../utils/bookMetadata';
 
 export interface EpubMetaResult {
   title?: string;
@@ -311,9 +312,10 @@ export async function extractEpubMetaAndCover(blob: Blob): Promise<EpubMetaResul
             (domAuthors.length ? Array.from(new Set(domAuthors)).join(', ') : undefined) ||
             opfDoc.querySelector('creator')?.textContent?.trim() ||
             regexParsed.author;
-          description =
+          description = cleanSynopsisText(
             opfDoc.getElementsByTagNameNS('*', 'description')[0]?.textContent?.trim() ||
-            regexParsed.description;
+              regexParsed.description
+          );
 
           const domItems = Array.from(opfDoc.querySelectorAll('manifest > item'))
             .map((it) => ({

@@ -62,13 +62,23 @@ export function parseGoogleAuthPayloadString(rawEncoded: string): GoogleDriveAut
 
 export function buildGoogleOAuthStartUrl(
   config: SyncConfig,
-  platform: 'android' | 'web'
+  platform: 'android' | 'web',
+  opts?: { loginHint?: string; forceConsent?: boolean; switchAccount?: boolean }
 ): string {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const params = new URLSearchParams();
   params.set('platform', platform);
   if (platform === 'web' && typeof window !== 'undefined') {
     params.set('returnTo', `${window.location.origin}${window.location.pathname}`);
+  }
+  if (opts?.loginHint?.trim()) {
+    params.set('loginHint', opts.loginHint.trim().toLowerCase());
+  }
+  if (opts?.forceConsent) {
+    params.set('forceConsent', '1');
+  }
+  if (opts?.switchAccount) {
+    params.set('switchAccount', '1');
   }
   return `${base}/api/google/start?${params.toString()}`;
 }
@@ -145,27 +155,33 @@ async function findDriveFileByQuery(
   config: SyncConfig,
   auth: GoogleDriveAuth,
   q: string,
-  onAuthUpdated?: (next: GoogleDriveAuth) => void
-): Promise<{ file: { id: string; name: string; modifiedTime?: string } | null; auth: GoogleDriveAuth }> {
+  onAuthUpdated?: (next: GoogleDriveAuth) => void,
+  orderBy = 'modifiedTime desc'
+): Promise<{
+  file: { id: string; name: string; modifiedTime?: string; parents?: string[] } | null;
+  auth: GoogleDriveAuth;
+}> {
   const params = new URLSearchParams({
     q,
-    fields: 'files(id,name,modifiedTime)',
+    fields: 'files(id,name,modifiedTime,parents)',
     pageSize: '5',
-    orderBy: 'modifiedTime desc',
+    orderBy,
     spaces: 'drive',
   });
   const { res, auth: nextAuth } = await driveFetch(
     config,
     auth,
     `${DRIVE_API}/files?${params.toString()}`,
-    { method: 'GET' },
+    { method: 'GET', cache: 'no-store' },
     onAuthUpdated
   );
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     throw new Error(`Error al consultar Google Drive (${res.status}): ${errText.slice(0, 140)}`);
   }
-  const data = (await res.json()) as { files?: Array<{ id: string; name: string; modifiedTime?: string }> };
+  const data = (await res.json()) as {
+    files?: Array<{ id: string; name: string; modifiedTime?: string; parents?: string[] }>;
+  };
   return { file: data.files?.[0] || null, auth: nextAuth };
 }
 
@@ -230,11 +246,29 @@ export async function ensureKomolibDriveFolders(
     }
   }
   if (!rootId) {
+    // Prefer the folder that already holds the newest komolib-state.json so two devices NEVER split-brain
+    const existingState = await findDriveFileByQuery(
+      config,
+      cur,
+      `name='${escapeDriveQuery(KOMOLIB_STATE_FILE_NAME)}' and trashed=false`,
+      onAuthUpdated,
+      'modifiedTime desc'
+    );
+    cur = existingState.auth;
+    if (existingState.file?.id) {
+      cur = { ...cur, stateFileId: existingState.file.id };
+      if (existingState.file.parents?.[0]) {
+        rootId = existingState.file.parents[0];
+      }
+    }
+  }
+  if (!rootId) {
     const found = await findDriveFileByQuery(
       config,
       cur,
       `name='${escapeDriveQuery(KOMOLIB_ROOT_FOLDER_NAME)}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-      onAuthUpdated
+      onAuthUpdated,
+      'createdTime asc'
     );
     cur = found.auth;
     if (found.file?.id) {
@@ -292,57 +326,76 @@ export async function ensureKomolibDriveFolders(
   return updated;
 }
 
+export async function getGoogleDriveStateVersion(
+  config: SyncConfig,
+  auth: GoogleDriveAuth,
+  onAuthUpdated?: (next: GoogleDriveAuth) => void
+): Promise<{ fileId: string; modifiedTime: string; auth: GoogleDriveAuth }> {
+  let cur = auth;
+  // Query the latest komolib-state.json across app-created Drive files (guarantees cross-device convergence!)
+  const latest = await findDriveFileByQuery(
+    config,
+    cur,
+    `name='${escapeDriveQuery(KOMOLIB_STATE_FILE_NAME)}' and trashed=false`,
+    onAuthUpdated,
+    'modifiedTime desc'
+  );
+  cur = latest.auth;
+  if (latest.file?.id) {
+    const nextRoot = latest.file.parents?.[0] || cur.rootFolderId;
+    if (latest.file.id !== cur.stateFileId || (nextRoot && nextRoot !== cur.rootFolderId)) {
+      cur = { ...cur, stateFileId: latest.file.id, ...(nextRoot ? { rootFolderId: nextRoot } : {}) };
+      onAuthUpdated?.(cur);
+    }
+    return {
+      fileId: latest.file.id,
+      modifiedTime: latest.file.modifiedTime || '',
+      auth: cur,
+    };
+  }
+  return { fileId: '', modifiedTime: '', auth: cur };
+}
+
 export async function pullStateFromGoogleDrive(
   config: SyncConfig,
   auth: GoogleDriveAuth,
   onAuthUpdated?: (next: GoogleDriveAuth) => void
-): Promise<{ state: RemoteSyncPayload | null; auth: GoogleDriveAuth }> {
+): Promise<{ state: RemoteSyncPayload | null; modifiedTime: string; auth: GoogleDriveAuth }> {
   let cur = await ensureKomolibDriveFolders(config, auth, onAuthUpdated);
-  let stateFileId = cur.stateFileId || '';
+
+  // Always check for the newest komolib-state.json so Tablet & Phone never read different copies
+  const version = await getGoogleDriveStateVersion(config, cur, onAuthUpdated);
+  cur = version.auth;
+  const stateFileId = version.fileId || cur.stateFileId || '';
 
   if (!stateFileId) {
-    const found = await findDriveFileByQuery(
-      config,
-      cur,
-      `name='${escapeDriveQuery(KOMOLIB_STATE_FILE_NAME)}' and '${escapeDriveQuery(cur.rootFolderId!)}' in parents and trashed=false`,
-      onAuthUpdated
-    );
-    cur = found.auth;
-    if (found.file?.id) {
-      stateFileId = found.file.id;
-      cur = { ...cur, stateFileId };
-      onAuthUpdated?.(cur);
-    }
-  }
-
-  if (!stateFileId) {
-    return { state: null, auth: cur };
+    return { state: null, modifiedTime: '', auth: cur };
   }
 
   const dl = await driveFetch(
     config,
     cur,
     `${DRIVE_API}/files/${encodeURIComponent(stateFileId)}?alt=media`,
-    { method: 'GET' },
+    { method: 'GET', cache: 'no-store' },
     onAuthUpdated
   );
   cur = dl.auth;
   if (dl.res.status === 404) {
     cur = { ...cur, stateFileId: '' };
     onAuthUpdated?.(cur);
-    return { state: null, auth: cur };
+    return { state: null, modifiedTime: '', auth: cur };
   }
   if (!dl.res.ok) {
     const errText = await dl.res.text().catch(() => '');
     throw new Error(`No se pudo leer Komolib/komolib-state.json (${dl.res.status}): ${errText.slice(0, 120)}`);
   }
   const text = await dl.res.text();
-  if (!text.trim()) return { state: null, auth: cur };
+  if (!text.trim()) return { state: null, modifiedTime: version.modifiedTime, auth: cur };
   try {
     const parsed = JSON.parse(text) as RemoteSyncPayload;
-    return { state: parsed, auth: cur };
+    return { state: parsed, modifiedTime: version.modifiedTime, auth: cur };
   } catch {
-    return { state: null, auth: cur };
+    return { state: null, modifiedTime: version.modifiedTime, auth: cur };
   }
 }
 
@@ -579,42 +632,87 @@ export async function syncStateWithGoogleDrive(
   auth: GoogleDriveAuth,
   localData: Parameters<typeof mergeSyncStatesClientSide>[1],
   onAuthUpdated?: (next: GoogleDriveAuth) => void
-): Promise<{ merged: RemoteSyncPayload; auth: GoogleDriveAuth }> {
+): Promise<{ merged: RemoteSyncPayload; modifiedTime: string; auth: GoogleDriveAuth }> {
   const pulled = await pullStateFromGoogleDrive(config, auth, onAuthUpdated);
   let cur = pulled.auth;
   const merged = mergeSyncStatesClientSide(pulled.state, localData);
   const bodyJson = JSON.stringify(merged);
+  const bodyBytes = new TextEncoder().encode(bodyJson);
 
   if (cur.stateFileId) {
-    const up = await driveFetch(
+    const existingStateId = cur.stateFileId;
+    // Use resumable PATCH so updates work reliably even when komolib-state.json exceeds 5 MB!
+    const initPatch = await driveFetch(
       config,
       cur,
-      `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(cur.stateFileId)}?uploadType=media&fields=id`,
+      `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(existingStateId)}?uploadType=resumable&fields=id,modifiedTime`,
       {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json; charset=UTF-8' },
-        body: bodyJson,
+        headers: {
+          'Content-Type': 'application/json; charset=UTF-8',
+          'X-Upload-Content-Type': 'application/json',
+          'X-Upload-Content-Length': String(bodyBytes.byteLength),
+        },
+        body: JSON.stringify({
+          name: KOMOLIB_STATE_FILE_NAME,
+          mimeType: 'application/json',
+        }),
       },
       onAuthUpdated
     );
-    cur = up.auth;
-    if (!up.res.ok) {
-      const errText = await up.res.text().catch(() => '');
-      throw new Error(`No se pudo actualizar estado en Drive (${up.res.status}): ${errText.slice(0, 140)}`);
+    cur = initPatch.auth;
+    if (initPatch.res.ok) {
+      const patchUrl = initPatch.res.headers.get('location');
+      if (patchUrl) {
+        const putPatch = await fetch(patchUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+          body: bodyBytes,
+        });
+        if (!putPatch.ok) {
+          const errText = await putPatch.text().catch(() => '');
+          throw new Error(`Error al subir actualización a Drive (${putPatch.status}): ${errText.slice(0, 140)}`);
+        }
+        const savedMeta = (await putPatch.json().catch(() => ({}))) as { id?: string; modifiedTime?: string };
+        return { merged, modifiedTime: savedMeta.modifiedTime || '', auth: cur };
+      }
     }
-    return { merged, auth: cur };
+    if (initPatch.res.status !== 404) {
+      // Fallback for environments where Location header isn't exposed (e.g. small payloads)
+      const up = await driveFetch(
+        config,
+        cur,
+        `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(existingStateId)}?uploadType=media&fields=id,modifiedTime`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+          body: bodyBytes,
+        },
+        onAuthUpdated
+      );
+      cur = up.auth;
+      if (!up.res.ok) {
+        const errText = await up.res.text().catch(() => '');
+        throw new Error(`No se pudo actualizar estado en Drive (${up.res.status}): ${errText.slice(0, 140)}`);
+      }
+      const savedMeta = (await up.res.json().catch(() => ({}))) as { id?: string; modifiedTime?: string };
+      return { merged, modifiedTime: savedMeta.modifiedTime || '', auth: cur };
+    }
+    // File was deleted externally -> recreate below
+    cur = { ...cur, stateFileId: '' };
   }
 
   // Create new `Komolib/komolib-state.json` via resumable upload (handles any library size cleanly!)
   const initRes = await driveFetch(
     config,
     cur,
-    `${DRIVE_UPLOAD_API}/files?uploadType=resumable&fields=id`,
+    `${DRIVE_UPLOAD_API}/files?uploadType=resumable&fields=id,modifiedTime`,
     {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json; charset=UTF-8',
         'X-Upload-Content-Type': 'application/json',
+        'X-Upload-Content-Length': String(bodyBytes.byteLength),
       },
       body: JSON.stringify({
         name: KOMOLIB_STATE_FILE_NAME,
@@ -636,16 +734,16 @@ export async function syncStateWithGoogleDrive(
   const putRes = await fetch(uploadLocation, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json; charset=UTF-8' },
-    body: bodyJson,
+    body: bodyBytes,
   });
   if (!putRes.ok) {
     const errText = await putRes.text().catch(() => '');
     throw new Error(`Error al subir estado a Drive (${putRes.status}): ${errText.slice(0, 140)}`);
   }
-  const created = (await putRes.json()) as { id: string };
+  const created = (await putRes.json()) as { id: string; modifiedTime?: string };
   cur = { ...cur, stateFileId: created.id };
   onAuthUpdated?.(cur);
-  return { merged, auth: cur };
+  return { merged, modifiedTime: created.modifiedTime || '', auth: cur };
 }
 
 function sanitizeDriveFileName(raw: string, fallback: string): string {

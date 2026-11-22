@@ -20,6 +20,7 @@ export const BookDetailModal: React.FC = () => {
     setEditingBook,
     updateBook,
     reExtractBookCover,
+    identifyBookWithAI,
     deleteBook,
     createRoomForBook,
     setNavSection,
@@ -35,6 +36,7 @@ export const BookDetailModal: React.FC = () => {
   const [hasOriginalCover, setHasOriginalCover] = useState(true);
   const [cats, setCats] = useState<string[]>([]);
   const [extracting, setExtracting] = useState(false);
+  const [identifyingAi, setIdentifyingAi] = useState(false);
   const coverRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -80,6 +82,21 @@ export const BookDetailModal: React.FC = () => {
       await reExtractBookCover(editingBook.id);
     } finally {
       setExtracting(false);
+    }
+  };
+
+  const handleIdentifyWithAI = async () => {
+    if (identifyingAi) return;
+    setIdentifyingAi(true);
+    try {
+      const res = await identifyBookWithAI(editingBook.id);
+      if (res) {
+        if (res.title) setTitle(res.title);
+        if (res.author) setAuthor(res.author);
+        if (res.description) setDescription(res.description);
+      }
+    } finally {
+      setIdentifyingAi(false);
     }
   };
 
@@ -180,6 +197,24 @@ export const BookDetailModal: React.FC = () => {
               <label style={{ fontSize: 11, fontWeight: 700 }}>Autor</label>
               <input className="studio-input" value={author} onChange={(e) => setAuthor(e.target.value)} />
             </div>
+            <button
+              type="button"
+              className="pill-btn"
+              disabled={identifyingAi}
+              onClick={() => void handleIdentifyWithAI()}
+              style={{
+                height: 31,
+                fontSize: 11.5,
+                justifyContent: 'center',
+                background: 'color-mix(in srgb, var(--accent-secondary) 16%, var(--banner-bg))',
+                borderColor: 'color-mix(in srgb, var(--accent-secondary) 42%, var(--border-subtle))',
+                color: 'var(--text-primary)',
+              }}
+              title="Usa IA para leer la portada y las primeras páginas del libro y completar título, autor y sinopsis"
+            >
+              <Sparkles size={13} className={identifyingAi ? 'spin' : ''} />
+              {identifyingAi ? 'Analizando portada y texto con IA...' : 'Detectar título, autor y sinopsis con IA'}
+            </button>
             <div>
               <label style={{ fontSize: 11, fontWeight: 700 }}>Modo / Tipo</label>
               <select

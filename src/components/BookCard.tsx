@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle2, Clock, Cloud, Edit3, Folder, Heart, Headphones, Star } from 'lucide-react';
-import { useLibrary } from '../context/LibraryContext';
+import { BookMarked, CheckCircle2, Clock, Cloud, Edit3, Folder, Headphones, Star } from 'lucide-react';
 import type { BookItem } from '../types/library';
 import { formatCompactDateTime, formatDateTime } from '../utils/readingStats';
 import { hasDisplayableOriginalCover } from '../utils/coverHelpers';
@@ -107,11 +106,24 @@ function useBookLongPress(book: BookItem, onOpen: (b: BookItem) => void) {
 
 interface BookCardProps {
   book: BookItem;
+  onOpen: (book: BookItem) => void;
+  onToggleFavorite: (book: BookItem) => void;
+  onToggleWishlist?: (book: BookItem) => void;
+  onEdit: (book: BookItem) => void;
+  showBookPages3D?: boolean;
+  showBookRibbons?: boolean;
 }
 
-const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
-  const { openBook, updateBook, setEditingBook, theme } = useLibrary();
-  const { isPressing, handlers } = useBookLongPress(book, openBook);
+const BookCardInner: React.FC<BookCardProps> = ({
+  book,
+  onOpen,
+  onToggleFavorite,
+  onToggleWishlist,
+  onEdit,
+  showBookPages3D = true,
+  showBookRibbons = true,
+}) => {
+  const { isPressing, handlers } = useBookLongPress(book, onOpen);
 
   const hasOriginal = hasDisplayableOriginalCover(book);
 
@@ -139,13 +151,13 @@ const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          openBook(book);
+          onOpen(book);
         }
       }}
     >
       <div className="book-hardcover-wrap">
         <div
-          className={`book-hardcover ${theme.showBookPages3D ? '' : 'flat-mode'}`}
+          className={`book-hardcover ${showBookPages3D ? '' : 'flat-mode'}`}
           style={{ backgroundColor: effectiveSpineColor }}
         >
           <div className="book-cover-img-box">
@@ -191,21 +203,23 @@ const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
             >
               <button
                 className={`book-mini-btn ${book.favorite ? 'fav-active' : ''}`}
-                onClick={() => updateBook(book.id, { favorite: !book.favorite })}
+                onClick={() => onToggleFavorite(book)}
                 title={book.favorite ? 'Quitar de favoritos' : 'Añadir a favoritos'}
               >
                 <Star size={13} fill={book.favorite ? 'currentColor' : 'none'} />
               </button>
-              <button
-                className={`book-mini-btn ${book.wishlist ? 'fav-active' : ''}`}
-                onClick={() => updateBook(book.id, { wishlist: !book.wishlist })}
-                title={book.wishlist ? 'Quitar de lista de deseos' : 'Guardar para después'}
-              >
-                <Heart size={13} fill={book.wishlist ? 'currentColor' : 'none'} />
-              </button>
+              {onToggleWishlist && (
+                <button
+                  className={`book-mini-btn ${book.wishlist ? 'fav-active' : ''}`}
+                  onClick={() => onToggleWishlist(book)}
+                  title={book.wishlist ? 'Quitar de Por leer' : 'Guardar en Por leer'}
+                >
+                  <BookMarked size={13} fill={book.wishlist ? 'currentColor' : 'none'} />
+                </button>
+              )}
               <button
                 className="book-mini-btn"
-                onClick={() => setEditingBook(book)}
+                onClick={() => onEdit(book)}
                 title="Personalizar portada, título, categorías..."
               >
                 <Edit3 size={12} />
@@ -222,8 +236,8 @@ const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
             )}
           </div>
 
-          {theme.showBookPages3D && <div className="book-pages-block" />}
-          {theme.showBookRibbons && (
+          {showBookPages3D && <div className="book-pages-block" />}
+          {showBookRibbons && (
             <div
               className="book-ribbon"
               style={{ backgroundColor: effectiveRibbonColor }}
@@ -276,9 +290,13 @@ const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
 
 export const BookCard = React.memo(BookCardInner);
 
-const BookListRowInner: React.FC<BookCardProps> = ({ book }) => {
-  const { openBook, updateBook, setEditingBook } = useLibrary();
-  const { isPressing, handlers } = useBookLongPress(book, openBook);
+const BookListRowInner: React.FC<BookCardProps> = ({
+  book,
+  onOpen,
+  onToggleFavorite,
+  onEdit,
+}) => {
+  const { isPressing, handlers } = useBookLongPress(book, onOpen);
 
   const hasOriginal = hasDisplayableOriginalCover(book);
 
@@ -303,7 +321,7 @@ const BookListRowInner: React.FC<BookCardProps> = ({ book }) => {
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          openBook(book);
+          onOpen(book);
         }
       }}
     >
@@ -377,7 +395,7 @@ const BookListRowInner: React.FC<BookCardProps> = ({ book }) => {
           type="button"
           className={`circle-arrow-btn ${book.favorite ? 'active-fav' : ''}`}
           style={{ width: 30, height: 30 }}
-          onClick={() => updateBook(book.id, { favorite: !book.favorite })}
+          onClick={() => onToggleFavorite(book)}
           title={book.favorite ? 'Quitar de favoritos' : 'Añadir a favoritos'}
         >
           <Star size={13} fill={book.favorite ? 'currentColor' : 'none'} />
@@ -386,7 +404,7 @@ const BookListRowInner: React.FC<BookCardProps> = ({ book }) => {
           type="button"
           className="circle-arrow-btn"
           style={{ width: 30, height: 30 }}
-          onClick={() => setEditingBook(book)}
+          onClick={() => onEdit(book)}
           title="Editar título, portada o detalles"
         >
           <Edit3 size={13} />

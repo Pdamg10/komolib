@@ -31,6 +31,7 @@ export type NavSection =
   | 'favorites'
   | 'wishlist'
   | 'reading'
+  | 'audiobooks'
   | 'collections';
 
 export type ReadingStatus = 'completed' | 'reading' | 'want_to_read' | 'on_hold' | 'dropped';
@@ -291,6 +292,7 @@ export interface ThemeConfig {
 export interface UserProfile {
   name: string;
   email?: string;
+  accountPin?: string;
   avatarEmoji: string;
   avatarBg: string;
   avatarImageUrl?: string;
@@ -318,6 +320,7 @@ export interface SyncConfig {
   publicUrl?: string;
   spaceId?: string; // Private per-user vault ID for isolated personal cloud/server sync
   accountEmail?: string; // User email linked to cloud backup vault
+  savedPin?: string; // Saved user PIN for seamless confirmation across actions & devices
   token: string;
   autoSync: boolean;
   liveSync?: boolean;

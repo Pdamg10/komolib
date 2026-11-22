@@ -10,6 +10,16 @@ export default defineConfig({
   build: {
     target: 'es2022',
     outDir: 'dist',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-icons': ['lucide-react'],
+          'vendor-pdf': ['pdfjs-dist'],
+          'vendor-epub': ['epubjs', 'jszip'],
+        },
+      },
+    },
   },
   server: {
     host: true,

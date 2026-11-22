@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import {
+  BookMarked,
   BookOpen,
   CheckCircle2,
   CloudDownload,
   Edit3,
-  Heart,
   RotateCcw,
   Share2,
+  Sparkles,
   Star,
   Trash2,
   X,
@@ -38,6 +39,7 @@ export const BookOptionsSheet: React.FC = () => {
     books,
     openBook,
     updateBook,
+    identifyBookWithAI,
     deleteBook,
     setEditingBook,
     setMissingFileBook,
@@ -49,12 +51,14 @@ export const BookOptionsSheet: React.FC = () => {
   const [bookId, setBookId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [sharingBusy, setSharingBusy] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
 
   useEffect(() => {
     const handler: BookMenuListener = (nextId) => {
       setBookId(nextId);
       setConfirmDelete(false);
       setSharingBusy(false);
+      setAiBusy(false);
     };
     listeners.add(handler);
     return () => {
@@ -163,6 +167,24 @@ export const BookOptionsSheet: React.FC = () => {
           <button
             type="button"
             className="book-option-btn"
+            disabled={aiBusy}
+            onClick={async () => {
+              setAiBusy(true);
+              try {
+                await identifyBookWithAI(book.id);
+                close();
+              } finally {
+                setAiBusy(false);
+              }
+            }}
+          >
+            <Sparkles size={17} />
+            <span>{aiBusy ? 'Analizando portada y texto con IA...' : 'Completar título, autor y sinopsis con IA'}</span>
+          </button>
+
+          <button
+            type="button"
+            className="book-option-btn"
             onClick={async () => {
               const next = !book.wishlist;
               await updateBook(book.id, { wishlist: next });
@@ -170,7 +192,7 @@ export const BookOptionsSheet: React.FC = () => {
               close();
             }}
           >
-            <Heart size={17} fill={book.wishlist ? 'currentColor' : 'none'} />
+            <BookMarked size={17} fill={book.wishlist ? 'currentColor' : 'none'} />
             <span>{book.wishlist ? 'Quitar de Por leer' : 'Guardar en Por leer'}</span>
           </button>
 

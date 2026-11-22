@@ -1661,15 +1661,21 @@ body,
   right: 0;
   bottom: 0;
   width: 310px;
-  max-width: 90vw;
+  max-width: min(92vw, 330px);
   z-index: 25;
-  padding: 16px;
+  padding: 12px;
   overflow-y: auto;
   overflow-x: hidden;
   box-shadow: -8px 0 30px rgba(0, 0, 0, 0.18);
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
+  box-sizing: border-box;
+}
+
+.reader-drawer > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .reader-drawer .pill-btn {
@@ -3338,20 +3344,20 @@ body,
 .reader-hanging-bookmark {
   position: absolute;
   top: 0;
-  right: 20px;
+  right: 16px;
   z-index: 14;
-  width: 68px;
-  height: 228px;
+  width: 48px;
+  height: 144px;
   padding: 0;
   border: none;
-  border-radius: 0 0 11px 11px;
+  border-radius: 0 0 10px 10px;
   overflow: hidden;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.36), 0 3px 8px rgba(0, 0, 0, 0.22);
-  transform: translateY(-10px);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.34), 0 2px 6px rgba(0, 0, 0, 0.2);
+  transform: translateY(-6px);
   opacity: 0.96;
   transition:
-    transform 0.38s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.32s ease,
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.28s ease,
     box-shadow 0.22s ease;
   cursor: pointer;
 }
@@ -3366,7 +3372,7 @@ body,
 .reader-hanging-bookmark:focus-visible {
   transform: translateY(-4px);
   opacity: 1;
-  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.44);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.42);
 }
 
 .reader-hanging-bookmark img {
@@ -3378,8 +3384,8 @@ body,
 
 @media (max-width: 640px) {
   .reader-hanging-bookmark {
-    width: 48px;
-    height: 164px;
+    width: 36px;
+    height: 112px;
     right: 10px;
   }
 
@@ -3392,36 +3398,43 @@ body,
 /* Bookmark Design Gallery (Drawer & Annotations Page) */
 .bookmark-design-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .bookmark-gallery-strip {
   display: flex;
-  gap: 14px;
+  gap: 10px;
   overflow-x: auto;
   padding: 4px 2px 8px;
 }
 
 .bookmark-gallery-item {
-  width: 90px;
+  width: 74px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .bookmark-design-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 5px;
-  border-radius: 12px;
+  gap: 3px;
+  padding: 4px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 10px;
   border: 2px solid transparent;
   background: rgba(128, 128, 128, 0.08);
   cursor: pointer;
+  box-sizing: border-box;
   transition: transform 0.15s ease, border-color 0.15s ease;
 }
 
@@ -3437,10 +3450,10 @@ body,
 .bookmark-design-thumb {
   position: relative;
   width: 100%;
-  height: 146px;
-  border-radius: 8px;
+  height: 82px;
+  border-radius: 7px;
   overflow: hidden;
-  box-shadow: 0 5px 12px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.2);
 }
 
 .bookmark-design-thumb img {
@@ -3452,10 +3465,10 @@ body,
 
 .bookmark-design-del {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: rgba(20, 20, 20, 0.78);
   color: #fff;
@@ -3464,13 +3477,24 @@ body,
 }
 
 .bookmark-design-name {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 700;
+  line-height: 1.15;
   text-align: center;
   width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+@media (max-width: 640px) {
+  .bookmark-design-grid {
+    gap: 5px;
+  }
+
+  .bookmark-design-thumb {
+    height: 70px;
+  }
 }
 
 /* Inline Reading Marks (Highlighter / Pencil / Pen / Post-it / Sticker / Emoji) */
@@ -4772,6 +4796,11 @@ mark.komo-mark-postit.komo-variant-translucent,
 .perf-lite .right-panel,
 .perf-lite .right-panel-scrim,
 .perf-lite .modal-overlay,
+.perf-lite .book-options-overlay,
+.perf-lite .audio-bar,
+.perf-lite .book-format-pill,
+.perf-lite .book-mini-btn,
+.perf-lite .remote-resume-banner,
 .perf-lite .reader-topbar,
 .perf-lite .reader-bottombar,
 .perf-lite .chat-toolbar,
@@ -4787,7 +4816,15 @@ mark.komo-mark-postit.komo-variant-translucent,
   -webkit-backdrop-filter: none !important;
 }
 
-.perf-lite .book-cover-backdrop {
+.perf-lite .book-card,
+.perf-lite .book-list-row,
+.perf-lite .tracker-card,
+.perf-lite .kpi-card {
+  contain: layout style;
+}
+
+.perf-lite .book-cover-backdrop,
+.perf-lite .book-cover-binding-sheen {
   display: none !important;
 }
 
@@ -4795,12 +4832,19 @@ mark.komo-mark-postit.komo-variant-translucent,
 .perf-lite .book-list-row,
 .perf-lite .tracker-card,
 .perf-lite .kpi-card {
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.1) !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.09) !important;
 }
 
 .perf-lite .book-card:hover,
 .perf-lite .book-list-row:hover {
   transform: none;
+}
+
+.perf-lite .book-card,
+.perf-lite .book-list-row,
+.perf-lite .pill-btn,
+.perf-lite .rail-icon-btn {
+  transition-duration: 0.08s !important;
 }
 
 /* =========================================================
@@ -5251,5 +5295,63 @@ select.studio-input {
 
   .book-options-handle {
     display: block;
+  }
+}
+
+/* =========================================================
+   Floating Scroll-to-Top Button (lightweight, low-end safe)
+   ========================================================= */
+.scroll-top-anchor {
+  position: sticky;
+  bottom: 16px;
+  align-self: flex-end;
+  height: 0;
+  overflow: visible;
+  z-index: 42;
+  pointer-events: none;
+  margin-top: auto;
+}
+
+.scroll-top-anchor.with-audio {
+  bottom: 92px;
+}
+
+.scroll-top-btn {
+  pointer-events: auto;
+  transform: translateY(-42px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 15px 0 12px;
+  border-radius: 999px;
+  background: var(--accent-primary);
+  color: var(--accent-contrast);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 0.16s ease, opacity 0.16s ease;
+}
+
+.scroll-top-btn:hover {
+  transform: translateY(-44px);
+}
+
+.scroll-top-btn:active {
+  transform: translateY(-41px) scale(0.97);
+}
+
+.perf-lite .scroll-top-btn {
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+  transition: none;
+}
+
+@media (max-width: 640px) {
+  .scroll-top-btn {
+    height: 38px;
+    padding: 0 13px 0 11px;
+    font-size: 11.5px;
   }
 }

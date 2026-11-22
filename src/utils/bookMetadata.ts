@@ -222,7 +222,7 @@ export function cleanAuthorName(raw?: string | null): string | undefined {
 export function cleanTitleText(raw?: string | null): string | undefined {
   if (!raw) return undefined;
   let s = raw
-    .replace(/\.(epub|pdf|mobi|azw3?|prc|fb2|cbz|cbr|docx|txt|md|html?|mp3|m4b|m4a|ogg|wav)$/i, '')
+    .replace(/\.(epub|pdf|mobi|azw3?|prc|fb2|cbz|cbr|docx|txt|md|html?|mp3|m4b|m4a|aac|ogg|oga|opus|wav|flac|webm|wma|amr|3gp|aiff?|caf|alac|ac3|mp2|mka)$/i, '')
     .replace(/^microsoft\s+word\s*[-–—:]\s*/i, '');
   s = stripDownloadNoise(s)
     .replace(/_/g, ' ')
@@ -330,7 +330,7 @@ export function parseTitleAuthorFromFileName(
   folderPath?: string
 ): { title?: string; author?: string } {
   const withoutExt = fileName
-    .replace(/\.(epub|pdf|mobi|azw3?|prc|fb2|cbz|cbr|docx|txt|md|html?|mp3|m4b|m4a|ogg|wav)$/i, '')
+    .replace(/\.(epub|pdf|mobi|azw3?|prc|fb2|cbz|cbr|docx|txt|md|html?|mp3|m4b|m4a|aac|ogg|oga|opus|wav|flac|webm|wma|amr|3gp|aiff?|caf|alac|ac3|mp2|mka)$/i, '')
     .trim();
   const base = stripDownloadNoise(withoutExt)
     .replace(/_{2,}/g, ' - ')
@@ -565,4 +565,121 @@ export function resolveBookTitleAndAuthor(input: {
     title: finalTitle || 'Sin título',
     author: finalAuthor,
   };
+}
+
+function decodeHtmlEntitiesTwice(raw: string): string {
+  const decodeOnce = (str: string) =>
+    str
+      .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&apos;|&#39;|&#x27;/gi, "'")
+      .replace(/&nbsp;|&#160;/gi, ' ')
+      .replace(/&mdash;|&#8212;/gi, '—')
+      .replace(/&ndash;|&#8211;/gi, '–')
+      .replace(/&hellip;|&#8230;/gi, '…')
+      .replace(/&laquo;/gi, '«')
+      .replace(/&raquo;/gi, '»')
+      .replace(/&#(x?[0-9a-fA-F]+);/g, (_m, tok: string) => {
+        try {
+          const cp = tok.toLowerCase().startsWith('x')
+            ? parseInt(tok.slice(1), 16)
+            : parseInt(tok, 10);
+          if (cp < 32 && cp !== 10 && cp !== 9) return ' ';
+          return String.fromCodePoint(cp);
+        } catch {
+          return '';
+        }
+      });
+  return decodeOnce(decodeOnce(raw));
+}
+
+/**
+ * Cleans book synopses / descriptions imported from EPUB OPF, FB2, or Moon+/ReadEra backups.
+ * Strips double-encoded HTML/CSS, Moon+ internal numeric/symbol headers (e.g. "#123#0#...",
+ * "★ 170000000 ★", "0 0 1 123456"), ISBN/UUID/Calibre prefixes, and binary/control noise.
+ */
+export function cleanSynopsisText(raw?: string | null): string | undefined {
+  if (!raw || typeof raw !== 'string') return undefined;
+
+  let s = raw
+    // Remove ASCII control characters except newline/tab and Unicode replacement chars
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFD]/g, ' ');
+
+  // Decode entities twice so &lt;p&gt; becomes <p>, then strip style/script/XML/HTML blocks
+  s = decodeHtmlEntitiesTwice(s)
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+    .replace(/<\/\s*(?:p|div|li|blockquote|h[1-6])\s*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+
+  // Remove inline CSS rule fragments or JSON metadata blocks leaked into description
+  s = s.replace(/[a-z0-9.#_-]+\s*\{[^}]{0,400}\}/gi, ' ');
+
+  // Strip Moon+ / ReadEra / Calibre numeric/symbol metadata headers at the start
+  // e.g. "#12345#0#...", "0 1 23456789 ...", "** 1234 **", "<<<1234>>>", "978-84-... :"
+  let prev = '';
+  let guard = 0;
+  while (s !== prev && guard++ < 6) {
+    prev = s;
+    s = s
+      .trim()
+      // Leading Moon+ delimited metadata like "#0#1234#..." or "|123|456|" or "@123@"
+      .replace(/^(?:[#@|~*•·▪▫◆◇★☆§$%^&+=<>[\](){}/\\]+\s*[\d.,:;_\-\s]*)+(?=[A-ZÁÉÍÓÚÑÜ¡¿"«])/u, '')
+      // Leading bare numeric sequences / timestamps / book IDs before real text
+      .replace(/^(?:\d[\d\s.,:/\\|#*_\-—–]{2,})(?=[A-ZÁÉÍÓÚÑÜ¡¿"«])/u, '')
+      // Leading ISBN / ASIN / UUID / Calibre / Summary labels
+      .replace(/^(?:ISBN(?:-1[03])?|ASIN|UUID|OCLC|DOI)\s*[:#]?\s*[0-9A-Za-z\-]{6,}\s*[-–—:|.;]?\s*/i, '')
+      .replace(/^(?:sinopsis|resumen|descripci[oó]n|summary|synopsis|description|book\s+description)\s*[:\-–—]+\s*/i, '')
+      // Leading stray symbols/punctuation (keep ¡ ¿ " « ( when starting a real sentence)
+      .replace(/^[\s.,;:!?*#_|~•·▪▫◆◇★☆§$%^&+=<>/\\\-–—\]})]+/, '');
+  }
+
+  // Collapse whitespace cleanly while preserving up to single line breaks
+  s = s
+    .replace(/[ \t\r]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n')
+    .trim();
+
+  // Remove trailing Moon+ / tracker numeric tails like "... #12345#0#"
+  s = s.replace(/\s*(?:[#|]\s*\d+){2,}[#|]?\s*$/, '').trim();
+
+  if (!s) return undefined;
+
+  // Check if the remaining text is mostly garbage (too few letters or high symbol/digit noise)
+  const letters = (s.match(/[A-Za-zÁÉÍÓÚáéíóúÑñÜü]/g) || []).length;
+  if (letters < 14) return undefined;
+  const nonSpace = s.replace(/\s+/g, '').length;
+  if (nonSpace > 0 && letters / nonSpace < 0.45) return undefined;
+
+  // Reject pure file paths or URLs masquerading as synopsis
+  if (/^(?:https?:\/\/|file:\/\/|\/storage\/|\/sdcard\/|content:\/\/)/i.test(s)) {
+    return undefined;
+  }
+
+  return s.length > 1400 ? `${s.slice(0, 1397).trim()}…` : s;
+}
+
+/**
+ * Checks whether a book is missing clean title, author, or synopsis (or has noisy/corrupted synopsis)
+ * and would benefit from AI identification using its cover & opening pages.
+ */
+export function bookNeedsMetadataEnrichment(book: {
+  title?: string;
+  author?: string;
+  description?: string;
+}): boolean {
+  if (isGenericTitle(book.title)) return true;
+  if (isGenericAuthor(book.author)) return true;
+  const cleanedDesc = cleanSynopsisText(book.description);
+  if (!cleanedDesc || cleanedDesc.length < 28) return true;
+  // Detect if stored description still has raw noise compared to cleaned version
+  if (book.description && book.description.trim() !== cleanedDesc && /[<&#\uFFFD]|^\s*[\d#*_|~]{3,}/.test(book.description)) {
+    return true;
+  }
+  return false;
 }

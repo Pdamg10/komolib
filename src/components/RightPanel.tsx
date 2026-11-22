@@ -10,7 +10,7 @@ export const RightPanel: React.FC = () => {
 
   if (!theme.showRightPanel && !mobilePanelOpen) return null;
 
-  const title = rightTab === 'chat' ? 'Chat IA' : 'Reading Log y Notas';
+  const title = rightTab === 'chat' ? 'Chat IA' : 'Diario y Notas';
 
   const handleClosePanel = () => {
     setMobilePanelOpen(false);
@@ -64,7 +64,7 @@ export const RightPanel: React.FC = () => {
               className={`panel-tab-btn ${rightTab === 'notes' ? 'active' : ''}`}
               onClick={() => setRightTab('notes')}
             >
-              <BookmarkCheck size={13} /> Log / Notas
+              <BookmarkCheck size={13} /> Diario / Notas
             </button>
           </div>
         </div>

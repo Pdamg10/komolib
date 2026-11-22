@@ -62,6 +62,7 @@ import {
   deleteBookFileFromGoogleDrive,
   downloadBookFileFromGoogleDrive,
   ensureKomolibDriveFolders,
+  getGoogleDriveStateVersion,
   parseGoogleAuthPayloadString,
   pullStateFromGoogleDrive,
   syncStateWithGoogleDrive,
@@ -72,13 +73,22 @@ import {
   hasDisplayableOriginalCover,
   isRasterCoverDataUrl,
 } from '../utils/coverHelpers';
-import { isGenericAuthor, resolveBookTitleAndAuthor } from '../utils/bookMetadata';
+import {
+  cleanAuthorName,
+  cleanSynopsisText,
+  cleanTitleText,
+  isGenericAuthor,
+  isGenericTitle,
+  resolveBookTitleAndAuthor,
+} from '../utils/bookMetadata';
+import { extractBookOpeningExcerpt } from '../utils/bookExcerpt';
 import {
   checkServerHealth,
   deleteBookFromServer,
   deriveEmailSpaceId,
   downloadBookFromServer,
   fetchRemoteSyncState,
+  identifyBookWithAiApi,
   parsePairingInput,
   sendAiChatViaServer,
   subscribeToSyncStream,
@@ -214,6 +224,10 @@ interface LibraryContextValue {
   attachLocalFileToBook: (bookId: string, file: File) => Promise<BookItem | null>;
   updateBook: (id: string, patch: Partial<BookItem>) => Promise<void>;
   reExtractBookCover: (id: string) => Promise<boolean>;
+  identifyBookWithAI: (
+    id: string,
+    opts?: { silent?: boolean }
+  ) => Promise<{ title?: string; author?: string; description?: string } | null>;
   deleteBook: (id: string) => Promise<void>;
   addBookmark: (bm: Omit<BookmarkItem, 'id' | 'createdAt'>) => Promise<BookmarkItem>;
   deleteBookmark: (id: string) => Promise<void>;
@@ -256,9 +270,10 @@ interface LibraryContextValue {
   syncAllBookFilesForOffline: () => Promise<{ uploaded: number; downloaded: number; failed: number }>;
   // Cloud Account by Email & Google Drive Personal Cloud + Backup/Restore
   googleDriveAuth: GoogleDriveAuth | null;
-  connectGoogleDrive: () => void;
+  connectGoogleDrive: (opts?: { switchAccount?: boolean; forceConsent?: boolean }) => void;
   disconnectGoogleDrive: () => Promise<void>;
   loginWithEmail: (email: string, pin?: string) => Promise<boolean>;
+  resetAccountPin: (newPin: string, emailOverride?: string) => Promise<boolean>;
   logoutAccount: () => Promise<void>;
   exportBackupJson: () => void;
   shareBackupJson: () => Promise<void>;
@@ -354,6 +369,60 @@ function getContrastColor(bgHex: string): string {
   return hexToLuminance(bgHex) > 0.45 ? '#231f1c' : '#ffffff';
 }
 
+const SHELF_PREFS_STORAGE_KEY = 'komolib_shelf_prefs_v1';
+
+type ShelfOrgPrefs = Pick<ThemeConfig, 'viewMode' | 'sortBy' | 'sortDir' | 'readingFilter'> & {
+  updatedAt?: number;
+};
+
+function readStoredShelfPrefs(): ShelfOrgPrefs | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null;
+    const raw = window.localStorage.getItem(SHELF_PREFS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ShelfOrgPrefs>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      viewMode: parsed.viewMode === 'shelf' || parsed.viewMode === 'grid' || parsed.viewMode === 'list' ? parsed.viewMode : DEFAULT_THEME.viewMode,
+      sortBy:
+        parsed.sortBy === 'recent' ||
+        parsed.sortBy === 'title' ||
+        parsed.sortBy === 'author' ||
+        parsed.sortBy === 'imported' ||
+        parsed.sortBy === 'folder'
+          ? parsed.sortBy
+          : DEFAULT_THEME.sortBy,
+      sortDir: parsed.sortDir === 'asc' || parsed.sortDir === 'desc' ? parsed.sortDir : DEFAULT_THEME.sortDir,
+      readingFilter:
+        parsed.readingFilter === 'all' ||
+        parsed.readingFilter === 'unread' ||
+        parsed.readingFilter === 'reading' ||
+        parsed.readingFilter === 'completed'
+          ? parsed.readingFilter
+          : DEFAULT_THEME.readingFilter,
+      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredShelfPrefs(t: ThemeConfig, ts = Date.now()): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    const payload: ShelfOrgPrefs = {
+      viewMode: t.viewMode || DEFAULT_THEME.viewMode,
+      sortBy: t.sortBy || DEFAULT_THEME.sortBy,
+      sortDir: t.sortDir || DEFAULT_THEME.sortDir,
+      readingFilter: t.readingFilter || DEFAULT_THEME.readingFilter,
+      updatedAt: ts,
+    };
+    window.localStorage.setItem(SHELF_PREFS_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
 function isThemeCustomized(t: ThemeConfig | null | undefined): boolean {
   if (!t) return false;
   return (
@@ -371,6 +440,9 @@ function isThemeCustomized(t: ThemeConfig | null | undefined): boolean {
     t.bannerTitle !== DEFAULT_THEME.bannerTitle ||
     t.bannerSubtitle !== DEFAULT_THEME.bannerSubtitle ||
     t.viewMode !== DEFAULT_THEME.viewMode ||
+    (t.sortBy || DEFAULT_THEME.sortBy) !== DEFAULT_THEME.sortBy ||
+    (t.sortDir || DEFAULT_THEME.sortDir) !== DEFAULT_THEME.sortDir ||
+    (t.readingFilter || DEFAULT_THEME.readingFilter) !== DEFAULT_THEME.readingFilter ||
     t.compactSidebar !== DEFAULT_THEME.compactSidebar ||
     t.showRightPanel !== DEFAULT_THEME.showRightPanel ||
     t.showBanner !== DEFAULT_THEME.showBanner ||
@@ -545,6 +617,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const syncedCoverSigRef = useRef<Map<string, string>>(new Map());
   const syncedBookUpdatedAtRef = useRef<Map<string, number>>(new Map());
   const lastRemoteUpdatedAtRef = useRef<number>(0);
+  const lastDriveModifiedTimeRef = useRef<string>('');
+  const syncInFlightRef = useRef<boolean>(false);
   const dirtyScopesRef = useRef<Set<'books' | 'personalization' | 'marks' | 'notes' | 'chat'>>(new Set());
   const lastResumeSyncAtRef = useRef<number>(0);
   const localActiveSessionRef = useRef<ActiveReadingSession | null>(null);
@@ -690,10 +764,25 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (typeof savedThemeTs === 'number') themeUpdatedAtRef.current = savedThemeTs;
       if (typeof savedProfileTs === 'number') profileUpdatedAtRef.current = savedProfileTs;
 
-      const effectiveStartupTheme = { ...DEFAULT_THEME, ...(savedTheme || {}) };
+      const storedShelfPrefs = readStoredShelfPrefs();
+      const useStoredShelfPrefs =
+        storedShelfPrefs &&
+        (!savedTheme || (storedShelfPrefs.updatedAt || 0) >= (themeUpdatedAtRef.current || 0));
+      const effectiveStartupTheme: ThemeConfig = {
+        ...DEFAULT_THEME,
+        ...(savedTheme || {}),
+        ...(useStoredShelfPrefs
+          ? {
+              viewMode: storedShelfPrefs.viewMode,
+              sortBy: storedShelfPrefs.sortBy,
+              sortDir: storedShelfPrefs.sortDir,
+              readingFilter: storedShelfPrefs.readingFilter,
+            }
+          : {}),
+      };
       if (isThemeCustomized(effectiveStartupTheme)) {
         if (!themeUpdatedAtRef.current) {
-          themeUpdatedAtRef.current = Date.now();
+          themeUpdatedAtRef.current = storedShelfPrefs?.updatedAt || Date.now();
           await dbSetKV('themeUpdatedAt', themeUpdatedAtRef.current);
         }
       } else {
@@ -751,7 +840,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       for (const dbk of demoBooks) {
         await dbDeleteBook(dbk.id).catch(() => undefined);
       }
-      const loadedBooks = allStoredBooks.filter((b) => !b.isDemo);
+      const loadedBooks = allStoredBooks
+        .filter((b) => !b.isDemo)
+        .map((b) => {
+          if (!b.description) return b;
+          const cleaned = cleanSynopsisText(b.description) || '';
+          if (cleaned !== b.description) {
+            const nextBook = { ...b, description: cleaned };
+            dbPutBook(nextBook).catch(() => undefined);
+            return nextBook;
+          }
+          return b;
+        });
       if (!seeded) {
         await dbSetKV('seeded', true);
       }
@@ -870,9 +970,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
-      const mergedTheme = { ...DEFAULT_THEME, ...(savedTheme || {}) };
+      const mergedTheme = effectiveStartupTheme;
       setTheme(mergedTheme);
       applyThemeCssVars(mergedTheme);
+      writeStoredShelfPrefs(mergedTheme, themeUpdatedAtRef.current || Date.now());
 
       if (savedCats?.length) setCategories(savedCats);
       if (savedCols?.length) setCollections(savedCols);
@@ -1170,6 +1271,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             !forceRestore &&
             (remoteBook.updatedAt || 0) === (local.updatedAt || 0) &&
             Boolean(remoteBook.hasRemoteFile) === Boolean(local.hasRemoteFile) &&
+            (remoteBook.driveFileId || '') === (local.driveFileId || '') &&
             (remoteBook.remoteFileName || '') === (local.remoteFileName || '') &&
             (!remoteHasRaster || localHasRaster)
           ) {
@@ -1229,11 +1331,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           } else {
             // Local is newer, but still absorb cloud file availability OR a real remote cover if local lacked one!
             const shouldAdoptRemoteCover = remoteHasRaster && !localHasRaster && local.hasOriginalCover !== false;
-            const shouldAdoptRemoteFile = Boolean(remoteBook.hasRemoteFile && !local.hasRemoteFile);
+            const shouldAdoptRemoteFile = Boolean(
+              (remoteBook.hasRemoteFile && !local.hasLocalFile) ||
+                (remoteBook.driveFileId && !local.driveFileId)
+            );
             if (shouldAdoptRemoteCover || shouldAdoptRemoteFile) {
               const updatedLocal: BookItem = {
                 ...local,
                 hasRemoteFile: local.hasRemoteFile || Boolean(remoteBook.hasRemoteFile),
+                driveFileId: local.driveFileId || remoteBook.driveFileId,
                 remoteFileName: remoteBook.remoteFileName || local.remoteFileName,
                 ...(shouldAdoptRemoteCover
                   ? {
@@ -1261,17 +1367,36 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setBooks(nextBooks);
         }
 
-        // Background auto-download book files from user's cloud vault so they are immediately ready offline!
+        // Background auto-download book files from Google Drive (or Render vault) so they are ready offline!
         if (booksToAutoDownload.length > 0) {
           (async () => {
             let downloadedOk = 0;
+            let activeDrive = stateRef.current.googleDriveAuth;
             for (const target of booksToAutoDownload) {
               try {
-                await downloadBookFromServer(stateRef.current.syncConfig, target);
-                const patched: BookItem = { ...target, hasLocalFile: true };
+                let resolvedDriveId = target.driveFileId;
+                if (activeDrive?.accessToken) {
+                  const dl = await downloadBookFileFromGoogleDrive(
+                    stateRef.current.syncConfig,
+                    activeDrive,
+                    target,
+                    persistGoogleDriveAuth
+                  );
+                  activeDrive = dl.auth;
+                  resolvedDriveId = dl.driveFileId;
+                } else {
+                  await downloadBookFromServer(stateRef.current.syncConfig, target);
+                }
+                const patched: BookItem = {
+                  ...target,
+                  hasLocalFile: true,
+                  driveFileId: resolvedDriveId,
+                };
                 await dbPutBook(patched);
                 setBooks((prev) =>
-                  prev.map((x) => (x.id === target.id ? { ...x, hasLocalFile: true } : x))
+                  prev.map((x) =>
+                    x.id === target.id ? { ...x, hasLocalFile: true, driveFileId: resolvedDriveId } : x
+                  )
                 );
                 downloadedOk++;
               } catch {
@@ -1431,7 +1556,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setCollections(merged.collections);
           await dbSetKV('collections', merged.collections);
         }
-        if (merged.readerSettings && (forceRestore || !themeUpdatedAtRef.current)) {
+        if (
+          merged.readerSettings &&
+          (forceRestore ||
+            !themeUpdatedAtRef.current ||
+            (merged.themeUpdatedAt || 0) >= themeUpdatedAtRef.current)
+        ) {
           const mergedReader = { ...DEFAULT_READER_SETTINGS, ...merged.readerSettings };
           setReaderSettings(mergedReader);
           await dbSetKV('readerSettings', mergedReader);
@@ -1452,13 +1582,19 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             merged.theme.customWallpaperUrl === '__KEEP__'
               ? current.theme.customWallpaperUrl || ''
               : merged.theme.customWallpaperUrl || '';
-          const mergedTheme = {
+          const mergedTheme: ThemeConfig = {
             ...DEFAULT_THEME,
             ...merged.theme,
+            // Preserve user's shelf organization if remote payload omitted any of these keys
+            viewMode: merged.theme.viewMode || current.theme.viewMode || DEFAULT_THEME.viewMode,
+            sortBy: merged.theme.sortBy || current.theme.sortBy || DEFAULT_THEME.sortBy,
+            sortDir: merged.theme.sortDir || current.theme.sortDir || DEFAULT_THEME.sortDir,
+            readingFilter: merged.theme.readingFilter || current.theme.readingFilter || DEFAULT_THEME.readingFilter,
             customWallpaperUrl: resolvedWallpaper,
           };
           setTheme(mergedTheme);
           applyThemeCssVars(mergedTheme);
+          writeStoredShelfPrefs(mergedTheme, themeUpdatedAtRef.current || Date.now());
           await dbSetKV('theme', mergedTheme);
           await dbSetKV('themeUpdatedAt', themeUpdatedAtRef.current);
         }
@@ -1514,12 +1650,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (!driveAuth?.accessToken && (cfg.liveSync === false || !cfg.serverUrl.trim())) return;
       if (autoSyncTimerRef.current) window.clearTimeout(autoSyncTimerRef.current);
       autoSyncTimerRef.current = window.setTimeout(async () => {
+        autoSyncTimerRef.current = null;
+        if (syncInFlightRef.current) {
+          scheduleAutoSync(false);
+          return;
+        }
         const s = stateRef.current;
         const activeDrive = s.googleDriveAuth;
         if (!activeDrive?.accessToken && (s.syncConfig.liveSync === false || !s.syncConfig.serverUrl.trim())) {
           return;
         }
 
+        syncInFlightRef.current = true;
         // Snapshot tombstones & dirty scopes before network call so mutations made during flight are NEVER lost!
         const sentBooks = [...deletedIdsRef.current];
         const sentBookmarks = [...deletedBookmarkIdsRef.current];
@@ -1602,24 +1744,29 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedChatSessionIds: sentChats,
           };
 
-          const merged = activeDrive?.accessToken
-            ? (
-                await syncStateWithGoogleDrive(
-                  s.syncConfig,
-                  activeDrive,
-                  syncPayloadData,
-                  persistGoogleDriveAuth
-                )
-              ).merged
-            : await syncFullState(
-                s.syncConfig,
-                syncPayloadData,
-                false,
-                true,
-                keepWallpaper,
-                keepCoverIds,
-                lastRemoteUpdatedAtRef.current
-              );
+          let merged: RemoteSyncPayload;
+          if (activeDrive?.accessToken) {
+            const driveRes = await syncStateWithGoogleDrive(
+              s.syncConfig,
+              activeDrive,
+              syncPayloadData,
+              persistGoogleDriveAuth
+            );
+            merged = driveRes.merged;
+            if (driveRes.modifiedTime) {
+              lastDriveModifiedTimeRef.current = driveRes.modifiedTime;
+            }
+          } else {
+            merged = await syncFullState(
+              s.syncConfig,
+              syncPayloadData,
+              false,
+              true,
+              keepWallpaper,
+              keepCoverIds,
+              lastRemoteUpdatedAtRef.current
+            );
+          }
 
           for (const sc of scopes) dirtyScopesRef.current.delete(sc);
 
@@ -1661,8 +1808,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               : `Sync en vivo (${Object.keys(merged.books || {}).length} títulos)`;
           setSyncMessage(syncLabel);
 
-          // If new deletions arrived while this sync was in flight, flush them right away!
+          // If new mutations/deletions arrived while this sync was in flight, flush them right away!
           if (
+            dirtyScopesRef.current.size > 0 ||
             deletedIdsRef.current.length ||
             deletedBookmarkIdsRef.current.length ||
             deletedAnnotationIdsRef.current.length ||
@@ -1672,10 +1820,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           ) {
             scheduleAutoSync(true);
           }
-        } catch {
-          // silent background sync retry next mutation
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Error al sincronizar en segundo plano';
+          setSyncStatus('error');
+          setSyncMessage(msg);
+        } finally {
+          syncInFlightRef.current = false;
         }
-      }, urgent ? 320 : 1800);
+      }, urgent ? 280 : 1100);
     },
     [applyRemotePayload, persistPendingTombstones]
   );
@@ -1694,6 +1846,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ) {
           next.searchGradient = `linear-gradient(100deg, ${next.accentSecondary} 0%, ${next.accentPrimary} 100%)`;
         }
+        writeStoredShelfPrefs(next, ts);
         dbSetKV('theme', next).catch(console.error);
         return next;
       });
@@ -1706,8 +1859,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const ts = Date.now();
     themeUpdatedAtRef.current = ts;
     dbSetKV('themeUpdatedAt', ts).catch(console.error);
-    setTheme(DEFAULT_THEME);
-    dbSetKV('theme', DEFAULT_THEME).catch(console.error);
+    setTheme((prev) => {
+      const next: ThemeConfig = {
+        ...DEFAULT_THEME,
+        viewMode: prev.viewMode || DEFAULT_THEME.viewMode,
+        sortBy: prev.sortBy || DEFAULT_THEME.sortBy,
+        sortDir: prev.sortDir || DEFAULT_THEME.sortDir,
+        readingFilter: prev.readingFilter || DEFAULT_THEME.readingFilter,
+      };
+      writeStoredShelfPrefs(next, ts);
+      dbSetKV('theme', next).catch(console.error);
+      return next;
+    });
     showToast('Tema restaurado a Komo Cream');
     scheduleAutoSync(false, 'personalization');
   }, [scheduleAutoSync, showToast]);
@@ -2598,6 +2761,89 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return false;
     },
     [books, showToast, updateBook]
+  );
+
+  const identifyBookWithAI = useCallback(
+    async (
+      id: string,
+      opts?: { silent?: boolean }
+    ): Promise<{ title?: string; author?: string; description?: string } | null> => {
+      const target = stateRef.current.books.find((b) => b.id === id);
+      if (!target) return null;
+
+      let textExcerpt = '';
+      try {
+        let fileRec = await dbGetBookFile(id);
+        if (!fileRec && target.nativeFileUri) {
+          const nativeBlob = await readNativeUriAsBlob(target.nativeFileUri, target.mimeType);
+          if (nativeBlob) fileRec = { id, blob: nativeBlob };
+        }
+        if (fileRec?.blob) {
+          textExcerpt = await extractBookOpeningExcerpt(fileRec.blob, target.format);
+        }
+      } catch {
+        // continue with cover image & filename
+      }
+
+      const coverDataUrl =
+        hasDisplayableOriginalCover(target) && isRasterCoverDataUrl(target.coverDataUrl)
+          ? target.coverDataUrl
+          : undefined;
+
+      try {
+        const res = await identifyBookWithAiApi(stateRef.current.syncConfig, {
+          fileName: target.fileName,
+          currentTitle: target.title,
+          currentAuthor: target.author,
+          currentDescription: target.description || '',
+          coverDataUrl,
+          textExcerpt,
+        });
+
+        const nextTitle = cleanTitleText(res.title);
+        const nextAuthor = cleanAuthorName(res.author);
+        const nextDesc = cleanSynopsisText(res.description);
+
+        const patch: Partial<BookItem> = {};
+        if (nextTitle && (isGenericTitle(target.title) || nextTitle !== target.title)) {
+          patch.title = nextTitle;
+        }
+        if (nextAuthor && (isGenericAuthor(target.author) || nextAuthor !== target.author)) {
+          patch.author = nextAuthor;
+        }
+        if (nextDesc) {
+          patch.description = nextDesc;
+        }
+
+        if (Object.keys(patch).length > 0) {
+          await updateBook(id, patch);
+          setEditingBook((curr) => (curr && curr.id === id ? { ...curr, ...patch } : curr));
+          if (!opts?.silent) {
+            showToast('Título, autor y sinopsis actualizados con IA');
+          }
+          return {
+            title: patch.title || target.title,
+            author: patch.author || target.author,
+            description: patch.description || target.description,
+          };
+        }
+
+        if (!opts?.silent) {
+          showToast('La IA no encontró datos adicionales para este libro');
+        }
+        return null;
+      } catch (err) {
+        if (!opts?.silent) {
+          showToast(
+            err instanceof Error
+              ? err.message
+              : 'No se pudo conectar con la IA para analizar el libro'
+          );
+        }
+        return null;
+      }
+    },
+    [showToast, updateBook]
   );
 
   const deleteBook = useCallback(
@@ -3528,24 +3774,29 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           deletedChatSessionIds: sentChats,
         };
 
-        const merged = activeDrive?.accessToken
-          ? (
-              await syncStateWithGoogleDrive(
-                cfg,
-                activeDrive,
-                triggerPayloadData,
-                persistGoogleDriveAuth
-              )
-            ).merged
-          : await syncFullState(
-              cfg,
-              triggerPayloadData,
-              false,
-              keepCoverIds.size > 0,
-              keepWallpaper,
-              keepCoverIds,
-              lastRemoteUpdatedAtRef.current
-            );
+        let merged: RemoteSyncPayload;
+        if (activeDrive?.accessToken) {
+          const driveRes = await syncStateWithGoogleDrive(
+            cfg,
+            activeDrive,
+            triggerPayloadData,
+            persistGoogleDriveAuth
+          );
+          merged = driveRes.merged;
+          if (driveRes.modifiedTime) {
+            lastDriveModifiedTimeRef.current = driveRes.modifiedTime;
+          }
+        } else {
+          merged = await syncFullState(
+            cfg,
+            triggerPayloadData,
+            false,
+            keepCoverIds.size > 0,
+            keepWallpaper,
+            keepCoverIds,
+            lastRemoteUpdatedAtRef.current
+          );
+        }
 
         for (const sc of scopes) dirtyScopesRef.current.delete(sc);
 
@@ -3754,19 +4005,36 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [persistGoogleDriveAuth, showToast, triggerSync]);
 
-  const connectGoogleDrive = useCallback(() => {
-    const cfg = stateRef.current.syncConfig;
-    const isAndroid = isKomoAndroidNative();
-    const startUrl = buildGoogleOAuthStartUrl(cfg, isAndroid ? 'android' : 'web');
-    if (isAndroid) {
-      const opened = openExternalUrlNatively(startUrl);
-      if (!opened) {
-        window.location.href = startUrl;
+  const connectGoogleDrive = useCallback(
+    (opts?: { switchAccount?: boolean; forceConsent?: boolean }) => {
+      const s = stateRef.current;
+      const cfg = s.syncConfig;
+      const isAndroid = isKomoAndroidNative();
+      let rememberedEmail =
+        s.googleDriveAuth?.email || s.profile.email || cfg.accountEmail || '';
+      if (!rememberedEmail && typeof window !== 'undefined') {
+        try {
+          rememberedEmail = window.localStorage.getItem('komolib_last_google_email') || '';
+        } catch {
+          // ignore
+        }
       }
-      return;
-    }
-    window.location.href = startUrl;
-  }, []);
+      const startUrl = buildGoogleOAuthStartUrl(cfg, isAndroid ? 'android' : 'web', {
+        loginHint: opts?.switchAccount ? undefined : rememberedEmail || undefined,
+        switchAccount: opts?.switchAccount,
+        forceConsent: opts?.forceConsent,
+      });
+      if (isAndroid) {
+        const opened = openExternalUrlNatively(startUrl);
+        if (!opened) {
+          window.location.href = startUrl;
+        }
+        return;
+      }
+      window.location.href = startUrl;
+    },
+    []
+  );
 
   const disconnectGoogleDrive = useCallback(async () => {
     persistGoogleDriveAuth(null);
@@ -3789,8 +4057,22 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setSyncMessage(`Conectando Google Drive (${parsed.email})...`);
       try {
         const cfg = stateRef.current.syncConfig;
-        const initialized = await ensureKomolibDriveFolders(cfg, parsed, persistGoogleDriveAuth);
+        const prevAuth = stateRef.current.googleDriveAuth;
+        // Preserve previous refreshToken if Google reused an existing grant without returning a new one
+        const mergedParsed: GoogleDriveAuth = {
+          ...parsed,
+          refreshToken:
+            parsed.refreshToken ||
+            (prevAuth?.email === parsed.email ? prevAuth.refreshToken : '') ||
+            '',
+        };
+        const initialized = await ensureKomolibDriveFolders(cfg, mergedParsed, persistGoogleDriveAuth);
         persistGoogleDriveAuth(initialized);
+        try {
+          window.localStorage.setItem('komolib_last_google_email', initialized.email);
+        } catch {
+          // ignore
+        }
 
         // Auto-detect & fill email / name / avatar from Google account (zero manual typing!)
         const s = stateRef.current;
@@ -3809,6 +4091,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const pulled = await pullStateFromGoogleDrive(cfg, initialized, persistGoogleDriveAuth);
         if (pulled.state) {
           await applyRemotePayload(pulled.state, s.books.filter((b) => !b.isDemo).length === 0);
+          // Sync saved PIN automatically from Drive profile if present
+          const remotePin = pulled.state.profile?.accountPin?.trim();
+          if (remotePin && stateRef.current.syncConfig.savedPin !== remotePin) {
+            updateSyncConfig({ savedPin: remotePin, accountEmail: initialized.email });
+          }
         }
         dirtyScopesRef.current.add('books');
         dirtyScopesRef.current.add('personalization');
@@ -3862,44 +4149,94 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   }, [ready, completeGoogleDriveAuth]);
 
-  // Pull latest state from Google Drive on startup & resume when Drive is connected (0% Render traffic!)
+  // Real-time Google Drive sync: immediate pull on startup/resume + lightweight 20s metadata poll + background flush!
   useEffect(() => {
     if (!ready || !googleDriveAuth?.accessToken) return;
     let active = true;
-    const syncDriveNow = async () => {
+    const syncDriveNow = async (checkVersionOnly = false) => {
       const auth = stateRef.current.googleDriveAuth;
-      if (!active || !auth?.accessToken) return;
+      if (!active || !auth?.accessToken || syncInFlightRef.current) return;
       try {
+        // If this device has pending local edits, push+merge them immediately!
+        if (dirtyScopesRef.current.size > 0) {
+          await triggerSync(true);
+          return;
+        }
+        if (checkVersionOnly && lastDriveModifiedTimeRef.current) {
+          const ver = await getGoogleDriveStateVersion(
+            stateRef.current.syncConfig,
+            auth,
+            persistGoogleDriveAuth
+          );
+          if (!active) return;
+          if (!ver.fileId || (ver.modifiedTime && ver.modifiedTime === lastDriveModifiedTimeRef.current)) {
+            return;
+          }
+        }
         const pulled = await pullStateFromGoogleDrive(
           stateRef.current.syncConfig,
-          auth,
+          stateRef.current.googleDriveAuth || auth,
           persistGoogleDriveAuth
         );
         if (!active) return;
+        if (pulled.modifiedTime) {
+          lastDriveModifiedTimeRef.current = pulled.modifiedTime;
+        }
         if (pulled.state) {
           await applyRemotePayload(pulled.state);
         }
         setSyncStatus('ok');
         setSyncMessage(`Google Drive activo (${auth.email})`);
-      } catch {
-        // offline or transient Drive hiccup
+      } catch (err) {
+        if (!active) return;
+        const msg = err instanceof Error ? err.message : '';
+        if (msg) {
+          setSyncStatus('error');
+          setSyncMessage(msg);
+        }
       }
     };
-    void syncDriveNow();
-    const onResume = () => {
+
+    void syncDriveNow(false);
+
+    const pollTimer = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return;
-      void syncDriveNow();
+      void syncDriveNow(true);
+    }, 20_000);
+
+    const onVisibilityOrPageHide = () => {
+      if (document.visibilityState === 'hidden') {
+        // Flush pending changes from Tablet/Phone right away before OS suspends WebView!
+        if (autoSyncTimerRef.current) {
+          window.clearTimeout(autoSyncTimerRef.current);
+          autoSyncTimerRef.current = null;
+        }
+        if (dirtyScopesRef.current.size > 0 && !syncInFlightRef.current) {
+          void triggerSync(true);
+        }
+        return;
+      }
+      void syncDriveNow(false);
     };
-    window.addEventListener('online', onResume);
-    window.addEventListener('focus', onResume);
-    document.addEventListener('visibilitychange', onResume);
+
+    const onOnlineOrFocus = () => {
+      if (document.visibilityState === 'hidden') return;
+      void syncDriveNow(false);
+    };
+
+    window.addEventListener('online', onOnlineOrFocus);
+    window.addEventListener('focus', onOnlineOrFocus);
+    window.addEventListener('pagehide', onVisibilityOrPageHide);
+    document.addEventListener('visibilitychange', onVisibilityOrPageHide);
     return () => {
       active = false;
-      window.removeEventListener('online', onResume);
-      window.removeEventListener('focus', onResume);
-      document.removeEventListener('visibilitychange', onResume);
+      window.clearInterval(pollTimer);
+      window.removeEventListener('online', onOnlineOrFocus);
+      window.removeEventListener('focus', onOnlineOrFocus);
+      window.removeEventListener('pagehide', onVisibilityOrPageHide);
+      document.removeEventListener('visibilitychange', onVisibilityOrPageHide);
     };
-  }, [ready, googleDriveAuth?.email, applyRemotePayload, persistGoogleDriveAuth]);
+  }, [ready, googleDriveAuth?.email, applyRemotePayload, persistGoogleDriveAuth, triggerSync]);
 
   // Cloud Account by Email + Required PIN + Full Backup / Restore
   const loginWithEmail = useCallback(
@@ -3909,7 +4246,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         showToast('Ingresa tu correo electrónico o nombre de usuario');
         return false;
       }
-      const cleanPin = rawPin.trim();
+      const cleanPin = (rawPin || stateRef.current.syncConfig.savedPin || stateRef.current.profile.accountPin || '').trim();
       if (!cleanPin) {
         showToast('Se requiere PIN');
         return false;
@@ -3928,6 +4265,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const savedIsStale =
         !savedServer ||
         savedServer === appOrigin ||
+        /^https?:\/\/(localhost|127\.0\.0\.1)(?:\/|$)/i.test(savedServer) ||
         /\.netlify\.app$/i.test(savedServer) ||
         /\.trycloudflare\.com$/i.test(savedServer) ||
         (isHttpsPage && /^http:\/\//i.test(savedServer)) ||
@@ -3935,7 +4273,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const resolvedServer =
         (!savedIsStale ? savedServer : '') ||
         SYNC_SERVER_URL ||
-        (appOrigin && !/:5173$/.test(appOrigin) && !/\.netlify\.app$/i.test(appOrigin)
+        (appOrigin &&
+        !/:5173$/.test(appOrigin) &&
+        !/^https?:\/\/(localhost|127\.0\.0\.1)(?:\/|$)/i.test(appOrigin) &&
+        !/\.netlify\.app$/i.test(appOrigin)
           ? appOrigin
           : 'http://localhost:4123');
 
@@ -3944,6 +4285,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         serverUrl: resolvedServer,
         spaceId,
         accountEmail: cleanEmail,
+        savedPin: cleanPin,
         autoSync: true,
         liveSync: true,
       };
@@ -3979,6 +4321,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             ...DEFAULT_PROFILE,
             ...(remote.profile || s.profile),
             email: cleanEmail,
+            accountPin: cleanPin,
           };
           setProfile(mergedProfile);
           await dbSetKV('profile', mergedProfile);
@@ -4005,10 +4348,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               ...DEFAULT_PROFILE,
               ...remote.profile,
               email: cleanEmail,
+              accountPin: cleanPin,
             }
           : {
               ...s.profile,
               email: cleanEmail,
+              accountPin: cleanPin,
             };
 
         if (remoteProfileWins) {
@@ -4109,10 +4454,82 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [applyRemotePayload, showToast, updateProfile, updateSyncConfig]
   );
 
+  const resetAccountPin = useCallback(
+    async (rawNewPin: string, emailOverride?: string): Promise<boolean> => {
+      const cleanPin = rawNewPin.trim();
+      if (cleanPin.length < 4) {
+        showToast('El nuevo PIN debe tener al menos 4 caracteres');
+        return false;
+      }
+      const s = stateRef.current;
+      const targetEmail = (
+        emailOverride?.trim() ||
+        s.googleDriveAuth?.email ||
+        s.syncConfig.accountEmail ||
+        s.profile.email ||
+        ''
+      ).toLowerCase();
+
+      const nextProfile: UserProfile = {
+        ...s.profile,
+        ...(targetEmail ? { email: targetEmail } : {}),
+        accountPin: cleanPin,
+      };
+      profileUpdatedAtRef.current = Date.now();
+      setProfile(nextProfile);
+      await dbSetKV('profile', nextProfile);
+      await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
+
+      if (s.googleDriveAuth?.accessToken) {
+        const nextCfg: SyncConfig = {
+          ...s.syncConfig,
+          savedPin: cleanPin,
+          ...(targetEmail ? { accountEmail: targetEmail } : {}),
+        };
+        stateRef.current.syncConfig = nextCfg;
+        updateSyncConfig(nextCfg);
+        dirtyScopesRef.current.add('personalization');
+        await triggerSync(true);
+        showToast('PIN restablecido y guardado en tu Google Drive');
+        return true;
+      }
+
+      if (targetEmail) {
+        const newSpaceId = deriveEmailSpaceId(targetEmail, cleanPin);
+        const nextCfg: SyncConfig = {
+          ...s.syncConfig,
+          spaceId: newSpaceId,
+          accountEmail: targetEmail,
+          savedPin: cleanPin,
+          autoSync: true,
+          liveSync: true,
+        };
+        stateRef.current.syncConfig = nextCfg;
+        updateSyncConfig(nextCfg);
+        dirtyScopesRef.current.add('books');
+        dirtyScopesRef.current.add('personalization');
+        await triggerSync(true);
+        showToast('PIN restablecido. Tu biblioteca actual quedó respaldada con tu nuevo PIN.');
+        return true;
+      }
+
+      updateSyncConfig({ savedPin: cleanPin });
+      showToast('PIN actualizado en este dispositivo');
+      return true;
+    },
+    [showToast, triggerSync, updateSyncConfig]
+  );
+
   const logoutAccount = useCallback(async () => {
-    // Flush any pending changes to the user's cloud vault before clearing local device
+    // Flush any pending changes to the user's cloud vault (Drive or Email) before clearing local device
     const s = stateRef.current;
-    if (s.syncConfig.liveSync && (s.syncConfig.serverUrl.trim() || s.syncConfig.accountEmail)) {
+    if (s.googleDriveAuth?.accessToken) {
+      try {
+        await triggerSync(true);
+      } catch {
+        // ignore offline logout
+      }
+    } else if (s.syncConfig.liveSync && (s.syncConfig.serverUrl.trim() || s.syncConfig.accountEmail)) {
       try {
         const pushTheme = themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme);
         const pushProfile = profileUpdatedAtRef.current > 0 || isProfileCustomized(s.profile);
@@ -4152,6 +4569,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     await dbClearAllUserData();
+    persistGoogleDriveAuth(null);
 
     const newDeviceId = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const freshSpaceId = `vault_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -4209,8 +4627,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setSyncConfig(freshSync);
     setSyncStatus('idle');
     setSyncMessage('');
-    showToast('Sesión cerrada en este dispositivo. Tu copia sigue guardada en tu correo.');
-  }, [showToast]);
+    showToast('Sesión cerrada en este dispositivo. Tu copia sigue guardada en la nube.');
+  }, [persistGoogleDriveAuth, showToast, triggerSync]);
 
   const buildBackupJsonBundle = useCallback(() => {
     const s = stateRef.current;
@@ -5602,6 +6020,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         attachLocalFileToBook,
         updateBook,
         reExtractBookCover,
+        identifyBookWithAI,
         deleteBook,
         addBookmark,
         deleteBookmark,
@@ -5645,6 +6064,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         connectGoogleDrive,
         disconnectGoogleDrive,
         loginWithEmail,
+        resetAccountPin,
         logoutAccount,
         exportBackupJson,
         shareBackupJson,
