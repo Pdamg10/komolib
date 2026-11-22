@@ -1,4 +1,5 @@
 import type { BookFormat, BookItem, ContentKind } from '../types/library';
+import { resolveBookTitleAndAuthor } from '../utils/bookMetadata';
 import { isRasterCoverDataUrl } from '../utils/coverHelpers';
 import { extractAudioCover } from './audioCoverParser';
 import { extractCbrCoverAndCount, extractCbzCoverAndCount } from './comicParser';
@@ -156,8 +157,13 @@ export async function importSingleFile(
   } catch (err) {
     console.warn('Cover/metadata extraction fallback:', err);
   }
-  if (!overrides?.title && extracted.title) title = extracted.title;
-  if (!overrides?.author && extracted.author) author = extracted.author;
+  const resolvedMeta = resolveBookTitleAndAuthor({
+    fileName: file.name,
+    metaTitle: extracted.title,
+    metaAuthor: extracted.author,
+  });
+  if (!overrides?.title) title = resolvedMeta.title;
+  if (!overrides?.author) author = resolvedMeta.author;
   if (extracted.description) description = extracted.description;
   if (extracted.coverDataUrl) coverDataUrl = extracted.coverDataUrl;
   if (extracted.pageCount !== undefined) pageCount = extracted.pageCount;

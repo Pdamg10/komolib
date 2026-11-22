@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import { SYNC_SERVER_URL } from '../config';
+import { deriveEmailSpaceId } from '../services/syncService';
 import {
   pickExternalBackupNatively,
   supportsNativeBackupPicker,
@@ -54,13 +55,16 @@ export const ProfileModal: React.FC = () => {
 
   const imgRef = useRef<HTMLInputElement>(null);
   const backupFileRef = useRef<HTMLInputElement>(null);
+  const pinInputRef = useRef<HTMLInputElement>(null);
   const [emailInput, setEmailInput] = useState(profile.email || syncConfig.accountEmail || '');
   const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (profileModalOpen) {
       setEmailInput(profile.email || syncConfig.accountEmail || '');
+      setPinError('');
     }
   }, [profileModalOpen, profile.email, syncConfig.accountEmail]);
 
@@ -119,15 +123,62 @@ export const ProfileModal: React.FC = () => {
     }
   };
 
+  const requirePinOrWarn = (): boolean => {
+    if (!pinInput.trim()) {
+      setPinError('Se requiere PIN');
+      showToast('Se requiere PIN');
+      pinInputRef.current?.focus();
+      return false;
+    }
+    setPinError('');
+    return true;
+  };
+
   const handleConnectEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!emailInput.trim() || busy) return;
+    if (!requirePinOrWarn()) return;
     setBusy(true);
     try {
       await loginWithEmail(emailInput, pinInput);
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleSaveNow = async () => {
+    if (busy) return;
+    if (!requirePinOrWarn()) return;
+    const targetEmail = (emailInput.trim() || linkedEmail).toLowerCase();
+    if (!targetEmail) {
+      showToast('Ingresa tu correo electrónico o nombre de usuario');
+      return;
+    }
+    setBusy(true);
+    try {
+      const derivedSpace = deriveEmailSpaceId(targetEmail, pinInput);
+      if (syncConfig.spaceId === derivedSpace && syncConfig.accountEmail === targetEmail) {
+        await triggerSync(false);
+      } else {
+        await loginWithEmail(targetEmail, pinInput);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSyncOfflineFiles = async () => {
+    if (busy || offlineSyncProgress) return;
+    if (!requirePinOrWarn()) return;
+    const targetEmail = (emailInput.trim() || linkedEmail).toLowerCase();
+    if (targetEmail) {
+      const derivedSpace = deriveEmailSpaceId(targetEmail, pinInput);
+      if (syncConfig.spaceId !== derivedSpace || syncConfig.accountEmail !== targetEmail) {
+        const ok = await loginWithEmail(targetEmail, pinInput);
+        if (!ok) return;
+      }
+    }
+    await syncAllBookFilesForOffline();
   };
 
   const handleRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -284,7 +335,7 @@ export const ProfileModal: React.FC = () => {
           </div>
 
           <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
-            Ingresa tu correo electrónico para guardar o recuperar tus libros, progreso, marcas y personalización desde cualquier navegador, APK o internet.
+            Ingresa tu correo electrónico y tu PIN para guardar o sincronizar tus libros, progreso, marcas y personalización desde cualquier navegador, APK o internet.
           </div>
 
           {cloudServerMissing && (
@@ -334,15 +385,39 @@ export const ProfileModal: React.FC = () => {
                 />
               </div>
               <input
+                ref={pinInputRef}
                 type="password"
                 className="studio-input"
-                style={{ flex: '1 1 110px', minWidth: 0 }}
-                placeholder="PIN (opcional)"
+                style={{
+                  flex: '1 1 110px',
+                  minWidth: 0,
+                  borderColor: pinError ? '#d9534f' : undefined,
+                }}
+                placeholder="PIN"
                 value={pinInput}
-                onChange={(e) => setPinInput(e.target.value)}
-                title="PIN o clave opcional para proteger tu bóveda en la nube"
+                onChange={(e) => {
+                  setPinInput(e.target.value);
+                  if (pinError && e.target.value.trim()) setPinError('');
+                }}
+                title="PIN obligatorio para guardar y sincronizar tu bóveda en la nube"
               />
             </div>
+
+            {pinError && (
+              <div
+                role="alert"
+                style={{
+                  fontSize: 11.5,
+                  fontWeight: 800,
+                  color: '#d9534f',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <AlertTriangle size={13} /> {pinError}
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
               <button
@@ -363,9 +438,10 @@ export const ProfileModal: React.FC = () => {
                 <button
                   type="button"
                   className="pill-btn"
+                  disabled={busy}
                   style={{ height: 34, fontSize: 11.5 }}
-                  onClick={() => triggerSync(false)}
-                  title="Guardar copia en la nube ahora"
+                  onClick={() => void handleSaveNow()}
+                  title="Guardar copia en la nube ahora (requiere PIN)"
                 >
                   <RefreshCw size={13} /> Guardar ahora
                 </button>
@@ -438,7 +514,7 @@ export const ProfileModal: React.FC = () => {
                   fontSize: 11.5,
                 }}
                 disabled={Boolean(offlineSyncProgress) || busy}
-                onClick={() => void syncAllBookFilesForOffline()}
+                onClick={() => void handleSyncOfflineFiles()}
               >
                 <Download size={13} />{' '}
                 {offlineSyncProgress || 'Sincronizar archivos para leer offline'}

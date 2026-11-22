@@ -1,8 +1,13 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, Smartphone, X } from 'lucide-react';
 import { AnnotationsView } from './components/AnnotationsView';
 import { AudioPlayerBar } from './components/AudioPlayerBar';
 import { BookDetailModal } from './components/BookDetailModal';
+import {
+  BookOptionsSheet,
+  closeBookOptionsMenu,
+  isBookOptionsMenuOpen,
+} from './components/BookOptionsSheet';
 import { BookShelf } from './components/BookShelf';
 import { CategoryStrip } from './components/CategoryStrip';
 import { DashboardView } from './components/DashboardView';
@@ -23,8 +28,21 @@ const AppWorkspace: React.FC = () => {
   const {
     theme,
     navSection,
+    setNavSection,
     books,
+    activeBook,
+    closeReader,
     openBook,
+    importModalOpen,
+    setImportModalOpen,
+    studioModalOpen,
+    setStudioModalOpen,
+    profileModalOpen,
+    setProfileModalOpen,
+    editingBook,
+    setEditingBook,
+    missingFileBook,
+    setMissingFileBook,
     remoteActiveSession,
     dismissRemoteSession,
     importFiles,
@@ -32,6 +50,97 @@ const AppWorkspace: React.FC = () => {
     ready,
   } = useLibrary();
   const [globalDragging, setGlobalDragging] = useState(false);
+
+  // Unified back-gesture handler for BOTH Android APK (MainActivity OnBackPressedCallback) and Web PWA
+  const handleAppBack = useCallback((): boolean => {
+    if (isBookOptionsMenuOpen()) {
+      closeBookOptionsMenu();
+      return true;
+    }
+    if (missingFileBook) {
+      setMissingFileBook(null);
+      return true;
+    }
+    if (editingBook) {
+      setEditingBook(null);
+      return true;
+    }
+    if (studioModalOpen) {
+      setStudioModalOpen(false);
+      return true;
+    }
+    if (importModalOpen) {
+      setImportModalOpen(false);
+      return true;
+    }
+    if (profileModalOpen) {
+      setProfileModalOpen(false);
+      return true;
+    }
+    if (activeBook) {
+      const win = window as unknown as { __komoCloseReaderDrawer?: () => boolean };
+      if (win.__komoCloseReaderDrawer?.()) {
+        return true;
+      }
+      closeReader();
+      return true;
+    }
+    if (navSection !== 'home') {
+      setNavSection('home');
+      return true;
+    }
+    return false;
+  }, [
+    activeBook,
+    closeReader,
+    editingBook,
+    importModalOpen,
+    missingFileBook,
+    navSection,
+    profileModalOpen,
+    setEditingBook,
+    setImportModalOpen,
+    setMissingFileBook,
+    setNavSection,
+    setProfileModalOpen,
+    setStudioModalOpen,
+    studioModalOpen,
+  ]);
+
+  const handleAppBackRef = useRef(handleAppBack);
+  handleAppBackRef.current = handleAppBack;
+
+  useEffect(() => {
+    const win = window as unknown as { __komoHandleAndroidBack?: () => boolean };
+    win.__komoHandleAndroidBack = () => handleAppBackRef.current();
+    return () => {
+      delete win.__komoHandleAndroidBack;
+    };
+  }, []);
+
+  // Push browser history sentinel when opening the fullscreen reader so Web/PWA swipe-back closes reader cleanly
+  const readerHistoryPushedRef = useRef(false);
+  useEffect(() => {
+    if (activeBook && !readerHistoryPushedRef.current) {
+      try {
+        window.history.pushState({ komoReader: true }, '');
+        readerHistoryPushedRef.current = true;
+      } catch {
+        // ignore history API restriction
+      }
+    } else if (!activeBook) {
+      readerHistoryPushedRef.current = false;
+    }
+  }, [activeBook]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      readerHistoryPushedRef.current = false;
+      handleAppBackRef.current();
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const isFullView = theme.fullView !== false;
   const hasWallpaper = Boolean(theme.customWallpaperUrl);
@@ -201,6 +310,7 @@ const AppWorkspace: React.FC = () => {
       {/* Modals & Floating Audio Player */}
       <ImportModal />
       <StudioModal />
+      <BookOptionsSheet />
       <BookDetailModal />
       <MissingFileModal />
       <ProfileModal />

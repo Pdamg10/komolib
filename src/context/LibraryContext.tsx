@@ -59,6 +59,7 @@ import {
   hasDisplayableOriginalCover,
   isRasterCoverDataUrl,
 } from '../utils/coverHelpers';
+import { isGenericAuthor, resolveBookTitleAndAuthor } from '../utils/bookMetadata';
 import {
   checkServerHealth,
   deleteBookFromServer,
@@ -2012,16 +2013,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
         const fmt = (it.format || 'epub') as BookItem['format'];
-        const cleanFileTitle = it.fileName
-          .replace(/\.[^.]+$/, '')
-          .replace(/[_-]+/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        const title = (it.title && it.title.trim()) || cleanFileTitle || 'Sin título';
-        const author =
-          opts?.author?.trim() ||
-          (it.author && it.author.trim()) ||
-          'Biblioteca Personal';
+        const resolvedMeta = resolveBookTitleAndAuthor({
+          fileName: it.fileName,
+          folderPath: it.folderPath,
+          metaTitle: it.title,
+          metaAuthor: it.author,
+        });
+        const title = resolvedMeta.title;
+        const author = opts?.author?.trim() || resolvedMeta.author;
         const kind: ContentKind =
           opts?.kind ||
           (fmt === 'audio'
@@ -2053,13 +2052,16 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             if (duplicateSamples.length < 3) duplicateSamples.push(existing.title || title);
           }
 
-          if (wasMissingFile || shouldUpgradeCover || needsUriUpdate) {
+          const shouldUpgradeMeta =
+            (isGenericAuthor(existing.author) && !isGenericAuthor(author)) ||
+            (existing.title !== title && /[-–—_]/.test(existing.title) && !/[-–—_]/.test(title));
+
+          if (wasMissingFile || shouldUpgradeCover || needsUriUpdate || shouldUpgradeMeta) {
             const merged: BookItem = {
               ...existing,
+              title: shouldUpgradeMeta ? title : existing.title,
               author:
-                existing.author &&
-                existing.author !== 'Autor desconocido' &&
-                existing.author !== 'Biblioteca Personal'
+                !isGenericAuthor(existing.author)
                   ? existing.author
                   : author,
               description: existing.description || it.description,
@@ -2585,24 +2587,46 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const blob = await downloadBookFromServer(cfg, book);
           fileRecord = { id: book.id, blob };
           await updateBook(book.id, { hasLocalFile: true, hasRemoteFile: true });
-          // If the book lacked an original raster cover, extract it now from the freshly downloaded file!
-          if (!hasDisplayableOriginalCover(book) && book.hasOriginalCover !== false) {
+          // Extract cover AND repair missing/swapped title/author from the freshly downloaded file!
+          const needsCover = !hasDisplayableOriginalCover(book) && book.hasOriginalCover !== false;
+          const needsMeta =
+            isGenericAuthor(book.author) ||
+            /[-–—|]/.test(book.title) ||
+            book.title.toLowerCase().endsWith(`.${book.format}`);
+          if (needsCover || needsMeta) {
             extractOriginalCoverFromBlob(blob, book.format, book.title)
               .then(async (ext) => {
-                if (!ext.coverDataUrl || !isRasterCoverDataUrl(ext.coverDataUrl)) return;
-                const pal = await extractCoverPaletteFromDataUrl(
-                  ext.coverDataUrl,
-                  book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
-                  book.ribbonColor || '#f2ba59'
-                );
-                await updateBook(book.id, {
-                  coverDataUrl: ext.coverDataUrl,
-                  hasOriginalCover: true,
-                  coverCheckedV2: true,
-                  coverCheckedV3: true,
-                  spineColor: pal.spineColor,
-                  ribbonColor: pal.ribbonColor,
-                });
+                const patch: Partial<BookItem> = {};
+                if (needsCover && ext.coverDataUrl && isRasterCoverDataUrl(ext.coverDataUrl)) {
+                  const pal = await extractCoverPaletteFromDataUrl(
+                    ext.coverDataUrl,
+                    book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
+                    book.ribbonColor || '#f2ba59'
+                  );
+                  patch.coverDataUrl = ext.coverDataUrl;
+                  patch.hasOriginalCover = true;
+                  patch.coverCheckedV2 = true;
+                  patch.coverCheckedV3 = true;
+                  patch.spineColor = pal.spineColor;
+                  patch.ribbonColor = pal.ribbonColor;
+                }
+                if (needsMeta) {
+                  const resolved = resolveBookTitleAndAuthor({
+                    fileName: book.fileName || `${book.title}.${book.format}`,
+                    folderPath: book.folderPath,
+                    metaTitle: ext.title || book.title,
+                    metaAuthor: ext.author || (isGenericAuthor(book.author) ? undefined : book.author),
+                  });
+                  if (resolved.title && resolved.title !== book.title) {
+                    patch.title = resolved.title;
+                  }
+                  if (!isGenericAuthor(resolved.author) && resolved.author !== book.author) {
+                    patch.author = resolved.author;
+                  }
+                }
+                if (Object.keys(patch).length > 0) {
+                  await updateBook(book.id, patch);
+                }
               })
               .catch(() => undefined);
           }
@@ -3343,7 +3367,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       for (const b of currentBooks) {
         const rec = await dbGetBookFile(b.id);
-        if (rec) localBooks.push(b);
+        if (rec || b.nativeFileUri) localBooks.push(b);
         else missingLocalBooks.push(b);
       }
 
@@ -3405,7 +3429,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [showToast, triggerSync]);
 
-  // Cloud Account by Email + Full Backup / Restore
+  // Cloud Account by Email + Required PIN + Full Backup / Restore
   const loginWithEmail = useCallback(
     async (rawEmail: string, rawPin = ''): Promise<boolean> => {
       const cleanEmail = rawEmail.trim().toLowerCase();
@@ -3413,9 +3437,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         showToast('Ingresa tu correo electrónico o nombre de usuario');
         return false;
       }
+      const cleanPin = rawPin.trim();
+      if (!cleanPin) {
+        showToast('Se requiere PIN');
+        return false;
+      }
       await dbSetKV('explicitLogout', false);
 
-      const spaceId = deriveEmailSpaceId(cleanEmail, rawPin);
+      const spaceId = deriveEmailSpaceId(cleanEmail, cleanPin);
       const s = stateRef.current;
       const savedServer = normalizeServerUrl(s.syncConfig.serverUrl);
       const isHttpsPage =
@@ -4335,6 +4364,39 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (active) {
           setLiveConnected(connected);
           if (connected) setServerOnline(true);
+        }
+      },
+      async (reqEv) => {
+        if (!active) return;
+        const s = stateRef.current;
+        if (reqEv.requesterDeviceId && reqEv.requesterDeviceId === s.deviceId) return;
+        const norm = (v?: string) =>
+          (v || '')
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^a-z0-9]+/g, '');
+        const target =
+          s.books.find((b) => b.id === reqEv.bookId) ||
+          (reqEv.fileName ? s.books.find((b) => norm(b.fileName) === norm(reqEv.fileName)) : undefined) ||
+          (reqEv.title ? s.books.find((b) => norm(b.title) === norm(reqEv.title)) : undefined);
+        if (!target) return;
+        const localRec = await dbGetBookFile(target.id);
+        if (!localRec && !target.nativeFileUri) return;
+        try {
+          const up = await uploadBookToServer(s.syncConfig, target, s.deviceId);
+          if (up.ok) {
+            const patched: BookItem = {
+              ...target,
+              hasRemoteFile: true,
+              remoteFileName: up.remoteFileName || target.remoteFileName,
+              format: up.format || target.format,
+            };
+            await dbPutBook(patched);
+            setBooks((prev) => prev.map((x) => (x.id === target.id ? patched : x)));
+          }
+        } catch {
+          // ignore transient upload failure
         }
       }
     );

@@ -83,7 +83,7 @@ export interface RemoteSyncPayload {
 }
 
 /**
- * Deterministically derives a private cloud vault ID (`acct_<hex>`) from an email + optional PIN
+ * Deterministically derives a private cloud vault ID (`acct_<hex>`) from an email + required PIN
  * using dual 32-bit FNV-1a/cyrb hashes so it works identically on HTTP LAN, HTTPS, localhost & APK.
  */
 export function deriveEmailSpaceId(email: string, pin = ''): string {
@@ -467,10 +467,11 @@ export async function uploadBookToServer(
 
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const url = `${base}/api/books/upload`;
+  const { nativeFileUri: _ignoreLocalUri, ...syncableUploadMeta } = uploadMeta;
   const form = new FormData();
   form.append('id', book.id);
   if (deviceId) form.append('deviceId', deviceId);
-  form.append('meta', JSON.stringify(uploadMeta));
+  form.append('meta', JSON.stringify(syncableUploadMeta));
   form.append('file', uploadBlob, uploadName);
 
   const res = await fetchApi(url, {
@@ -501,6 +502,25 @@ export async function downloadBookFromServer(config: SyncConfig, book: BookItem)
   const blob = await res.blob();
   await dbPutBookFile(book.id, blob);
   return blob;
+}
+
+export async function requestBookUploadFromPeer(
+  config: SyncConfig,
+  book: BookItem,
+  requesterDeviceId: string
+): Promise<{ ok: boolean; peersNotified: number; totalClients: number }> {
+  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
+  const url = `${base}/api/books/${encodeURIComponent(book.id)}/request-upload`;
+  const res = await fetchApi(url, {
+    method: 'POST',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify({
+      requesterDeviceId,
+      fileName: book.fileName,
+      title: book.title,
+    }),
+  });
+  return parseJsonResponse<{ ok: boolean; peersNotified: number; totalClients: number }>(res, url);
 }
 
 export async function deleteBookFromServer(config: SyncConfig, bookId: string): Promise<void> {
@@ -635,10 +655,19 @@ export async function syncFullState(
   return merged;
 }
 
+export interface FileUploadRequestEvent {
+  bookId: string;
+  fileName?: string;
+  title?: string;
+  requesterDeviceId?: string;
+  requestedAt?: number;
+}
+
 export function subscribeToSyncStream(
   config: SyncConfig,
   onSyncUpdate: (event: { sourceDeviceId: string; updatedAt: number }) => void,
-  onStatusChange?: (connected: boolean) => void
+  onStatusChange?: (connected: boolean) => void,
+  onFileUploadRequest?: (event: FileUploadRequestEvent) => void
 ): () => void {
   if (typeof EventSource === 'undefined') return () => undefined;
   const url = buildStreamUrl(config, '/api/sync/stream');
@@ -656,15 +685,25 @@ export function subscribeToSyncStream(
       // ignore malformed
     }
   };
+  const uploadReqHandler = (ev: MessageEvent) => {
+    try {
+      const parsed = JSON.parse(ev.data) as FileUploadRequestEvent;
+      if (parsed?.bookId) onFileUploadRequest?.(parsed);
+    } catch {
+      // ignore malformed
+    }
+  };
   es.addEventListener('open', handleOpen);
   es.addEventListener('connected', handleConnected);
   es.addEventListener('error', handleError);
   es.addEventListener('sync_update', handler as EventListener);
+  es.addEventListener('file_upload_requested', uploadReqHandler as EventListener);
   return () => {
     es.removeEventListener('open', handleOpen);
     es.removeEventListener('connected', handleConnected);
     es.removeEventListener('error', handleError);
     es.removeEventListener('sync_update', handler as EventListener);
+    es.removeEventListener('file_upload_requested', uploadReqHandler as EventListener);
     es.close();
     onStatusChange?.(false);
   };

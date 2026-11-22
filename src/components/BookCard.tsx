@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Clock, Cloud, Edit3, Folder, Heart, Headphones, Star } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import type { BookItem } from '../types/library';
@@ -9,6 +9,101 @@ import {
   getAdaptiveRibbonCss,
   getAdaptiveSpineCss,
 } from './BookCoverVisual';
+import { openBookOptionsMenu } from './BookOptionsSheet';
+
+const LONG_PRESS_MS = 440;
+const MOVE_CANCEL_PX = 10;
+
+function useBookLongPress(book: BookItem, onOpen: (b: BookItem) => void) {
+  const timerRef = useRef<number | null>(null);
+  const startPosRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressFiredAtRef = useRef<number>(0);
+  const [isPressing, setIsPressing] = useState(false);
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    startPosRef.current = null;
+    setIsPressing(false);
+  }, []);
+
+  useEffect(() => clearTimer, [clearTimer]);
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      clearTimer();
+      startPosRef.current = { x: e.clientX, y: e.clientY };
+      setIsPressing(true);
+      timerRef.current = window.setTimeout(() => {
+        timerRef.current = null;
+        startPosRef.current = null;
+        setIsPressing(false);
+        longPressFiredAtRef.current = Date.now();
+        try {
+          if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+            navigator.vibrate(18);
+          }
+        } catch {
+          // ignore vibration unsupported
+        }
+        openBookOptionsMenu(book);
+      }, LONG_PRESS_MS);
+    },
+    [book, clearTimer]
+  );
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const start = startPosRef.current;
+      if (!start) return;
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      if (Math.hypot(dx, dy) > MOVE_CANCEL_PX) {
+        clearTimer();
+      }
+    },
+    [clearTimer]
+  );
+
+  const onContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearTimer();
+      longPressFiredAtRef.current = Date.now();
+      openBookOptionsMenu(book);
+    },
+    [book, clearTimer]
+  );
+
+  const onClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (Date.now() - longPressFiredAtRef.current < 500) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      onOpen(book);
+    },
+    [book, onOpen]
+  );
+
+  return {
+    isPressing,
+    handlers: {
+      onPointerDown,
+      onPointerMove,
+      onPointerUp: clearTimer,
+      onPointerCancel: clearTimer,
+      onPointerLeave: clearTimer,
+      onContextMenu,
+      onClick,
+    },
+  };
+}
 
 interface BookCardProps {
   book: BookItem;
@@ -16,6 +111,7 @@ interface BookCardProps {
 
 const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
   const { openBook, updateBook, setEditingBook, theme } = useLibrary();
+  const { isPressing, handlers } = useBookLongPress(book, openBook);
 
   const hasOriginal = hasDisplayableOriginalCover(book);
 
@@ -36,8 +132,8 @@ const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
 
   return (
     <article
-      className="book-card"
-      onClick={() => openBook(book)}
+      className={`book-card ${isPressing ? 'pressing' : ''}`}
+      {...handlers}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
@@ -87,7 +183,12 @@ const BookCardInner: React.FC<BookCardProps> = ({ book }) => {
               </span>
             )}
 
-            <div className="book-card-actions" onClick={(e) => e.stopPropagation()}>
+            <div
+              className="book-card-actions"
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.stopPropagation()}
+            >
               <button
                 className={`book-mini-btn ${book.favorite ? 'fav-active' : ''}`}
                 onClick={() => updateBook(book.id, { favorite: !book.favorite })}
@@ -177,6 +278,7 @@ export const BookCard = React.memo(BookCardInner);
 
 const BookListRowInner: React.FC<BookCardProps> = ({ book }) => {
   const { openBook, updateBook, setEditingBook } = useLibrary();
+  const { isPressing, handlers } = useBookLongPress(book, openBook);
 
   const hasOriginal = hasDisplayableOriginalCover(book);
 
@@ -194,8 +296,8 @@ const BookListRowInner: React.FC<BookCardProps> = ({ book }) => {
 
   return (
     <article
-      className="book-list-row"
-      onClick={() => openBook(book)}
+      className={`book-list-row ${isPressing ? 'pressing' : ''}`}
+      {...handlers}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
@@ -265,7 +367,12 @@ const BookListRowInner: React.FC<BookCardProps> = ({ book }) => {
         </div>
       </div>
 
-      <div className="book-list-actions" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="book-list-actions"
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
+      >
         <button
           type="button"
           className={`circle-arrow-btn ${book.favorite ? 'active-fav' : ''}`}

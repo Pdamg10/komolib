@@ -26,7 +26,6 @@ export const Sidebar: React.FC = () => {
     setStudioModalOpen,
   } = useLibrary();
 
-  const favCount = books.filter((b) => b.favorite).length;
   const readingCount = books.filter((b) => b.progress > 0 && b.progress < 100).length;
   const sharedTotalCount = sharedRooms.length + sharedShelves.length;
 
@@ -34,7 +33,7 @@ export const Sidebar: React.FC = () => {
     id: NavSection;
     label: string;
     icon: React.ReactNode;
-    badge?: number;
+    badge?: number | string;
   }> = [
     { id: 'home', label: 'Biblioteca', icon: <LayoutGrid size={19} /> },
     { id: 'dashboard', label: 'Dashboard y Estadísticas', icon: <BarChart3 size={19} /> },
@@ -48,11 +47,16 @@ export const Sidebar: React.FC = () => {
       id: 'shared',
       label: 'Compartir Libros y Sync',
       icon: <Users size={19} />,
-      badge: sharedTotalCount || undefined,
+      badge: sharedTotalCount > 99 ? '99+' : sharedTotalCount || undefined,
     },
-    { id: 'favorites', label: 'Favoritos', icon: <Star size={19} />, badge: favCount || undefined },
+    { id: 'favorites', label: 'Favoritos', icon: <Star size={19} /> },
     { id: 'wishlist', label: 'Wishlist / Por leer', icon: <Heart size={19} /> },
-    { id: 'reading', label: 'Leyendo y Audio', icon: <Play size={19} />, badge: readingCount || undefined },
+    {
+      id: 'reading',
+      label: 'Leyendo y Audio',
+      icon: <Play size={19} />,
+      badge: readingCount > 99 ? '99+' : readingCount || undefined,
+    },
   ];
 
   const handleOpenStudio = () => {

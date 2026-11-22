@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { CloudDownload, FolderOpen, HardDrive, Smartphone, X } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import { ACCEPTED_EXTENSIONS } from '../parsers';
+import { downloadBookFromServer, requestBookUploadFromPeer } from '../services/syncService';
 import { BookCoverVisual } from './BookCoverVisual';
 
 export const MissingFileModal: React.FC = () => {
@@ -9,13 +10,16 @@ export const MissingFileModal: React.FC = () => {
     missingFileBook,
     setMissingFileBook,
     attachLocalFileToBook,
+    updateBook,
     openBook,
     syncConfig,
+    deviceId,
     showToast,
   } = useLibrary();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<'cloud' | 'local' | null>(null);
+  const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
   if (!missingFileBook) return null;
@@ -27,13 +31,65 @@ export const MissingFileModal: React.FC = () => {
     if (busy) return;
     setBusy('cloud');
     setErrorMsg('');
+    setStatusMsg('Buscando archivo en tu nube...');
     try {
-      setMissingFileBook(null);
-      await openBook({ ...book, hasRemoteFile: true });
-    } catch {
-      setErrorMsg('No se pudo descargar desde la nube en este momento.');
+      // 1. Try direct cloud download first
+      let downloaded = false;
+      try {
+        await downloadBookFromServer(syncConfig, book);
+        downloaded = true;
+      } catch (firstErr) {
+        const msg = firstErr instanceof Error ? firstErr.message : '';
+        const isNotFound = msg.includes('404');
+        if (!isNotFound) {
+          throw firstErr;
+        }
+
+        // 2. File is not yet on the cloud server -> ask tablet/other connected device to upload it live!
+        setStatusMsg('Solicitando el libro a tu otro dispositivo conectado...');
+        const reqRes = await requestBookUploadFromPeer(syncConfig, book, deviceId).catch(() => ({
+          ok: false,
+          peersNotified: 0,
+          totalClients: 0,
+        }));
+
+        if (reqRes.peersNotified > 0) {
+          for (let attempt = 1; attempt <= 12; attempt++) {
+            setStatusMsg(
+              `Tu otro dispositivo está subiendo el archivo (${attempt * 2}s)...`
+            );
+            await new Promise((r) => setTimeout(r, 2000));
+            try {
+              await downloadBookFromServer(syncConfig, book);
+              downloaded = true;
+              break;
+            } catch {
+              // keep waiting while tablet uploads
+            }
+          }
+        }
+      }
+
+      if (downloaded) {
+        const readyBook = { ...book, hasLocalFile: true, hasRemoteFile: true };
+        await updateBook(book.id, { hasLocalFile: true, hasRemoteFile: true });
+        setMissingFileBook(null);
+        await openBook(readyBook);
+        return;
+      }
+
+      setErrorMsg(
+        'Este libro todavía no está subido en tu nube. Abre Komolib en tu tablet con internet y toca de nuevo este botón (se transferirá automático), o pulsa "Sincronizar archivos para leer offline" en Perfil de tu tablet.'
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo conectar con tu cuenta en la nube en este momento.'
+      );
     } finally {
       setBusy(null);
+      setStatusMsg('');
     }
   };
 
@@ -123,7 +179,9 @@ export const MissingFileModal: React.FC = () => {
               onClick={handleRetryCloud}
             >
               <CloudDownload size={15} />{' '}
-              {busy === 'cloud' ? 'Descargando...' : 'Descargar desde mi cuenta en la nube'}
+              {busy === 'cloud'
+                ? statusMsg || 'Descargando...'
+                : 'Descargar desde mi cuenta en la nube'}
             </button>
           )}
 

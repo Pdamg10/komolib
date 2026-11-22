@@ -23,6 +23,7 @@ import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.webkit.JavascriptInterface;
+import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.content.FileProvider;
@@ -116,6 +117,26 @@ public class MainActivity extends BridgeActivity {
         if (this.bridge != null && this.bridge.getWebView() != null) {
             this.bridge.getWebView().addJavascriptInterface(new KomoAndroidBridge(this), "KomoAndroid");
         }
+
+        // Intercept Android system back gesture / button so reading or modals return to the previous section instead of exiting the app
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (bridge != null && bridge.getWebView() != null) {
+                    bridge.getWebView().evaluateJavascript(
+                        "(function(){ return (typeof window.__komoHandleAndroidBack === 'function' && window.__komoHandleAndroidBack()) ? 'true' : 'false'; })()",
+                        value -> {
+                            boolean handled = "\"true\"".equals(value) || "true".equals(value);
+                            if (!handled) {
+                                moveTaskToBack(true);
+                            }
+                        }
+                    );
+                } else {
+                    moveTaskToBack(true);
+                }
+            }
+        });
     }
 
     private File getBackupTempFile() {
@@ -717,19 +738,34 @@ public class MainActivity extends BridgeActivity {
                             if (!t.isEmpty()) info.title = t;
                         }
 
-                        // Extract ALL <dc:creator> tags
-                        Matcher cm = Pattern.compile("<(?:[a-zA-Z0-9_-]+:)?creator\\b[^>]*>([\\s\\S]*?)</(?:[a-zA-Z0-9_-]+:)?creator>", Pattern.CASE_INSENSITIVE).matcher(opf);
-                        List<String> authors = new ArrayList<>();
+                        // Extract <dc:creator> tags (preferring primary authors over translators/editors)
+                        Matcher cm = Pattern.compile("<(?:[a-zA-Z0-9_-]+:)?creator\\b([^>]*)>([\\s\\S]*?)</(?:[a-zA-Z0-9_-]+:)?creator>", Pattern.CASE_INSENSITIVE).matcher(opf);
+                        List<String> primaryAuthors = new ArrayList<>();
+                        List<String> fallbackAuthors = new ArrayList<>();
                         while (cm.find()) {
-                            String a = decodeXmlEntities(cm.group(1));
-                            if (!a.isEmpty() && !authors.contains(a)) {
-                                authors.add(a);
+                            String attrs = cm.group(1) != null ? cm.group(1).toLowerCase(Locale.ROOT) : "";
+                            String a = decodeXmlEntities(cm.group(2));
+                            if (a.isEmpty()) continue;
+                            Matcher roleM = Pattern.compile("\\b(?:opf:)?role\\s*=\\s*[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE).matcher(attrs);
+                            String role = roleM.find() ? roleM.group(1).trim().toLowerCase(Locale.ROOT) : "";
+                            if (role.isEmpty() || "aut".equals(role) || "author".equals(role)) {
+                                if (!primaryAuthors.contains(a)) primaryAuthors.add(a);
+                            } else if (!fallbackAuthors.contains(a)) {
+                                fallbackAuthors.add(a);
                             }
                         }
+                        List<String> authors = !primaryAuthors.isEmpty() ? primaryAuthors : fallbackAuthors;
                         if (authors.isEmpty()) {
                             Matcher authMeta = Pattern.compile("<meta\\b[^>]*property\\s*=\\s*[\"']dcterms:creator[\"'][^>]*>([\\s\\S]*?)</meta>", Pattern.CASE_INSENSITIVE).matcher(opf);
                             if (authMeta.find()) {
                                 String a = decodeXmlEntities(authMeta.group(1));
+                                if (!a.isEmpty()) authors.add(a);
+                            }
+                        }
+                        if (authors.isEmpty()) {
+                            Matcher authMeta2 = Pattern.compile("<meta\\b[^>]*name\\s*=\\s*[\"']author[\"'][^>]*content\\s*=\\s*[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE).matcher(opf);
+                            if (authMeta2.find()) {
+                                String a = decodeXmlEntities(authMeta2.group(1));
                                 if (!a.isEmpty()) authors.add(a);
                             }
                         }
@@ -872,16 +908,47 @@ public class MainActivity extends BridgeActivity {
         return info;
     }
 
+    private static String decodePdfBytesString(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) return null;
+        try {
+            if (bytes.length >= 2 && (bytes[0] & 0xFF) == 0xFE && (bytes[1] & 0xFF) == 0xFF) {
+                return new String(bytes, 2, bytes.length - 2, StandardCharsets.UTF_16BE).trim();
+            }
+            if (bytes.length >= 2 && (bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xFE) {
+                return new String(bytes, 2, bytes.length - 2, StandardCharsets.UTF_16LE).trim();
+            }
+            return new String(bytes, StandardCharsets.ISO_8859_1).trim();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     private static String extractPdfInfoField(String text, String fieldName) {
-        Matcher m = Pattern.compile("/" + fieldName + "\\s*\\(([^()]{1,200})\\)").matcher(text);
+        // 1. Literal string: /Title (...) — supports UTF-16BE BOM (\u00fe\u00ff) for Spanish accents!
+        Matcher m = Pattern.compile("/" + fieldName + "\\s*\\(([^()]{1,400})\\)").matcher(text);
         if (m.find()) {
             String raw = m.group(1)
                 .replace("\\(", "(")
                 .replace("\\)", ")")
-                .replace("\\\\", "\\")
-                .trim();
-            if (!raw.isEmpty() && !raw.startsWith("\u00fe\u00ff")) {
-                return raw;
+                .replace("\\\\", "\\");
+            byte[] rawBytes = raw.getBytes(StandardCharsets.ISO_8859_1);
+            String decoded = decodePdfBytesString(rawBytes);
+            if (decoded != null && !decoded.isEmpty()) {
+                return decoded;
+            }
+        }
+        // 2. Hex string: /Title <FEFF0045...>
+        Matcher hexM = Pattern.compile("/" + fieldName + "\\s*<([0-9A-Fa-f\\s]{4,800})>").matcher(text);
+        if (hexM.find()) {
+            String hex = hexM.group(1).replaceAll("\\s+", "");
+            if (hex.length() % 2 == 1) hex += "0";
+            byte[] out = new byte[hex.length() / 2];
+            for (int i = 0; i < out.length; i++) {
+                out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+            }
+            String decoded = decodePdfBytesString(out);
+            if (decoded != null && !decoded.isEmpty()) {
+                return decoded;
             }
         }
         return null;

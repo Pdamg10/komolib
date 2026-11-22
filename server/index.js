@@ -1499,22 +1499,77 @@ app.get('/api/books/:id/file', (req, res) => {
   const spaceId = getRequestSpaceId(req);
   const id = req.params.id.replace(/[^a-zA-Z0-9_-]/g, '');
   const state = readState(spaceId);
-  const entry = state.books?.[id] || readState('default').books?.[id];
-  if (!entry || !entry.remoteFileName) {
+  const resolveExistingPath = (bookEntry, bookId) => {
+    if (!bookEntry || !bookEntry.remoteFileName) return null;
+    const baseName = path.basename(bookEntry.remoteFileName);
+    const unprefixed = baseName.includes('__') ? baseName.split('__').slice(1).join('__') : baseName;
+    const candidates = [
+      path.join(FILES_DIR, baseName),
+      path.join(FILES_DIR, unprefixed),
+      path.join(FILES_DIR, `${bookId}.${bookEntry.format || 'epub'}`),
+    ];
+    return candidates.find((p) => fs.existsSync(p)) || null;
+  };
+
+  let entry = state.books?.[id] || readState('default').books?.[id];
+  let filePath = resolveExistingPath(entry, id);
+
+  // Fallback: if another device uploaded the same file under a slightly different bookId, match by fileName/title
+  if (!filePath && entry) {
+    const norm = (s) =>
+      String(s || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '');
+    const targetFn = norm(entry.fileName);
+    const targetTitle = norm(entry.title);
+    for (const [otherId, other] of Object.entries(state.books || {})) {
+      if (!other || !other.remoteFileName) continue;
+      if ((targetFn && norm(other.fileName) === targetFn) || (targetTitle && norm(other.title) === targetTitle)) {
+        const candidatePath = resolveExistingPath(other, otherId);
+        if (candidatePath) {
+          filePath = candidatePath;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!filePath) {
     return res.status(404).json({ error: 'Archivo no encontrado en el servidor' });
   }
-  const baseName = path.basename(entry.remoteFileName);
-  const unprefixed = baseName.includes('__') ? baseName.split('__').slice(1).join('__') : baseName;
-  const candidates = [
-    path.join(FILES_DIR, baseName),
-    path.join(FILES_DIR, unprefixed),
-    path.join(FILES_DIR, `${id}.${entry.format || 'epub'}`),
-  ];
-  const filePath = candidates.find((p) => fs.existsSync(p));
-  if (!filePath) {
-    return res.status(404).json({ error: 'Archivo ausente en disco' });
-  }
   res.sendFile(filePath);
+});
+
+app.post('/api/books/:id/request-upload', (req, res) => {
+  const spaceId = getRequestSpaceId(req);
+  const id = req.params.id.replace(/[^a-zA-Z0-9_-]/g, '');
+  const requesterDeviceId = String(req.body?.requesterDeviceId || '').slice(0, 64);
+  const fileName = String(req.body?.fileName || '').slice(0, 260);
+  const title = String(req.body?.title || '').slice(0, 180);
+
+  const clients = syncSseClients.get(spaceId);
+  let peersNotified = 0;
+  if (clients && clients.size > 0) {
+    const payload = {
+      bookId: id,
+      fileName,
+      title,
+      requesterDeviceId,
+      requestedAt: Date.now(),
+    };
+    for (const client of clients) {
+      sendSseEvent(client, 'file_upload_requested', payload);
+      peersNotified++;
+    }
+  }
+
+  res.json({
+    ok: true,
+    peersNotified: Math.max(0, peersNotified - (requesterDeviceId ? 1 : 0)),
+    totalClients: clients ? clients.size : 0,
+  });
 });
 
 app.delete('/api/books/:id', (req, res) => {

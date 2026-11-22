@@ -151,12 +151,30 @@ function parseOpfWithRegexFallback(opfXml: string): {
   );
   const title = titleMatch ? decodeXmlEntities(titleMatch[1]) || undefined : undefined;
 
-  const authors: string[] = [];
-  const creatorRe = /<(?:[a-zA-Z0-9_-]+:)?creator\b[^>]*>([\s\S]*?)<\/(?:[a-zA-Z0-9_-]+:)?creator>/gi;
+  const primaryAuthors: string[] = [];
+  const fallbackAuthors: string[] = [];
+  const creatorRe = /<(?:[a-zA-Z0-9_-]+:)?creator\b([^>]*)>([\s\S]*?)<\/(?:[a-zA-Z0-9_-]+:)?creator>/gi;
   let cm: RegExpExecArray | null;
   while ((cm = creatorRe.exec(opfXml)) !== null) {
-    const a = decodeXmlEntities(cm[1]);
-    if (a && !authors.includes(a)) authors.push(a);
+    const attrs = (cm[1] || '').toLowerCase();
+    const a = decodeXmlEntities(cm[2]);
+    if (!a) continue;
+    const roleMatch = attrs.match(/\b(?:opf:)?role\s*=\s*["']([^"']+)["']/i);
+    const role = roleMatch?.[1]?.trim().toLowerCase() || '';
+    if (!role || role === 'aut' || role === 'author') {
+      if (!primaryAuthors.includes(a)) primaryAuthors.push(a);
+    } else if (!fallbackAuthors.includes(a)) {
+      fallbackAuthors.push(a);
+    }
+  }
+  const authors = primaryAuthors.length ? primaryAuthors : fallbackAuthors;
+  if (!authors.length) {
+    const metaAuthor =
+      opfXml.match(/<meta\b[^>]*\bproperty\s*=\s*["']dcterms:creator["'][^>]*>([\s\S]*?)<\/meta>/i) ||
+      opfXml.match(/<meta\b[^>]*\bname\s*=\s*["']author["'][^>]*\bcontent\s*=\s*["']([^"']+)["']/i) ||
+      opfXml.match(/<meta\b[^>]*\bcontent\s*=\s*["']([^"']+)["'][^>]*\bname\s*=\s*["']author["']/i);
+    const a = metaAuthor ? decodeXmlEntities(metaAuthor[1]) : '';
+    if (a) authors.push(a);
   }
   const author = authors.length ? authors.join(', ') : undefined;
 
@@ -239,14 +257,56 @@ export async function extractEpubMetaAndCover(blob: Blob): Promise<EpubMetaResul
         let firstSpineId = regexParsed.firstSpineId;
 
         if (opfDoc) {
+          const titleEls = Array.from(opfDoc.getElementsByTagNameNS('*', 'title'));
+          const mainTitleEl =
+            titleEls.find((el) => {
+              const id = el.getAttribute('id');
+              if (!id) return false;
+              const refine = Array.from(opfDoc.querySelectorAll('metadata meta')).find(
+                (m) =>
+                  m.getAttribute('refines') === `#${id}` &&
+                  m.getAttribute('property') === 'title-type'
+              );
+              return refine?.textContent?.trim().toLowerCase() === 'main';
+            }) || titleEls[0];
           title =
-            opfDoc.getElementsByTagNameNS('*', 'title')[0]?.textContent?.trim() ||
+            mainTitleEl?.textContent?.trim() ||
             opfDoc.querySelector('title')?.textContent?.trim() ||
             regexParsed.title;
+
           const creatorEls = Array.from(opfDoc.getElementsByTagNameNS('*', 'creator'));
-          const domAuthors = creatorEls
-            .map((el) => el.textContent?.trim() || '')
-            .filter(Boolean);
+          const primaryDomAuthors: string[] = [];
+          const fallbackDomAuthors: string[] = [];
+          for (const el of creatorEls) {
+            const val = el.textContent?.trim() || '';
+            if (!val) continue;
+            const roleAttr = (
+              el.getAttribute('opf:role') ||
+              el.getAttributeNS('http://www.idpf.org/2007/opf', 'role') ||
+              el.getAttribute('role') ||
+              ''
+            )
+              .trim()
+              .toLowerCase();
+            const id = el.getAttribute('id');
+            const refinedRole = id
+              ? Array.from(opfDoc.querySelectorAll('metadata meta'))
+                  .find(
+                    (m) =>
+                      m.getAttribute('refines') === `#${id}` &&
+                      m.getAttribute('property') === 'role'
+                  )
+                  ?.textContent?.trim()
+                  .toLowerCase() || ''
+              : '';
+            const effRole = roleAttr || refinedRole;
+            if (!effRole || effRole === 'aut' || effRole === 'author') {
+              if (!primaryDomAuthors.includes(val)) primaryDomAuthors.push(val);
+            } else if (!fallbackDomAuthors.includes(val)) {
+              fallbackDomAuthors.push(val);
+            }
+          }
+          const domAuthors = primaryDomAuthors.length ? primaryDomAuthors : fallbackDomAuthors;
           author =
             (domAuthors.length ? Array.from(new Set(domAuthors)).join(', ') : undefined) ||
             opfDoc.querySelector('creator')?.textContent?.trim() ||

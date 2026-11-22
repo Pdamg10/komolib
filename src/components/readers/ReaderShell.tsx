@@ -167,6 +167,29 @@ export const ReaderShell: React.FC = () => {
 
   const effectiveJumpTarget = localJumpTarget || (readerJumpTarget?.bookId === activeBook?.id ? readerJumpTarget : null);
 
+  // Allow Android / PWA back gesture to close open reader drawers or annotation composer first
+  useEffect(() => {
+    const win = window as unknown as { __komoCloseReaderDrawer?: () => boolean };
+    if (!activeBook) {
+      delete win.__komoCloseReaderDrawer;
+      return;
+    }
+    win.__komoCloseReaderDrawer = () => {
+      if (pendingSel) {
+        setPendingSel(null);
+        return true;
+      }
+      if (drawer !== 'none') {
+        setDrawer('none');
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      delete win.__komoCloseReaderDrawer;
+    };
+  }, [activeBook, drawer, pendingSel]);
+
   useEffect(() => {
     if (!activeRoom?.code || !syncConfig.serverUrl.trim()) return;
     return subscribeToRoomStream(
