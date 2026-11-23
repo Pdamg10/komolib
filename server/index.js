@@ -175,6 +175,12 @@ function emptyState() {
     deletedNoteIds: [],
     deletedBookmarkDesignIds: [],
     deletedChatSessionIds: [],
+    sharedRooms: [],
+    joinedRoomCodes: [],
+    closedRoomCodes: [],
+    sharedShelves: [],
+    joinedShelfCodes: [],
+    closedShelfCodes: [],
   };
 }
 
@@ -1184,6 +1190,85 @@ app.put('/api/sync/state', (req, res) => {
         (incomingProfileTs > 0 && incomingProfileTs >= currentProfileTs))
   );
 
+  const normCode = (c) => String(c || '').trim().toUpperCase();
+  const closedRoomCodes = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(current.closedRoomCodes) ? current.closedRoomCodes : []),
+        ...(Array.isArray(incoming.closedRoomCodes) ? incoming.closedRoomCodes : []),
+      ]
+        .map(normCode)
+        .filter(Boolean)
+    )
+  ).slice(-100);
+  const closedRoomSet = new Set(closedRoomCodes);
+  const mergedRoomsMap = new Map();
+  for (const r of Array.isArray(current.sharedRooms) ? current.sharedRooms : []) {
+    const code = normCode(r?.code);
+    if (code && !closedRoomSet.has(code)) mergedRoomsMap.set(code, r);
+  }
+  for (const r of Array.isArray(incoming.sharedRooms) ? incoming.sharedRooms : []) {
+    const code = normCode(r?.code);
+    if (!code || closedRoomSet.has(code)) continue;
+    const prev = mergedRoomsMap.get(code);
+    if (!prev || (r.updatedAt || r.createdAt || 0) >= (prev.updatedAt || prev.createdAt || 0)) {
+      mergedRoomsMap.set(code, r);
+    }
+  }
+  const mergedSharedRooms = Array.from(mergedRoomsMap.values())
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+    .slice(0, 40);
+  const mergedJoinedRoomCodes = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(current.joinedRoomCodes) ? current.joinedRoomCodes : []),
+        ...(Array.isArray(incoming.joinedRoomCodes) ? incoming.joinedRoomCodes : []),
+        ...mergedSharedRooms.map((r) => r.code),
+      ]
+        .map(normCode)
+        .filter((c) => c && !closedRoomSet.has(c))
+    )
+  ).slice(0, 40);
+
+  const closedShelfCodes = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(current.closedShelfCodes) ? current.closedShelfCodes : []),
+        ...(Array.isArray(incoming.closedShelfCodes) ? incoming.closedShelfCodes : []),
+      ]
+        .map(normCode)
+        .filter(Boolean)
+    )
+  ).slice(-100);
+  const closedShelfSet = new Set(closedShelfCodes);
+  const mergedShelvesMap = new Map();
+  for (const sh of Array.isArray(current.sharedShelves) ? current.sharedShelves : []) {
+    const code = normCode(sh?.code);
+    if (code && !closedShelfSet.has(code)) mergedShelvesMap.set(code, sh);
+  }
+  for (const sh of Array.isArray(incoming.sharedShelves) ? incoming.sharedShelves : []) {
+    const code = normCode(sh?.code);
+    if (!code || closedShelfSet.has(code)) continue;
+    const prev = mergedShelvesMap.get(code);
+    if (!prev || (sh.updatedAt || sh.createdAt || 0) >= (prev.updatedAt || prev.createdAt || 0)) {
+      mergedShelvesMap.set(code, sh);
+    }
+  }
+  const mergedSharedShelves = Array.from(mergedShelvesMap.values())
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+    .slice(0, 40);
+  const mergedJoinedShelfCodes = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(current.joinedShelfCodes) ? current.joinedShelfCodes : []),
+        ...(Array.isArray(incoming.joinedShelfCodes) ? incoming.joinedShelfCodes : []),
+        ...mergedSharedShelves.map((sh) => sh.code),
+      ]
+        .map(normCode)
+        .filter((c) => c && !closedShelfSet.has(c))
+    )
+  ).slice(0, 40);
+
   const now = Date.now();
   const nextState = {
     updatedAt: now,
@@ -1224,6 +1309,12 @@ app.put('/api/sync/state', (req, res) => {
     deletedNoteIds,
     deletedBookmarkDesignIds,
     deletedChatSessionIds,
+    sharedRooms: mergedSharedRooms,
+    joinedRoomCodes: mergedJoinedRoomCodes,
+    closedRoomCodes,
+    sharedShelves: mergedSharedShelves,
+    joinedShelfCodes: mergedJoinedShelfCodes,
+    closedShelfCodes,
   };
 
   writeState(nextState, spaceId);
@@ -1280,10 +1371,16 @@ app.post('/api/books/upload', upload.single('file'), (req, res) => {
 
 app.get('/api/rooms', (req, res) => {
   const rooms = readRooms();
-  const participantId = typeof req.query.participantId === 'string' ? req.query.participantId : '';
+  const rawParticipantId = typeof req.query.participantId === 'string' ? req.query.participantId : '';
+  const participantIds = rawParticipantId
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
   let list = Object.values(rooms);
-  if (participantId) {
-    list = list.filter((r) => r?.participants && r.participants[participantId]);
+  if (participantIds.length > 0) {
+    list = list.filter(
+      (r) => r?.participants && participantIds.some((id) => Boolean(r.participants[id]))
+    );
   }
   list.sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
   res.json({ rooms: list });

@@ -12,6 +12,8 @@ import type {
   GoogleDriveAuth,
   NoteItem,
   ReaderSettings,
+  SharedRoom,
+  SharedShelf,
   SyncConfig,
   ThemeConfig,
   UserProfile,
@@ -488,6 +490,12 @@ function mergeSyncStatesClientSide(
     deletedNoteIds?: string[];
     deletedBookmarkDesignIds?: string[];
     deletedChatSessionIds?: string[];
+    sharedRooms?: SharedRoom[];
+    joinedRoomCodes?: string[];
+    closedRoomCodes?: string[];
+    sharedShelves?: SharedShelf[];
+    joinedShelfCodes?: string[];
+    closedShelfCodes?: string[];
   }
 ): RemoteSyncPayload {
   const current: RemoteSyncPayload = remote || {
@@ -513,6 +521,12 @@ function mergeSyncStatesClientSide(
     deletedNoteIds: [],
     deletedBookmarkDesignIds: [],
     deletedChatSessionIds: [],
+    sharedRooms: [],
+    joinedRoomCodes: [],
+    closedRoomCodes: [],
+    sharedShelves: [],
+    joinedShelfCodes: [],
+    closedShelfCodes: [],
   };
 
   const mergeTombstones = (a: string[] = [], b: string[] = []) =>
@@ -656,6 +670,71 @@ function mergeSyncStatesClientSide(
       ? incomingSession
       : currentSession || null;
 
+  const normCode = (c?: string) => String(c || '').trim().toUpperCase();
+  const closedRoomCodes = Array.from(
+    new Set([...(current.closedRoomCodes || []), ...(localData.closedRoomCodes || [])].map(normCode).filter(Boolean))
+  ).slice(-100);
+  const closedRoomSet = new Set(closedRoomCodes);
+  const mergedRoomsMap = new Map<string, SharedRoom>();
+  for (const r of current.sharedRooms || []) {
+    const code = normCode(r?.code);
+    if (code && !closedRoomSet.has(code)) mergedRoomsMap.set(code, r);
+  }
+  for (const r of localData.sharedRooms || []) {
+    const code = normCode(r?.code);
+    if (!code || closedRoomSet.has(code)) continue;
+    const prev = mergedRoomsMap.get(code);
+    if (!prev || (r.updatedAt || r.createdAt || 0) >= (prev.updatedAt || prev.createdAt || 0)) {
+      mergedRoomsMap.set(code, r);
+    }
+  }
+  const mergedSharedRooms = Array.from(mergedRoomsMap.values())
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+    .slice(0, 40);
+  const mergedJoinedRoomCodes = Array.from(
+    new Set(
+      [
+        ...(current.joinedRoomCodes || []),
+        ...(localData.joinedRoomCodes || []),
+        ...mergedSharedRooms.map((r) => r.code),
+      ]
+        .map(normCode)
+        .filter((c) => c && !closedRoomSet.has(c))
+    )
+  ).slice(0, 40);
+
+  const closedShelfCodes = Array.from(
+    new Set([...(current.closedShelfCodes || []), ...(localData.closedShelfCodes || [])].map(normCode).filter(Boolean))
+  ).slice(-100);
+  const closedShelfSet = new Set(closedShelfCodes);
+  const mergedShelvesMap = new Map<string, SharedShelf>();
+  for (const sh of current.sharedShelves || []) {
+    const code = normCode(sh?.code);
+    if (code && !closedShelfSet.has(code)) mergedShelvesMap.set(code, sh);
+  }
+  for (const sh of localData.sharedShelves || []) {
+    const code = normCode(sh?.code);
+    if (!code || closedShelfSet.has(code)) continue;
+    const prev = mergedShelvesMap.get(code);
+    if (!prev || (sh.updatedAt || sh.createdAt || 0) >= (prev.updatedAt || prev.createdAt || 0)) {
+      mergedShelvesMap.set(code, sh);
+    }
+  }
+  const mergedSharedShelves = Array.from(mergedShelvesMap.values())
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+    .slice(0, 40);
+  const mergedJoinedShelfCodes = Array.from(
+    new Set(
+      [
+        ...(current.joinedShelfCodes || []),
+        ...(localData.joinedShelfCodes || []),
+        ...mergedSharedShelves.map((sh) => sh.code),
+      ]
+        .map(normCode)
+        .filter((c) => c && !closedShelfSet.has(c))
+    )
+  ).slice(0, 40);
+
   return {
     updatedAt: Date.now(),
     books: mergedBooks,
@@ -685,6 +764,12 @@ function mergeSyncStatesClientSide(
     deletedNoteIds,
     deletedBookmarkDesignIds,
     deletedChatSessionIds,
+    sharedRooms: mergedSharedRooms,
+    joinedRoomCodes: mergedJoinedRoomCodes,
+    closedRoomCodes,
+    sharedShelves: mergedSharedShelves,
+    joinedShelfCodes: mergedJoinedShelfCodes,
+    closedShelfCodes,
   };
 }
 

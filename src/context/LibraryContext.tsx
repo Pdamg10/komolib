@@ -268,6 +268,7 @@ interface LibraryContextValue {
   aiModelName: string;
   // Sync & Live Continuity (Web <-> APK)
   deviceId: string;
+  sharedUserId: string;
   serverOnline: boolean;
   liveConnected: boolean;
   serverAuthRequired: boolean;
@@ -654,7 +655,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const lastRemoteUpdatedAtRef = useRef<number>(0);
   const lastDriveModifiedTimeRef = useRef<string>('');
   const syncInFlightRef = useRef<boolean>(false);
-  const dirtyScopesRef = useRef<Set<'books' | 'personalization' | 'marks' | 'notes' | 'chat'>>(new Set());
+  const dirtyScopesRef = useRef<Set<'books' | 'personalization' | 'marks' | 'notes' | 'chat' | 'shared'>>(new Set());
   const lastResumeSyncAtRef = useRef<number>(0);
   const localActiveSessionRef = useRef<ActiveReadingSession | null>(null);
   const suppressAutoSyncRef = useRef<boolean>(false);
@@ -671,6 +672,16 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       chatSessions: Array.from(new Set(deletedChatSessionIdsRef.current)).slice(-200),
     }).catch(console.error);
   }, []);
+  const sharedUserId = React.useMemo(() => {
+    if (googleDriveAuth?.email) {
+      return deriveEmailSpaceId(googleDriveAuth.email, 'komo_shared');
+    }
+    if (syncConfig.accountEmail && syncConfig.spaceId) {
+      return syncConfig.spaceId;
+    }
+    return deviceId;
+  }, [googleDriveAuth?.email, syncConfig.accountEmail, syncConfig.spaceId, deviceId]);
+
   const stateRef = useRef({
     books,
     bookmarks,
@@ -688,6 +699,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     syncConfig,
     googleDriveAuth,
     deviceId,
+    sharedUserId,
     sharedRooms,
     sharedShelves,
   });
@@ -708,6 +720,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     syncConfig,
     googleDriveAuth,
     deviceId,
+    sharedUserId,
     sharedRooms,
     sharedShelves,
   };
@@ -1793,6 +1806,113 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ) {
           setRemoteActiveSession(merged.lastActiveSession);
         }
+
+        // Sync Shared Reading Rooms & Shared Shelves across all of the user's own devices!
+        const normCode = (c?: string) => String(c || '').trim().toUpperCase();
+        if (
+          Array.isArray(merged.sharedRooms) ||
+          Array.isArray(merged.joinedRoomCodes) ||
+          Array.isArray(merged.closedRoomCodes)
+        ) {
+          const nextClosedRooms = Array.from(
+            new Set(
+              [...closedRoomCodesRef.current, ...(merged.closedRoomCodes || [])]
+                .map(normCode)
+                .filter(Boolean)
+            )
+          ).slice(-100);
+          closedRoomCodesRef.current = nextClosedRooms;
+          await dbSetKV('closedRoomCodes', nextClosedRooms).catch(() => undefined);
+          const closedRoomSet = new Set(nextClosedRooms);
+
+          const roomMap = new Map<string, SharedRoom>();
+          for (const r of current.sharedRooms) {
+            const code = normCode(r?.code);
+            if (code && !closedRoomSet.has(code)) roomMap.set(code, r);
+          }
+          for (const r of merged.sharedRooms || []) {
+            const code = normCode(r?.code);
+            if (!code || closedRoomSet.has(code)) continue;
+            const prev = roomMap.get(code);
+            if (!prev || (r.updatedAt || r.createdAt || 0) >= (prev.updatedAt || prev.createdAt || 0)) {
+              roomMap.set(code, r);
+            }
+          }
+          const nextRooms = Array.from(roomMap.values())
+            .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+            .slice(0, 40);
+          const nextJoinedCodes = Array.from(
+            new Set(
+              [
+                ...joinedRoomCodesRef.current,
+                ...(merged.joinedRoomCodes || []),
+                ...nextRooms.map((r) => r.code),
+              ]
+                .map(normCode)
+                .filter((c) => c && !closedRoomSet.has(c))
+            )
+          ).slice(0, 40);
+          joinedRoomCodesRef.current = nextJoinedCodes;
+          stateRef.current.sharedRooms = nextRooms;
+          setSharedRooms(nextRooms);
+          await Promise.all([
+            dbSetKV('joinedRoomCodes', nextJoinedCodes).catch(() => undefined),
+            dbSetKV('cachedSharedRooms', nextRooms).catch(() => undefined),
+          ]);
+        }
+
+        if (
+          Array.isArray(merged.sharedShelves) ||
+          Array.isArray(merged.joinedShelfCodes) ||
+          Array.isArray(merged.closedShelfCodes)
+        ) {
+          const nextClosedShelves = Array.from(
+            new Set(
+              [...closedShelfCodesRef.current, ...(merged.closedShelfCodes || [])]
+                .map(normCode)
+                .filter(Boolean)
+            )
+          ).slice(-100);
+          closedShelfCodesRef.current = nextClosedShelves;
+          await dbSetKV('closedShelfCodes', nextClosedShelves).catch(() => undefined);
+          const closedShelfSet = new Set(nextClosedShelves);
+
+          const shelfMap = new Map<string, SharedShelf>();
+          for (const sh of current.sharedShelves) {
+            const code = normCode(sh?.code);
+            if (code && !closedShelfSet.has(code)) shelfMap.set(code, sh);
+          }
+          for (const sh of merged.sharedShelves || []) {
+            const code = normCode(sh?.code);
+            if (!code || closedShelfSet.has(code)) continue;
+            const prev = shelfMap.get(code);
+            if (!prev || (sh.updatedAt || sh.createdAt || 0) >= (prev.updatedAt || prev.createdAt || 0)) {
+              shelfMap.set(code, sh);
+            }
+          }
+          const nextShelves = Array.from(shelfMap.values())
+            .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+            .slice(0, 40);
+          const nextJoinedShelves = Array.from(
+            new Set(
+              [
+                ...joinedShelfCodesRef.current,
+                ...(merged.joinedShelfCodes || []),
+                ...nextShelves.map((sh) => sh.code),
+              ]
+                .map(normCode)
+                .filter((c) => c && !closedShelfSet.has(c))
+            )
+          ).slice(0, 40);
+          joinedShelfCodesRef.current = nextJoinedShelves;
+          stateRef.current.sharedShelves = nextShelves;
+          setSharedShelves(nextShelves);
+          await Promise.all([
+            dbSetKV('joinedShelfCodes', nextJoinedShelves).catch(() => undefined),
+            dbSetKV('cachedSharedShelves', nextShelves).catch(() => undefined),
+          ]);
+        }
+
         return nextBooks;
       } finally {
         window.setTimeout(() => {
@@ -1806,7 +1926,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const scheduleAutoSync = useCallback(
     (
       urgent = false,
-      scope: 'books' | 'personalization' | 'marks' | 'notes' | 'chat' | 'all' = 'all'
+      scope: 'books' | 'personalization' | 'marks' | 'notes' | 'chat' | 'shared' | 'all' = 'all'
     ) => {
       if (suppressAutoSyncRef.current && !urgent) return;
       if (scope === 'all') {
@@ -1815,6 +1935,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dirtyScopesRef.current.add('marks');
         dirtyScopesRef.current.add('notes');
         dirtyScopesRef.current.add('chat');
+        dirtyScopesRef.current.add('shared');
       } else {
         dirtyScopesRef.current.add(scope);
       }
@@ -1855,6 +1976,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             sentDesigns.length > 0;
           const sendNotes = !hasBaseline || scopes.has('notes') || sentNotes.length > 0;
           const sendChat = !hasBaseline || scopes.has('chat') || sentChats.length > 0;
+          const sendShared =
+            !hasBaseline ||
+            scopes.has('shared') ||
+            s.sharedRooms.length > 0 ||
+            s.sharedShelves.length > 0 ||
+            closedRoomCodesRef.current.length > 0 ||
+            closedShelfCodesRef.current.length > 0;
 
           const pushTheme =
             sendPersonalization && (themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme));
@@ -1915,6 +2043,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedNoteIds: sentNotes,
             deletedBookmarkDesignIds: sentDesigns,
             deletedChatSessionIds: sentChats,
+            sharedRooms: sendShared ? s.sharedRooms : undefined,
+            joinedRoomCodes: sendShared ? joinedRoomCodesRef.current : undefined,
+            closedRoomCodes: sendShared ? closedRoomCodesRef.current : undefined,
+            sharedShelves: sendShared ? s.sharedShelves : undefined,
+            joinedShelfCodes: sendShared ? joinedShelfCodesRef.current : undefined,
+            closedShelfCodes: sendShared ? closedShelfCodesRef.current : undefined,
           };
 
           let merged: RemoteSyncPayload;
@@ -2380,9 +2514,49 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
-      // Sequential background upload for small imports
+      // Sequential background upload for small imports (Google Drive OR Render cloud vault!)
       const cfg = stateRef.current.syncConfig;
-      if (uploadQueue.length > 0 && (cfg.autoSync || cfg.liveSync) && cfg.serverUrl) {
+      const activeDrive = stateRef.current.googleDriveAuth;
+      if (uploadQueue.length > 0 && activeDrive?.accessToken) {
+        (async () => {
+          let curDrive = activeDrive;
+          let uploadedAny = false;
+          for (const targetBook of uploadQueue) {
+            try {
+              const up = await uploadBookFileToGoogleDrive(
+                stateRef.current.syncConfig,
+                curDrive,
+                targetBook,
+                persistGoogleDriveAuth
+              );
+              curDrive = up.auth;
+              if (!up.ok) continue;
+              uploadedAny = true;
+              const nowTs = Date.now();
+              setBooks((prev) =>
+                prev.map((b) => {
+                  if (b.id !== targetBook.id) return b;
+                  const nextBook: BookItem = {
+                    ...b,
+                    hasRemoteFile: true,
+                    driveFileId: up.driveFileId || b.driveFileId,
+                    remoteFileName: up.remoteFileName || b.remoteFileName,
+                    format: up.format || b.format,
+                    updatedAt: nowTs,
+                  };
+                  dbPutBook(nextBook).catch(() => undefined);
+                  return nextBook;
+                })
+              );
+            } catch {
+              // ignore individual upload failure
+            }
+          }
+          if (uploadedAny) {
+            scheduleAutoSync(false, 'books');
+          }
+        })();
+      } else if (uploadQueue.length > 0 && (cfg.autoSync || cfg.liveSync) && cfg.serverUrl) {
         (async () => {
           for (const targetBook of uploadQueue) {
             try {
@@ -2860,9 +3034,16 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           roomProgressTimersRef.current[room.code] = window.setTimeout(() => {
             const s = stateRef.current;
             const currentBook = s.books.find((b) => b.id === id);
-            if (!currentBook || !s.deviceId) return;
+            const actorId = s.sharedUserId || s.deviceId;
+            if (!currentBook || !actorId) return;
+            const effectiveParticipantId =
+              room.participants?.[actorId]
+                ? actorId
+                : room.participants?.[s.deviceId]
+                ? s.deviceId
+                : actorId;
             updateSharedRoomProgress(s.syncConfig, room.code, {
-              participantId: s.deviceId,
+              participantId: effectiveParticipantId,
               name: s.profile.name,
               avatarEmoji: s.profile.avatarEmoji,
               avatarBg: s.profile.avatarBg,
@@ -3856,6 +4037,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
         return;
       }
+      // Wait briefly if a background auto-sync is in flight so two sync calls never clobber each other
+      if (syncInFlightRef.current) {
+        if (silent) return;
+        for (let i = 0; i < 20 && syncInFlightRef.current; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        if (syncInFlightRef.current) return;
+      }
+      syncInFlightRef.current = true;
       if (!silent) {
         setSyncStatus('syncing');
         setSyncMessage('Sincronizando con Google Drive...');
@@ -3885,6 +4075,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           sentDesigns.length > 0;
         const sendNotes = !hasBaseline || scopes.has('notes') || sentNotes.length > 0;
         const sendChat = !hasBaseline || scopes.has('chat') || sentChats.length > 0;
+        const sendShared =
+          !hasBaseline ||
+          scopes.has('shared') ||
+          s.sharedRooms.length > 0 ||
+          s.sharedShelves.length > 0 ||
+          closedRoomCodesRef.current.length > 0 ||
+          closedShelfCodesRef.current.length > 0;
 
         const pushTheme =
           sendPersonalization && (themeUpdatedAtRef.current > 0 || isThemeCustomized(s.theme));
@@ -3954,6 +4151,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           deletedNoteIds: sentNotes,
           deletedBookmarkDesignIds: sentDesigns,
           deletedChatSessionIds: sentChats,
+          sharedRooms: sendShared ? s.sharedRooms : undefined,
+          joinedRoomCodes: sendShared ? joinedRoomCodesRef.current : undefined,
+          closedRoomCodes: sendShared ? closedRoomCodesRef.current : undefined,
+          sharedShelves: sendShared ? s.sharedShelves : undefined,
+          joinedShelfCodes: sendShared ? joinedShelfCodesRef.current : undefined,
+          closedShelfCodes: sendShared ? closedShelfCodesRef.current : undefined,
         };
 
         let merged: RemoteSyncPayload;
@@ -3966,7 +4169,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           sentAnnotations.length === 0 &&
           sentNotes.length === 0 &&
           sentDesigns.length === 0 &&
-          sentChats.length === 0;
+          sentChats.length === 0 &&
+          closedRoomCodesRef.current.length === 0 &&
+          closedShelfCodesRef.current.length === 0;
 
         if (activeDrive?.accessToken) {
           const driveRes = await syncStateWithGoogleDrive(
@@ -4044,6 +4249,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setSyncMessage(errMsg);
           failSyncPopup(errMsg);
         }
+      } finally {
+        syncInFlightRef.current = false;
       }
     },
     [
@@ -4431,7 +4638,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           persistGoogleDriveAuth
         );
         if (!active) return;
-        const hasNewRemoteData = Boolean(pulled.state && !pulled.fromCache && pulled.modifiedTime !== prevModTime);
+        const hasNewRemoteData = Boolean(
+          pulled.state &&
+            (syncedBookUpdatedAtRef.current.size === 0 ||
+              (!pulled.fromCache && pulled.modifiedTime !== prevModTime))
+        );
         if (pulled.modifiedTime) {
           lastDriveModifiedTimeRef.current = pulled.modifiedTime;
         }
@@ -4680,6 +4891,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedNoteIds: deletedNoteIdsRef.current,
             deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
             deletedChatSessionIds: deletedChatSessionIdsRef.current,
+            sharedRooms: s.sharedRooms,
+            joinedRoomCodes: joinedRoomCodesRef.current,
+            closedRoomCodes: closedRoomCodesRef.current,
+            sharedShelves: s.sharedShelves,
+            joinedShelfCodes: joinedShelfCodesRef.current,
+            closedShelfCodes: closedShelfCodesRef.current,
           },
           false,
           loginKeepCovers.size > 0,
@@ -4817,6 +5034,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedNoteIds: deletedNoteIdsRef.current,
             deletedBookmarkDesignIds: deletedBookmarkDesignIdsRef.current,
             deletedChatSessionIds: deletedChatSessionIdsRef.current,
+            sharedRooms: s.sharedRooms,
+            joinedRoomCodes: joinedRoomCodesRef.current,
+            closedRoomCodes: closedRoomCodesRef.current,
+            sharedShelves: s.sharedShelves,
+            joinedShelfCodes: joinedShelfCodesRef.current,
+            closedShelfCodes: closedShelfCodesRef.current,
           },
           true,
           false,
@@ -5440,7 +5663,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (!room?.bookId) return null;
       const s = stateRef.current;
       const localBook = s.books.find((b) => b.id === room.bookId);
-      const myPart = room.participants?.[s.deviceId];
+      const myActorId = s.sharedUserId || s.deviceId;
+      const myPart = room.participants?.[myActorId] || room.participants?.[s.deviceId];
       if (!localBook) {
         return myPart?.progress !== undefined ? Number(myPart.progress) : null;
       }
@@ -5518,7 +5742,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const refreshSharedRooms = useCallback(async () => {
     const cfg = stateRef.current.syncConfig;
-    const myId = stateRef.current.deviceId;
+    const myDevId = stateRef.current.deviceId;
+    const myId = stateRef.current.sharedUserId || myDevId;
+    const myIds = Array.from(new Set([myId, myDevId].filter(Boolean)));
     if (!cfg.serverUrl.trim()) return;
 
     const prevRooms = stateRef.current.sharedRooms;
@@ -5531,8 +5757,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     let serverReachable = false;
 
     try {
-      // Only fetch rooms this user participates in (per-user privacy!)
-      const list = await listSharedRooms(cfg, myId || undefined);
+      // Fetch rooms this user participates in across any of their linked devices (per-user privacy!)
+      const list = await listSharedRooms(cfg, myIds.length > 0 ? myIds.join(',') : undefined);
       serverReachable = true;
       for (const r of list) {
         const c = r.code.trim().toUpperCase();
@@ -5562,7 +5788,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           try {
             const room = await getSharedRoom(cfg, code);
             serverReachable = true;
-            if (myId && room.kickedIds?.includes(myId) && !room.participants?.[myId]) {
+            const kickedMe = myIds.some((id) => room.kickedIds?.includes(id));
+            const stillInRoom = myIds.some((id) => Boolean(room.participants?.[id]));
+            if (kickedMe && !stillInRoom) {
               kickedCodes.add(room.code);
               if (cached) void preserveRoomBookProgress(cached);
               return;
@@ -5582,15 +5810,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               if (err.status === 404 && cached) {
                 // Server restarted on ephemeral disk (e.g. Render Free) -> auto-restore with EXACT SAME code!
                 const localBook = stateRef.current.books.find((b) => b.id === cached.bookId);
-                const myExistingPart = cached.participants?.[myId];
+                const effectiveId =
+                  cached.participants?.[myId]
+                    ? myId
+                    : cached.participants?.[myDevId]
+                    ? myDevId
+                    : myId;
+                const myExistingPart = cached.participants?.[effectiveId];
                 const roomToRestore: SharedRoom = {
                   ...cached,
                   participants: {
                     ...(cached.participants || {}),
-                    ...(myId
+                    ...(effectiveId
                       ? {
-                          [myId]: {
-                            id: myId,
+                          [effectiveId]: {
+                            id: effectiveId,
                             name: stateRef.current.profile.name || myExistingPart?.name || 'Lector Komo',
                             avatarEmoji: stateRef.current.profile.avatarEmoji || myExistingPart?.avatarEmoji || '🦊',
                             avatarBg: stateRef.current.profile.avatarBg || myExistingPart?.avatarBg || '#f6d8ae',
@@ -5618,8 +5852,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                   const res = await restoreSharedRoom(cfg, roomToRestore);
                   byCode.set(res.room.code, res.room);
                   // If host has the local book file, re-upload in background so guests can download after server restart
-                  if (res.restored && cached.hostId === myId && localBook?.hasLocalFile) {
-                    uploadBookToServer(cfg, localBook, myId).catch(() => undefined);
+                  if (res.restored && myIds.includes(cached.hostId) && localBook?.hasLocalFile) {
+                    uploadBookToServer(cfg, localBook, myDevId).catch(() => undefined);
                   }
                 } catch (restoreErr) {
                   if (restoreErr instanceof SharedSpaceHttpError && (restoreErr.deleted || restoreErr.status === 410)) {
@@ -5984,11 +6218,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
         }
         const marks = collectSharedMarksForBook(readyBook.id, marksSelection);
+        const actorId = s.sharedUserId || s.deviceId;
         const room = await createSharedRoom(
           s.syncConfig,
           readyBook,
           {
-            id: s.deviceId,
+            id: actorId,
             name: s.profile.name,
             avatarEmoji: s.profile.avatarEmoji,
             avatarBg: s.profile.avatarBg,
@@ -6008,6 +6243,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           persistJoinedRoomCodes([room.code, ...joinedRoomCodesRef.current]),
           persistSharedRoomsCache(nextRooms),
         ]);
+        scheduleAutoSync(true, 'shared');
         showToast(`Sala ${room.code} creada para "${book.title}"`);
         return room;
       } catch (err) {
@@ -6020,6 +6256,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       persistClosedRoomCodes,
       persistJoinedRoomCodes,
       persistSharedRoomsCache,
+      scheduleAutoSync,
       selectRoomCode,
       showToast,
     ]
@@ -6034,12 +6271,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (!code) return null;
       try {
         const s = stateRef.current;
+        const actorId = s.sharedUserId || s.deviceId;
         const knownRoom = s.sharedRooms.find((r) => r.code === code);
         const existingBook = knownRoom
           ? s.books.find((b) => b.id === knownRoom.bookId)
           : undefined;
         let room = await joinSharedRoom(s.syncConfig, code, {
-          id: s.deviceId,
+          id: actorId,
           name: s.profile.name,
           avatarEmoji: s.profile.avatarEmoji,
           avatarBg: s.profile.avatarBg,
@@ -6051,7 +6289,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
         // Ensure the shared book exists in local IndexedDB (download file if not present)
         const alreadyHasBook = s.books.find((b) => b.id === room.bookId);
-        const serverMyPart = room.participants?.[s.deviceId];
+        const serverMyPart = room.participants?.[actorId] || room.participants?.[s.deviceId];
 
         // If user already had saved progress on this book locally (e.g. rejoined after leaving),
         // push their saved progress up to the room immediately so it's never reset to 0%!
@@ -6062,7 +6300,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ) {
           try {
             room = await updateSharedRoomProgress(s.syncConfig, room.code, {
-              participantId: s.deviceId,
+              participantId: actorId,
               name: s.profile.name,
               avatarEmoji: s.profile.avatarEmoji,
               avatarBg: s.profile.avatarBg,
@@ -6086,15 +6324,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           persistJoinedRoomCodes([room.code, ...joinedRoomCodesRef.current]),
           persistSharedRoomsCache(nextRooms),
         ]);
+        scheduleAutoSync(true, 'shared');
 
         const localFile = await dbGetBookFile(room.bookId);
         let resolvedBook: BookItem | undefined = alreadyHasBook;
         const bestInitialProgress = Math.max(
           Number(alreadyHasBook?.progress || 0),
-          Number(room.participants?.[s.deviceId]?.progress || 0)
+          Number((room.participants?.[actorId] || room.participants?.[s.deviceId])?.progress || 0)
         );
         const bestInitialPage =
-          alreadyHasBook?.currentPage ?? room.participants?.[s.deviceId]?.currentPage;
+          alreadyHasBook?.currentPage ??
+          (room.participants?.[actorId] || room.participants?.[s.deviceId])?.currentPage;
 
         if (!alreadyHasBook || !localFile) {
           try {
@@ -6190,7 +6430,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     async (code: string, text: string, progressAt: number, pageAt?: number) => {
       const s = stateRef.current;
       const room = await postSharedRoomComment(s.syncConfig, code, {
-        participantId: s.deviceId,
+        participantId: s.sharedUserId || s.deviceId,
         authorName: s.profile.name,
         avatarEmoji: s.profile.avatarEmoji,
         avatarImageUrl: s.profile.avatarImageUrl || '',
@@ -6233,10 +6473,16 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       await persistClosedRoomCodes([...closedRoomCodesRef.current, normalized]);
 
+      const actorId =
+        targetRoom?.participants?.[s.sharedUserId]
+          ? s.sharedUserId
+          : targetRoom?.participants?.[s.deviceId]
+          ? s.deviceId
+          : s.sharedUserId || s.deviceId;
       if (deleteEntireRoom) {
         await deleteSharedRoom(s.syncConfig, normalized);
       } else {
-        await leaveSharedRoom(s.syncConfig, normalized, s.deviceId);
+        await leaveSharedRoom(s.syncConfig, normalized, actorId);
       }
 
       const nextRooms = stateRef.current.sharedRooms.filter(
@@ -6253,6 +6499,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         persistJoinedRoomCodes(joinedRoomCodesRef.current.filter((c) => c !== normalized)),
         persistSharedRoomsCache(nextRooms),
       ]);
+      scheduleAutoSync(true, 'shared');
 
       const pctText =
         savedProgress !== null && savedProgress > 0
@@ -6269,6 +6516,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       persistJoinedRoomCodes,
       persistSharedRoomsCache,
       preserveRoomBookProgress,
+      scheduleAutoSync,
       showToast,
     ]
   );
@@ -6276,8 +6524,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const kickUserFromRoom = useCallback(
     async (code: string, targetParticipantId: string, targetName?: string) => {
       const s = stateRef.current;
+      const targetRoom = s.sharedRooms.find((r) => r.code === code);
+      const requesterId =
+        targetRoom?.hostId === s.deviceId ? s.deviceId : s.sharedUserId || s.deviceId;
       try {
-        const updated = await kickRoomParticipant(s.syncConfig, code, s.deviceId, targetParticipantId);
+        const updated = await kickRoomParticipant(s.syncConfig, code, requesterId, targetParticipantId);
         updateLocalRoom(updated);
         showToast(`${targetName || 'Usuario'} fue eliminado de la sala ${code}`);
       } catch (err) {
@@ -6349,7 +6600,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const refreshSharedShelves = useCallback(async () => {
     const cfg = stateRef.current.syncConfig;
-    const myId = stateRef.current.deviceId;
+    const myDevId = stateRef.current.deviceId;
+    const myId = stateRef.current.sharedUserId || myDevId;
+    const myIds = Array.from(new Set([myId, myDevId].filter(Boolean)));
     const prevShelves = stateRef.current.sharedShelves;
     const prevByCode = new Map<string, SharedShelf>();
     for (const sh of prevShelves) {
@@ -6372,7 +6625,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         try {
           const shelf = await getSharedShelf(cfg, code);
           serverReachable = true;
-          if (myId && shelf.kickedIds?.includes(myId) && !shelf.members?.[myId]) {
+          const kickedMe = myIds.some((id) => shelf.kickedIds?.includes(id));
+          const stillMember = myIds.some((id) => Boolean(shelf.members?.[id]));
+          if (kickedMe && !stillMember) {
             kickedCodes.add(shelf.code);
             return;
           }
@@ -6461,8 +6716,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     ): Promise<SharedShelf | null> => {
       try {
         const s = stateRef.current;
+        const actorId = s.sharedUserId || s.deviceId;
         let shelf = await createSharedShelf(s.syncConfig, title, {
-          id: s.deviceId,
+          id: actorId,
           name: s.profile.name,
           avatarEmoji: s.profile.avatarEmoji,
           avatarBg: s.profile.avatarBg,
@@ -6479,7 +6735,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               shelf.code,
               target,
               {
-                id: s.deviceId,
+                id: actorId,
                 name: s.profile.name,
               },
               marks
@@ -6500,6 +6756,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           persistJoinedShelfCodes([shelf.code, ...joinedShelfCodesRef.current]),
           persistSharedShelvesCache(nextShelves),
         ]);
+        scheduleAutoSync(true, 'shared');
         const sharedCount = Object.keys(shelf.books).length;
         showToast(
           failedCount > 0
@@ -6517,6 +6774,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       persistClosedShelfCodes,
       persistJoinedShelfCodes,
       persistSharedShelvesCache,
+      scheduleAutoSync,
       selectShelfCode,
       showToast,
     ]
@@ -6528,8 +6786,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (!code) return null;
       try {
         const s = stateRef.current;
+        const actorId = s.sharedUserId || s.deviceId;
         const shelf = await joinSharedShelf(s.syncConfig, code, {
-          id: s.deviceId,
+          id: actorId,
           name: s.profile.name,
           avatarEmoji: s.profile.avatarEmoji,
           avatarBg: s.profile.avatarBg,
@@ -6547,6 +6806,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           persistJoinedShelfCodes([shelf.code, ...joinedShelfCodesRef.current]),
           persistSharedShelvesCache(nextShelves),
         ]);
+        scheduleAutoSync(true, 'shared');
         setPendingShelfCode('');
         showToast(`Te uniste a la estantería ${shelf.code} ("${shelf.title}")`);
         return shelf;
@@ -6559,6 +6819,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       persistClosedShelfCodes,
       persistJoinedShelfCodes,
       persistSharedShelvesCache,
+      scheduleAutoSync,
       selectShelfCode,
       showToast,
     ]
@@ -6578,7 +6839,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             code,
             target,
             {
-              id: s.deviceId,
+              id: s.sharedUserId || s.deviceId,
               name: s.profile.name,
             },
             marks
@@ -6589,10 +6850,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       if (latest) {
         updateLocalShelf(latest);
+        scheduleAutoSync(true, 'shared');
         showToast('Libros compartidos en la estantería mutua');
       }
     },
-    [collectSharedMarksForBook, showToast, updateLocalShelf]
+    [collectSharedMarksForBook, scheduleAutoSync, showToast, updateLocalShelf]
   );
 
   const removeBookFromSharedShelf = useCallback(
@@ -6697,11 +6959,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     async (code: string, deleteEntireShelf: boolean) => {
       const normalized = code.trim().toUpperCase();
       const s = stateRef.current;
+      const targetShelf = s.sharedShelves.find((sh) => sh.code.trim().toUpperCase() === normalized);
+      const actorId =
+        targetShelf?.members?.[s.sharedUserId]
+          ? s.sharedUserId
+          : targetShelf?.members?.[s.deviceId]
+          ? s.deviceId
+          : s.sharedUserId || s.deviceId;
       await persistClosedShelfCodes([...closedShelfCodesRef.current, normalized]);
       if (deleteEntireShelf) {
         await deleteSharedShelf(s.syncConfig, normalized);
       } else {
-        await leaveSharedShelf(s.syncConfig, normalized, s.deviceId);
+        await leaveSharedShelf(s.syncConfig, normalized, actorId);
       }
       const nextShelves = stateRef.current.sharedShelves.filter(
         (sh) => sh.code.trim().toUpperCase() !== normalized
@@ -6717,20 +6986,24 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         persistJoinedShelfCodes(joinedShelfCodesRef.current.filter((c) => c !== normalized)),
         persistSharedShelvesCache(nextShelves),
       ]);
+      scheduleAutoSync(true, 'shared');
       showToast(
         deleteEntireShelf
           ? `Estantería ${normalized} cerrada para todos`
           : `Saliste de la estantería ${normalized}`
       );
     },
-    [persistClosedShelfCodes, persistJoinedShelfCodes, persistSharedShelvesCache, showToast]
+    [persistClosedShelfCodes, persistJoinedShelfCodes, persistSharedShelvesCache, scheduleAutoSync, showToast]
   );
 
   const kickUserFromShelf = useCallback(
     async (code: string, targetMemberId: string, targetName?: string) => {
       const s = stateRef.current;
+      const targetShelf = s.sharedShelves.find((sh) => sh.code === code);
+      const requesterId =
+        targetShelf?.hostId === s.deviceId ? s.deviceId : s.sharedUserId || s.deviceId;
       try {
-        const updated = await kickShelfMember(s.syncConfig, code, s.deviceId, targetMemberId);
+        const updated = await kickShelfMember(s.syncConfig, code, requesterId, targetMemberId);
         updateLocalShelf(updated);
         showToast(`${targetName || 'Usuario'} fue eliminado de la estantería ${code}`);
       } catch (err) {
@@ -6833,6 +7106,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         aiOnline,
         aiModelName,
         deviceId,
+        sharedUserId,
         serverOnline,
         liveConnected,
         serverAuthRequired,

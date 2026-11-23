@@ -13,6 +13,8 @@ import type {
   CustomStationeryKit,
   NoteItem,
   ReaderSettings,
+  SharedRoom,
+  SharedShelf,
   SyncConfig,
   ThemeConfig,
   UserProfile,
@@ -80,6 +82,12 @@ export interface RemoteSyncPayload {
   deletedNoteIds?: string[];
   deletedBookmarkDesignIds?: string[];
   deletedChatSessionIds?: string[];
+  sharedRooms?: SharedRoom[];
+  joinedRoomCodes?: string[];
+  closedRoomCodes?: string[];
+  sharedShelves?: SharedShelf[];
+  joinedShelfCodes?: string[];
+  closedShelfCodes?: string[];
 }
 
 /**
@@ -162,18 +170,37 @@ export async function parseJsonResponse<T>(res: Response, url: string): Promise<
 export async function fetchApi(url: string, init?: RequestInit): Promise<Response> {
   const method = (init?.method || 'GET').toUpperCase();
   const isRender = /\.onrender\.com\b/i.test(url);
-  const canRetryColdStart = isRender && (method === 'GET' || method === 'PUT');
-  const maxAttempts = canRetryColdStart ? 3 : 1;
+  const isIdempotentPost =
+    method === 'POST' &&
+    /\/api\/(?:google\/refresh|(?:rooms|shelves)\/[^/]+\/join)\b/i.test(url);
+  const canRetryColdStart =
+    isRender && (method === 'GET' || method === 'PUT' || method === 'PATCH' || isIdempotentPost);
+  const maxAttempts = canRetryColdStart ? 4 : 1;
 
   let lastError: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      return await fetch(url, init);
+      const res = await fetch(url, init);
+      if (
+        canRetryColdStart &&
+        attempt < maxAttempts - 1 &&
+        (res.status === 502 || res.status === 503 || res.status === 504)
+      ) {
+        try {
+          const origin = new URL(url).origin;
+          await fetch(`${origin}/api/health`).catch(() => undefined);
+        } catch {
+          // ignore wake-up probe errors
+        }
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 2500));
+        continue;
+      }
+      return res;
     } catch (error) {
       lastError = error;
       if (canRetryColdStart && attempt < maxAttempts - 1) {
-        // Wake Render cold-start service gently before retrying an idempotent GET/PUT
-        if (method === 'PUT') {
+        // Wake Render cold-start service gently before retrying
+        if (method !== 'GET') {
           try {
             const origin = new URL(url).origin;
             await fetch(`${origin}/api/health`).catch(() => undefined);
@@ -181,7 +208,7 @@ export async function fetchApi(url: string, init?: RequestInit): Promise<Respons
             // ignore wake-up probe errors
           }
         }
-        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 3000));
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 2500));
         continue;
       }
     }
@@ -610,6 +637,12 @@ export async function syncFullState(
     deletedNoteIds?: string[];
     deletedBookmarkDesignIds?: string[];
     deletedChatSessionIds?: string[];
+    sharedRooms?: SharedRoom[];
+    joinedRoomCodes?: string[];
+    closedRoomCodes?: string[];
+    sharedShelves?: SharedShelf[];
+    joinedShelfCodes?: string[];
+    closedShelfCodes?: string[];
   },
   uploadMissingFiles = true,
   lightweight = false,
@@ -721,6 +754,12 @@ export async function syncFullState(
       deletedNoteIds: localData.deletedNoteIds || [],
       deletedBookmarkDesignIds: localData.deletedBookmarkDesignIds || [],
       deletedChatSessionIds: localData.deletedChatSessionIds || [],
+      sharedRooms: localData.sharedRooms,
+      joinedRoomCodes: localData.joinedRoomCodes,
+      closedRoomCodes: localData.closedRoomCodes,
+      sharedShelves: localData.sharedShelves,
+      joinedShelfCodes: localData.joinedShelfCodes,
+      closedShelfCodes: localData.closedShelfCodes,
     }),
   });
 

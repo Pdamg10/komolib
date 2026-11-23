@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import {
   BarChart3,
   BookCheck,
@@ -13,7 +13,6 @@ import {
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 import type { NavSection } from '../types/library';
-import { getEffectiveStatus } from '../utils/readingStats';
 
 export const Sidebar: React.FC = () => {
   const {
@@ -21,24 +20,12 @@ export const Sidebar: React.FC = () => {
     setNavSection,
     profile,
     setProfileModalOpen,
-    books,
     sharedRooms,
-    sharedShelves,
     theme,
     setStudioModalOpen,
   } = useLibrary();
 
-  const { completedCount, audiobooksCount } = useMemo(() => {
-    let completed = 0;
-    let audio = 0;
-    for (const b of books) {
-      if (getEffectiveStatus(b) === 'completed' || (b.progress || 0) >= 98) completed++;
-      if (b.format === 'audio' || b.kind === 'audiobook') audio++;
-    }
-    return { completedCount: completed, audiobooksCount: audio };
-  }, [books]);
-
-  const sharedTotalCount = sharedRooms.length + sharedShelves.length;
+  const activeRoomsCount = sharedRooms.length;
 
   const navItems: Array<{
     id: NavSection;
@@ -58,7 +45,7 @@ export const Sidebar: React.FC = () => {
       id: 'shared',
       label: 'Compartir Libros y Sync',
       icon: <Users size={19} />,
-      badge: sharedTotalCount > 99 ? '99+' : sharedTotalCount || undefined,
+      badge: activeRoomsCount > 99 ? '99+' : activeRoomsCount || undefined,
     },
     { id: 'favorites', label: 'Favoritos', icon: <Star size={19} /> },
     { id: 'wishlist', label: 'Por leer', icon: <BookMarked size={19} /> },
@@ -66,13 +53,11 @@ export const Sidebar: React.FC = () => {
       id: 'reading',
       label: 'Lecturas terminadas',
       icon: <BookCheck size={19} />,
-      badge: completedCount > 99 ? '99+' : completedCount || undefined,
     },
     {
       id: 'audiobooks',
       label: 'Audiolibros',
       icon: <Headphones size={19} />,
-      badge: audiobooksCount > 99 ? '99+' : audiobooksCount || undefined,
     },
   ];
 

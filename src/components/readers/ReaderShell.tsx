@@ -82,6 +82,7 @@ export const ReaderShell: React.FC = () => {
     addCustomSticker,
     addCustomEmoji,
     deviceId,
+    sharedUserId,
     profile,
     syncConfig,
     sharedRooms,
@@ -235,7 +236,10 @@ export const ReaderShell: React.FC = () => {
       syncConfig,
       activeRoom.code,
       (updated) => {
-        if (updated.kickedIds?.includes(deviceId) && !updated.participants?.[deviceId]) {
+        const myIds = [sharedUserId, deviceId].filter(Boolean);
+        const kickedMe = myIds.some((id) => updated.kickedIds?.includes(id));
+        const stillInRoom = myIds.some((id) => Boolean(updated.participants?.[id]));
+        if (kickedMe && !stillInRoom) {
           const lp = livePosRef.current;
           if (activeBook && lp.pct > 0) {
             void updateBook(activeBook.id, {
@@ -269,7 +273,7 @@ export const ReaderShell: React.FC = () => {
         showToast(`La sala ${deletedCode} fue cerrada por el anfitrión · Tu progreso se conservó`);
       }
     );
-  }, [activeRoom?.code, activeBook?.id, syncConfig, deviceId, updateBook, updateLocalRoom, removeLocalRoom, showToast]);
+  }, [activeRoom?.code, activeBook?.id, syncConfig, deviceId, sharedUserId, updateBook, updateLocalRoom, removeLocalRoom, showToast]);
 
   useEffect(() => {
     if (!activeBook) {
@@ -1901,7 +1905,7 @@ export const ReaderShell: React.FC = () => {
               >
                 <LogOut size={11} /> Salir
               </button>
-              {activeRoom.hostId === deviceId && (
+              {(activeRoom.hostId === sharedUserId || activeRoom.hostId === deviceId) && (
                 <button
                   type="button"
                   className="pill-btn"
@@ -1932,9 +1936,9 @@ export const ReaderShell: React.FC = () => {
             {Object.values(activeRoom.participants || {})
               .sort((a, b) => (b.progress || 0) - (a.progress || 0))
               .map((p) => {
-                const isMe = p.id === deviceId;
+                const isMe = p.id === sharedUserId || p.id === deviceId;
                 const isPartAdmin = p.id === activeRoom.hostId;
-                const iAmAdmin = activeRoom.hostId === deviceId;
+                const iAmAdmin = activeRoom.hostId === sharedUserId || activeRoom.hostId === deviceId;
                 return (
                   <div
                     key={p.id}

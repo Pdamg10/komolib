@@ -84,6 +84,7 @@ export const SharedReadingView: React.FC = () => {
     profile,
     updateProfile,
     deviceId,
+    sharedUserId,
     syncConfig,
     serverOnline,
     liveConnected,
@@ -205,13 +206,21 @@ export const SharedReadingView: React.FC = () => {
   const activeShelf: SharedShelf | undefined =
     sharedShelves.find((s) => s.code === selectedShelfCode) || sharedShelves[0];
 
+  const isMyId = useCallback(
+    (id?: string) => Boolean(id && (id === sharedUserId || id === deviceId)),
+    [sharedUserId, deviceId]
+  );
+
   useEffect(() => {
     if (!activeRoom?.code || !syncConfig.serverUrl.trim()) return;
     return subscribeToRoomStream(
       syncConfig,
       activeRoom.code,
       (updated) => {
-        if (updated.kickedIds?.includes(deviceId) && !updated.participants?.[deviceId]) {
+        const myIds = [sharedUserId, deviceId].filter(Boolean);
+        const kickedMe = myIds.some((id) => updated.kickedIds?.includes(id));
+        const stillInRoom = myIds.some((id) => Boolean(updated.participants?.[id]));
+        if (kickedMe && !stillInRoom) {
           removeLocalRoom(updated.code);
           showToast(`Fuiste eliminado de la sala ${updated.code} por el administrador · Tu progreso se conservó`);
           return;
@@ -223,7 +232,7 @@ export const SharedReadingView: React.FC = () => {
         showToast(`La sala ${deletedCode} fue cerrada por el anfitrión · Tu progreso se conservó`);
       }
     );
-  }, [activeRoom?.code, syncConfig, deviceId, updateLocalRoom, removeLocalRoom, showToast]);
+  }, [activeRoom?.code, syncConfig, deviceId, sharedUserId, updateLocalRoom, removeLocalRoom, showToast]);
 
   useEffect(() => {
     if (!activeShelf?.code || !syncConfig.serverUrl.trim()) return;
@@ -231,7 +240,10 @@ export const SharedReadingView: React.FC = () => {
       syncConfig,
       activeShelf.code,
       (updated) => {
-        if (updated.kickedIds?.includes(deviceId) && !updated.members?.[deviceId]) {
+        const myIds = [sharedUserId, deviceId].filter(Boolean);
+        const kickedMe = myIds.some((id) => updated.kickedIds?.includes(id));
+        const stillMember = myIds.some((id) => Boolean(updated.members?.[id]));
+        if (kickedMe && !stillMember) {
           removeLocalShelf(updated.code);
           showToast(`Fuiste eliminado de la estantería ${updated.code} por el administrador`);
           return;
@@ -243,7 +255,7 @@ export const SharedReadingView: React.FC = () => {
         showToast(`La estantería ${deletedCode} fue cerrada por el anfitrión`);
       }
     );
-  }, [activeShelf?.code, syncConfig, deviceId, updateLocalShelf, removeLocalShelf, showToast]);
+  }, [activeShelf?.code, syncConfig, deviceId, sharedUserId, updateLocalShelf, removeLocalShelf, showToast]);
 
   const [shareBookSearch, setShareBookSearch] = useState('');
   const [shelfBookSearch, setShelfBookSearch] = useState('');
@@ -465,7 +477,9 @@ export const SharedReadingView: React.FC = () => {
 
   const handleOpenRoomBook = async (room: SharedRoom) => {
     const localBook = books.find((b) => b.id === room.bookId);
-    const alreadyParticipant = Boolean(room.participants?.[deviceId]);
+    const alreadyParticipant = Boolean(
+      room.participants?.[sharedUserId] || room.participants?.[deviceId]
+    );
     if (localBook && localBook.hasLocalFile && alreadyParticipant) {
       await openBook(localBook);
       return;
@@ -481,7 +495,7 @@ export const SharedReadingView: React.FC = () => {
     setSendingComment(true);
     try {
       const myBook = books.find((b) => b.id === activeRoom.bookId);
-      const myPart = activeRoom.participants?.[deviceId];
+      const myPart = activeRoom.participants?.[sharedUserId] || activeRoom.participants?.[deviceId];
       const progressAt = myBook?.progress ?? myPart?.progress ?? 0;
       const pageAt = myBook?.currentPage ?? myPart?.currentPage;
       await sendRoomComment(activeRoom.code, commentInput.trim(), progressAt, pageAt);
@@ -524,9 +538,12 @@ export const SharedReadingView: React.FC = () => {
   const participants = activeRoom
     ? Object.values(activeRoom.participants || {}).sort((a, b) => (b.progress || 0) - (a.progress || 0))
     : [];
-  const isParticipantInActive = Boolean(activeRoom?.participants?.[deviceId]);
+  const isParticipantInActive = Boolean(
+    activeRoom?.participants?.[sharedUserId] || activeRoom?.participants?.[deviceId]
+  );
   const myProgress = activeRoom
     ? books.find((b) => b.id === activeRoom.bookId)?.progress ??
+      activeRoom.participants?.[sharedUserId]?.progress ??
       activeRoom.participants?.[deviceId]?.progress ??
       0
     : 0;
@@ -1092,7 +1109,7 @@ export const SharedReadingView: React.FC = () => {
                     >
                       <LogOut size={12} /> Salir
                     </button>
-                    {activeShelf.hostId === deviceId && (
+                    {isMyId(activeShelf.hostId) && (
                       <button
                         type="button"
                         className="pill-btn"
@@ -1117,10 +1134,10 @@ export const SharedReadingView: React.FC = () => {
                   </div>
                   <div className="shared-members-list">
                     {Object.values(activeShelf.members || {}).map((m) => {
-                      const isMe = m.id === deviceId;
+                      const isMe = isMyId(m.id);
                       const memberPhoto = m.avatarImageUrl || (isMe ? profile.avatarImageUrl : undefined);
                       const isMemberAdmin = m.id === activeShelf.hostId;
-                      const iAmAdmin = activeShelf.hostId === deviceId;
+                      const iAmAdmin = isMyId(activeShelf.hostId);
                       return (
                         <div key={m.id} className="shared-member-chip">
                           <span
@@ -1215,7 +1232,7 @@ export const SharedReadingView: React.FC = () => {
                     </div>
                   ) : (
                     activeShelfBooks.map((entry) => {
-                      const isMine = entry.ownerId === deviceId;
+                      const isMine = isMyId(entry.ownerId);
                       const localCopy = books.find((b) => b.id === `shared_${entry.bookId}`);
                       const sharedMarksTotal =
                         (entry.sharedAnnotations?.length || 0) +
@@ -1285,7 +1302,7 @@ export const SharedReadingView: React.FC = () => {
                                 )}
                               </button>
                             )}
-                            {(isMine || activeShelf.hostId === deviceId) && (
+                            {(isMine || isMyId(activeShelf.hostId)) && (
                               <button
                                 type="button"
                                 className="circle-arrow-btn"
@@ -1476,7 +1493,7 @@ export const SharedReadingView: React.FC = () => {
                     >
                       <LogOut size={12} /> Salir
                     </button>
-                    {activeRoom.hostId === deviceId && (
+                    {isMyId(activeRoom.hostId) && (
                       <button
                         type="button"
                         className="pill-btn"
@@ -1525,10 +1542,10 @@ export const SharedReadingView: React.FC = () => {
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
                   {participants.map((p) => {
-                    const isMe = p.id === deviceId;
+                    const isMe = isMyId(p.id);
                     const participantPhoto = p.avatarImageUrl || (isMe ? profile.avatarImageUrl : undefined);
                     const isPartAdmin = p.id === activeRoom.hostId;
-                    const iAmAdmin = activeRoom.hostId === deviceId;
+                    const iAmAdmin = isMyId(activeRoom.hostId);
                     const st = p.readingStatus || (p.progress >= 98 ? 'completed' : 'reading');
                     return (
                       <div key={p.id} className="participant-progress-row">
