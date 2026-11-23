@@ -182,6 +182,12 @@ export const SharedReadingView: React.FC = () => {
   }, [books, selectedBookId, addingBookToShelfId]);
 
   useEffect(() => {
+    if (!syncConfig.serverUrl.trim()) return;
+    void refreshSharedRooms();
+    void refreshSharedShelves();
+  }, [syncConfig.serverUrl, serverOnline, refreshSharedRooms, refreshSharedShelves]);
+
+  useEffect(() => {
     if (!sharedRooms.some((r) => r.code === selectedRoomCode) && sharedRooms[0]?.code) {
       setSelectedRoomCode(sharedRooms[0].code);
     }
@@ -207,14 +213,14 @@ export const SharedReadingView: React.FC = () => {
       (updated) => {
         if (updated.kickedIds?.includes(deviceId) && !updated.participants?.[deviceId]) {
           removeLocalRoom(updated.code);
-          showToast(`Fuiste eliminado de la sala ${updated.code} por el administrador`);
+          showToast(`Fuiste eliminado de la sala ${updated.code} por el administrador · Tu progreso se conservó`);
           return;
         }
         updateLocalRoom(updated);
       },
       (deletedCode) => {
         removeLocalRoom(deletedCode);
-        showToast(`La sala ${deletedCode} fue cerrada por el anfitrión`);
+        showToast(`La sala ${deletedCode} fue cerrada por el anfitrión · Tu progreso se conservó`);
       }
     );
   }, [activeRoom?.code, syncConfig, deviceId, updateLocalRoom, removeLocalRoom, showToast]);

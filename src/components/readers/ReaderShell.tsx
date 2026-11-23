@@ -144,6 +144,8 @@ export const ReaderShell: React.FC = () => {
     chapterHref?: string;
     pct: number;
   }>({ pct: 0 });
+  const livePosRef = useRef(livePos);
+  livePosRef.current = livePos;
 
   const activeRoom = activeBook
     ? sharedRooms.find((r) => r.bookId === activeBook.id)
@@ -234,20 +236,40 @@ export const ReaderShell: React.FC = () => {
       activeRoom.code,
       (updated) => {
         if (updated.kickedIds?.includes(deviceId) && !updated.participants?.[deviceId]) {
+          const lp = livePosRef.current;
+          if (activeBook && lp.pct > 0) {
+            void updateBook(activeBook.id, {
+              progress: lp.pct,
+              ...(lp.page ? { currentPage: lp.page } : {}),
+              ...(lp.cfi ? { currentCfi: lp.cfi } : {}),
+              ...(lp.scrollRatio !== undefined ? { scrollRatio: lp.scrollRatio } : {}),
+              ...(lp.chapter ? { currentChapter: lp.chapter } : {}),
+            });
+          }
           removeLocalRoom(updated.code);
           setDrawer((curr) => (curr === 'room' ? 'none' : curr));
-          showToast(`Fuiste eliminado de la sala ${updated.code} por el administrador`);
+          showToast(`Fuiste eliminado de la sala ${updated.code} por el administrador · Tu progreso se conservó`);
           return;
         }
         updateLocalRoom(updated);
       },
       (deletedCode) => {
+        const lp = livePosRef.current;
+        if (activeBook && lp.pct > 0) {
+          void updateBook(activeBook.id, {
+            progress: lp.pct,
+            ...(lp.page ? { currentPage: lp.page } : {}),
+            ...(lp.cfi ? { currentCfi: lp.cfi } : {}),
+            ...(lp.scrollRatio !== undefined ? { scrollRatio: lp.scrollRatio } : {}),
+            ...(lp.chapter ? { currentChapter: lp.chapter } : {}),
+          });
+        }
         removeLocalRoom(deletedCode);
         setDrawer((curr) => (curr === 'room' ? 'none' : curr));
-        showToast(`La sala ${deletedCode} fue cerrada por el anfitrión`);
+        showToast(`La sala ${deletedCode} fue cerrada por el anfitrión · Tu progreso se conservó`);
       }
     );
-  }, [activeRoom?.code, syncConfig, deviceId, updateLocalRoom, removeLocalRoom, showToast]);
+  }, [activeRoom?.code, activeBook?.id, syncConfig, deviceId, updateBook, updateLocalRoom, removeLocalRoom, showToast]);
 
   useEffect(() => {
     if (!activeBook) {
@@ -1866,10 +1888,16 @@ export const ReaderShell: React.FC = () => {
                 className="pill-btn"
                 style={{ height: 26, padding: '0 8px', fontSize: 10.5, color: '#c84b4e' }}
                 onClick={async () => {
-                  await leaveOrDeleteRoom(activeRoom.code, false);
+                  await leaveOrDeleteRoom(activeRoom.code, false, {
+                    progress: livePos.pct,
+                    currentPage: livePos.page,
+                    currentCfi: livePos.cfi,
+                    scrollRatio: livePos.scrollRatio,
+                    currentChapter: livePos.chapter,
+                  });
                   setDrawer('none');
                 }}
-                title="Salir de la sala"
+                title="Salir de la sala (tu progreso se conserva)"
               >
                 <LogOut size={11} /> Salir
               </button>
@@ -1879,10 +1907,16 @@ export const ReaderShell: React.FC = () => {
                   className="pill-btn"
                   style={{ height: 26, padding: '0 8px', fontSize: 10.5, color: '#c84b4e' }}
                   onClick={async () => {
-                    await leaveOrDeleteRoom(activeRoom.code, true);
+                    await leaveOrDeleteRoom(activeRoom.code, true, {
+                      progress: livePos.pct,
+                      currentPage: livePos.page,
+                      currentCfi: livePos.cfi,
+                      scrollRatio: livePos.scrollRatio,
+                      currentChapter: livePos.chapter,
+                    });
                     setDrawer('none');
                   }}
-                  title="Cerrar sala para todos"
+                  title="Cerrar sala para todos (tu progreso se conserva)"
                 >
                   <Trash2 size={11} /> Cerrar
                 </button>

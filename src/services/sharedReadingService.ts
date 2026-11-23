@@ -19,6 +19,18 @@ import {
   uploadBookToServer,
 } from './syncService';
 
+export class SharedSpaceHttpError extends Error {
+  status: number;
+  deleted: boolean;
+
+  constructor(message: string, status: number, deleted = false) {
+    super(message);
+    this.name = 'SharedSpaceHttpError';
+    this.status = status;
+    this.deleted = deleted;
+  }
+}
+
 export interface ParticipantIdentity {
   id: string;
   name: string;
@@ -89,11 +101,32 @@ export async function getSharedRoom(config: SyncConfig, code: string): Promise<S
   const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
+  if (res.status === 410) {
+    throw new SharedSpaceHttpError('Esta sala fue cerrada', 410, true);
+  }
   if (res.status === 404) {
-    throw new Error('No se encontró ninguna sala con ese código');
+    throw new SharedSpaceHttpError('No se encontró ninguna sala con ese código', 404, false);
   }
   const data = await parseJsonResponse<{ room: SharedRoom }>(res, url);
   return data.room;
+}
+
+export async function restoreSharedRoom(
+  config: SyncConfig,
+  room: SharedRoom
+): Promise<{ room: SharedRoom; restored: boolean }> {
+  const base = resolveServerUrl(config.serverUrl);
+  const url = `${base}/api/rooms/${encodeURIComponent(room.code.trim().toUpperCase())}/restore`;
+  const res = await fetchApi(url, {
+    method: 'PUT',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify({ room }),
+  });
+  if (res.status === 410) {
+    throw new SharedSpaceHttpError('Esta sala ya fue cerrada', 410, true);
+  }
+  const data = await parseJsonResponse<{ room: SharedRoom; restored?: boolean }>(res, url);
+  return { room: data.room, restored: Boolean(data.restored) };
 }
 
 export async function joinSharedRoom(
@@ -108,8 +141,11 @@ export async function joinSharedRoom(
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ participant }),
   });
+  if (res.status === 410) {
+    throw new SharedSpaceHttpError('Esta sala fue cerrada', 410, true);
+  }
   if (res.status === 404) {
-    throw new Error('Código de sala no encontrado');
+    throw new SharedSpaceHttpError('Código de sala no encontrado', 404, false);
   }
   const data = await parseJsonResponse<{ room: SharedRoom }>(res, url);
   return data.room;
@@ -277,11 +313,32 @@ export async function getSharedShelf(config: SyncConfig, code: string): Promise<
   const res = await fetchApi(url, {
     headers: buildAuthHeaders(config, false),
   });
+  if (res.status === 410) {
+    throw new SharedSpaceHttpError('Esta estantería fue cerrada', 410, true);
+  }
   if (res.status === 404) {
-    throw new Error('No se encontró ninguna estantería con ese código');
+    throw new SharedSpaceHttpError('No se encontró ninguna estantería con ese código', 404, false);
   }
   const data = await parseJsonResponse<{ shelf: SharedShelf }>(res, url);
   return data.shelf;
+}
+
+export async function restoreSharedShelf(
+  config: SyncConfig,
+  shelf: SharedShelf
+): Promise<{ shelf: SharedShelf; restored: boolean }> {
+  const base = resolveServerUrl(config.serverUrl);
+  const url = `${base}/api/shelves/${encodeURIComponent(shelf.code.trim().toUpperCase())}/restore`;
+  const res = await fetchApi(url, {
+    method: 'PUT',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify({ shelf }),
+  });
+  if (res.status === 410) {
+    throw new SharedSpaceHttpError('Esta estantería ya fue cerrada', 410, true);
+  }
+  const data = await parseJsonResponse<{ shelf: SharedShelf; restored?: boolean }>(res, url);
+  return { shelf: data.shelf, restored: Boolean(data.restored) };
 }
 
 export async function joinSharedShelf(
@@ -296,8 +353,11 @@ export async function joinSharedShelf(
     headers: buildAuthHeaders(config, true),
     body: JSON.stringify({ member }),
   });
+  if (res.status === 410) {
+    throw new SharedSpaceHttpError('Esta estantería fue cerrada', 410, true);
+  }
   if (res.status === 404) {
-    throw new Error('Código de estantería no encontrado');
+    throw new SharedSpaceHttpError('Código de estantería no encontrado', 404, false);
   }
   const data = await parseJsonResponse<{ shelf: SharedShelf }>(res, url);
   return data.shelf;

@@ -95,7 +95,9 @@ const INBOX_DIR = path.join(STORAGE_DIR, 'inbox');
 const STATE_FILE = path.join(STORAGE_DIR, 'state.json');
 const INBOX_FILE = path.join(STORAGE_DIR, 'inbox.json');
 const ROOMS_FILE = path.join(STORAGE_DIR, 'rooms.json');
+const DELETED_ROOMS_FILE = path.join(STORAGE_DIR, 'deleted_rooms.json');
 const SHELVES_FILE = path.join(STORAGE_DIR, 'shelves.json');
+const DELETED_SHELVES_FILE = path.join(STORAGE_DIR, 'deleted_shelves.json');
 
 fs.mkdirSync(SPACES_DIR, { recursive: true });
 fs.mkdirSync(FILES_DIR, { recursive: true });
@@ -229,6 +231,48 @@ function writeRooms(rooms) {
   const tmp = `${ROOMS_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(rooms, null, 2), 'utf8');
   fs.renameSync(tmp, ROOMS_FILE);
+}
+
+function readDeletedMap(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDeletedMap(filePath, map) {
+  const entries = Object.entries(map || {})
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+    .slice(0, 500);
+  const pruned = Object.fromEntries(entries);
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(pruned, null, 2), 'utf8');
+  fs.renameSync(tmp, filePath);
+}
+
+function markRoomDeleted(code) {
+  const map = readDeletedMap(DELETED_ROOMS_FILE);
+  map[code] = Date.now();
+  writeDeletedMap(DELETED_ROOMS_FILE, map);
+}
+
+function isRoomExplicitlyDeleted(code) {
+  const map = readDeletedMap(DELETED_ROOMS_FILE);
+  return Boolean(map[code]);
+}
+
+function markShelfDeleted(code) {
+  const map = readDeletedMap(DELETED_SHELVES_FILE);
+  map[code] = Date.now();
+  writeDeletedMap(DELETED_SHELVES_FILE, map);
+}
+
+function isShelfExplicitlyDeleted(code) {
+  const map = readDeletedMap(DELETED_SHELVES_FILE);
+  return Boolean(map[code]);
 }
 
 function readShelves() {
@@ -381,12 +425,12 @@ app.use('/api', (req, res, next) => {
 
   const isGuestRoomEndpoint =
     (req.method === 'GET' && /^\/rooms\/[A-Za-z0-9-]+$/.test(req.path)) ||
-    /^\/rooms\/[A-Za-z0-9-]+\/(join|leave|kick|progress|comments|file|stream)$/.test(req.path);
+    /^\/rooms\/[A-Za-z0-9-]+\/(join|leave|kick|progress|comments|file|stream|restore)$/.test(req.path);
   if (isGuestRoomEndpoint) return next();
 
   const isGuestShelfEndpoint =
     (req.method === 'GET' && /^\/shelves\/[A-Za-z0-9-]+$/.test(req.path)) ||
-    /^\/shelves\/[A-Za-z0-9-]+\/(join|leave|kick|books|stream)(\/[^/]+(\/file)?)?$/.test(req.path);
+    /^\/shelves\/[A-Za-z0-9-]+\/(join|leave|kick|books|stream|restore)(\/[^/]+(\/file)?)?$/.test(req.path);
   if (isGuestShelfEndpoint) return next();
 
   const auth = req.headers.authorization || '';
@@ -1326,9 +1370,137 @@ app.get('/api/rooms/:code', (req, res) => {
   const rooms = readRooms();
   const room = rooms[code];
   if (!room) {
+    if (isRoomExplicitlyDeleted(code)) {
+      return res.status(410).json({ error: 'Esta sala fue cerrada', deleted: true });
+    }
     return res.status(404).json({ error: 'Sala no encontrada' });
   }
   res.json({ ok: true, room });
+});
+
+app.put('/api/rooms/:code/restore', (req, res) => {
+  const code = normalizeRoomCode(req.params.code);
+  if (!code) {
+    return res.status(400).json({ error: 'Código de sala inválido' });
+  }
+  if (isRoomExplicitlyDeleted(code)) {
+    return res.status(410).json({ error: 'Esta sala ya fue cerrada', deleted: true });
+  }
+  const incoming = req.body?.room;
+  if (!incoming || !incoming.bookId || !incoming.bookMeta?.title) {
+    return res.status(400).json({ error: 'Faltan los datos de la sala para restaurarla' });
+  }
+
+  const rooms = readRooms();
+  const now = Date.now();
+  const hostSpaceId = getRequestSpaceId(req);
+  const existing = rooms[code];
+
+  const sanitizeParticipant = (id, p) => ({
+    id: String(p?.id || id).slice(0, 64),
+    name: String(p?.name || 'Lector Komo').slice(0, 40),
+    avatarEmoji: p?.avatarEmoji || '🦊',
+    avatarBg: p?.avatarBg || '#f6d8ae',
+    avatarImageUrl: sanitizeSharedAvatarUrl(p?.avatarImageUrl),
+    progress: Math.max(0, Math.min(100, Number(p?.progress || 0))),
+    currentPage: p?.currentPage !== undefined ? Number(p.currentPage) : undefined,
+    pageCount: p?.pageCount !== undefined ? Number(p.pageCount) : incoming.bookMeta?.pageCount,
+    readingStatus: p?.readingStatus || (Number(p?.progress || 0) >= 98 ? 'completed' : 'reading'),
+    joinedAt: Number(p?.joinedAt || now),
+    lastSeenAt: Number(p?.lastSeenAt || now),
+  });
+
+  if (existing) {
+    const kickedSet = new Set(Array.isArray(existing.kickedIds) ? existing.kickedIds : []);
+    existing.participants = existing.participants || {};
+    for (const [rawId, p] of Object.entries(incoming.participants || {})) {
+      const pId = String(p?.id || rawId).slice(0, 64);
+      if (!pId || kickedSet.has(pId)) continue;
+      const cur = existing.participants[pId];
+      const nextP = sanitizeParticipant(pId, p);
+      if (!cur || (nextP.lastSeenAt || 0) > (cur.lastSeenAt || 0)) {
+        existing.participants[pId] = {
+          ...(cur || {}),
+          ...nextP,
+          progress: Math.max(Number(cur?.progress || 0), Number(nextP.progress || 0)),
+        };
+      }
+    }
+    const commentMap = new Map();
+    for (const c of Array.isArray(existing.comments) ? existing.comments : []) {
+      if (c?.id) commentMap.set(c.id, c);
+    }
+    for (const c of Array.isArray(incoming.comments) ? incoming.comments : []) {
+      if (c?.id && !commentMap.has(c.id)) {
+        commentMap.set(c.id, {
+          ...c,
+          avatarImageUrl: sanitizeSharedAvatarUrl(c.avatarImageUrl),
+        });
+      }
+    }
+    existing.comments = Array.from(commentMap.values())
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+      .slice(-200);
+    existing.updatedAt = Math.max(existing.updatedAt || 0, now);
+    rooms[code] = existing;
+    writeRooms(rooms);
+    broadcastRoomUpdate(code, existing);
+    return res.json({ ok: true, room: existing, restored: false });
+  }
+
+  const state = readState(hostSpaceId);
+  const storedBook = state.books?.[incoming.bookId];
+  const participants = {};
+  for (const [rawId, p] of Object.entries(incoming.participants || {})) {
+    const pId = String(p?.id || rawId).slice(0, 64);
+    if (!pId) continue;
+    participants[pId] = sanitizeParticipant(pId, p);
+  }
+  const bm = incoming.bookMeta || {};
+  const restoredRoom = {
+    code,
+    hostSpaceId: incoming.hostSpaceId || hostSpaceId,
+    bookId: String(incoming.bookId),
+    bookMeta: {
+      id: String(bm.id || incoming.bookId),
+      title: String(bm.title).slice(0, 140),
+      author: String(bm.author || 'Desconocido').slice(0, 80),
+      description: String(bm.description || '').slice(0, 1200),
+      format: storedBook?.format || bm.format || 'epub',
+      kind: bm.kind || 'book',
+      categories: Array.isArray(bm.categories) ? bm.categories : [],
+      tags: Array.isArray(bm.tags) ? bm.tags : [],
+      coverDataUrl: typeof bm.coverDataUrl === 'string' ? bm.coverDataUrl : '',
+      hasOriginalCover: Boolean(bm.hasOriginalCover),
+      spineColor: bm.spineColor || '#4c6c8a',
+      ribbonColor: bm.ribbonColor || '#f2ba59',
+      fileName: storedBook?.fileName || bm.fileName || `${incoming.bookId}.${bm.format || 'epub'}`,
+      fileSize: storedBook?.fileSize || bm.fileSize || 0,
+      mimeType: storedBook?.mimeType || bm.mimeType || 'application/octet-stream',
+      pageCount: bm.pageCount,
+      hasRemoteFile: Boolean(storedBook?.hasRemoteFile || bm.hasRemoteFile),
+      remoteFileName: storedBook?.remoteFileName || bm.remoteFileName || '',
+      sharedAnnotations: Array.isArray(bm.sharedAnnotations) ? bm.sharedAnnotations.slice(0, 400) : [],
+      sharedBookmarks: Array.isArray(bm.sharedBookmarks) ? bm.sharedBookmarks.slice(0, 150) : [],
+    },
+    hostId: String(incoming.hostId || Object.keys(participants)[0] || `user_${now}`).slice(0, 64),
+    hostName: String(incoming.hostName || 'Lector Komo').slice(0, 40),
+    createdAt: Number(incoming.createdAt || now),
+    updatedAt: now,
+    participants,
+    kickedIds: Array.isArray(incoming.kickedIds) ? incoming.kickedIds.slice(-50) : [],
+    comments: Array.isArray(incoming.comments)
+      ? incoming.comments.slice(-200).map((c) => ({
+          ...c,
+          avatarImageUrl: sanitizeSharedAvatarUrl(c?.avatarImageUrl),
+        }))
+      : [],
+  };
+
+  rooms[code] = restoredRoom;
+  writeRooms(rooms);
+  broadcastRoomUpdate(code, restoredRoom);
+  res.json({ ok: true, room: restoredRoom, restored: true });
 });
 
 app.post('/api/rooms/:code/join', (req, res) => {
@@ -1377,6 +1549,9 @@ app.patch('/api/rooms/:code/progress', (req, res) => {
   const rooms = readRooms();
   const room = rooms[code];
   if (!room) {
+    if (isRoomExplicitlyDeleted(code)) {
+      return res.status(410).json({ error: 'Esta sala fue cerrada', deleted: true });
+    }
     return res.status(404).json({ error: 'Sala no encontrada' });
   }
 
@@ -1398,6 +1573,9 @@ app.patch('/api/rooms/:code/progress', (req, res) => {
   }
   if (Array.isArray(room.kickedIds) && room.kickedIds.includes(pId)) {
     return res.status(403).json({ error: 'Fuiste eliminado de esta sala' });
+  }
+  if (room.participants && !room.participants[pId] && pId !== room.hostId) {
+    return res.status(403).json({ error: 'Ya no perteneces a esta sala' });
   }
 
   const now = Date.now();
@@ -1536,6 +1714,7 @@ app.post('/api/rooms/:code/leave', (req, res) => {
     if (remaining.length === 0) {
       delete rooms[code];
       writeRooms(rooms);
+      markRoomDeleted(code);
       broadcastRoomDeleted(code);
       return res.json({ ok: true, deleted: true });
     }
@@ -1581,6 +1760,7 @@ app.post('/api/rooms/:code/kick', (req, res) => {
 app.delete('/api/rooms/:code', (req, res) => {
   const code = normalizeRoomCode(req.params.code);
   const rooms = readRooms();
+  markRoomDeleted(code);
   if (rooms[code]) {
     delete rooms[code];
     writeRooms(rooms);
@@ -1652,9 +1832,82 @@ app.get('/api/shelves/:code', (req, res) => {
   const shelves = readShelves();
   const shelf = shelves[code];
   if (!shelf) {
+    if (isShelfExplicitlyDeleted(code)) {
+      return res.status(410).json({ error: 'Esta estantería fue cerrada', deleted: true });
+    }
     return res.status(404).json({ error: 'Estantería compartida no encontrada' });
   }
   res.json({ ok: true, shelf });
+});
+
+app.put('/api/shelves/:code/restore', (req, res) => {
+  const code = normalizeRoomCode(req.params.code);
+  if (!code) {
+    return res.status(400).json({ error: 'Código de estantería inválido' });
+  }
+  if (isShelfExplicitlyDeleted(code)) {
+    return res.status(410).json({ error: 'Esta estantería ya fue cerrada', deleted: true });
+  }
+  const incoming = req.body?.shelf;
+  if (!incoming || !incoming.title) {
+    return res.status(400).json({ error: 'Faltan los datos de la estantería para restaurarla' });
+  }
+
+  const shelves = readShelves();
+  const now = Date.now();
+  const existing = shelves[code];
+  const sanitizeMember = (id, m) => ({
+    id: String(m?.id || id).slice(0, 64),
+    name: String(m?.name || 'Lector Komo').slice(0, 40),
+    avatarEmoji: m?.avatarEmoji || '🦊',
+    avatarBg: m?.avatarBg || '#f6d8ae',
+    avatarImageUrl: sanitizeSharedAvatarUrl(m?.avatarImageUrl),
+    joinedAt: Number(m?.joinedAt || now),
+  });
+
+  if (existing) {
+    const kickedSet = new Set(Array.isArray(existing.kickedIds) ? existing.kickedIds : []);
+    existing.members = existing.members || {};
+    for (const [rawId, m] of Object.entries(incoming.members || {})) {
+      const mId = String(m?.id || rawId).slice(0, 64);
+      if (!mId || kickedSet.has(mId) || existing.members[mId]) continue;
+      existing.members[mId] = sanitizeMember(mId, m);
+    }
+    existing.books = existing.books || {};
+    for (const [k, entry] of Object.entries(incoming.books || {})) {
+      if (entry && !existing.books[k]) {
+        existing.books[k] = entry;
+      }
+    }
+    existing.updatedAt = Math.max(existing.updatedAt || 0, now);
+    shelves[code] = existing;
+    writeShelves(shelves);
+    broadcastShelfUpdate(code, existing);
+    return res.json({ ok: true, shelf: existing, restored: false });
+  }
+
+  const members = {};
+  for (const [rawId, m] of Object.entries(incoming.members || {})) {
+    const mId = String(m?.id || rawId).slice(0, 64);
+    if (!mId) continue;
+    members[mId] = sanitizeMember(mId, m);
+  }
+  const restoredShelf = {
+    code,
+    title: String(incoming.title || 'Estantería compartida').slice(0, 80),
+    hostId: String(incoming.hostId || Object.keys(members)[0] || `user_${now}`).slice(0, 64),
+    hostName: String(incoming.hostName || 'Lector Komo').slice(0, 40),
+    createdAt: Number(incoming.createdAt || now),
+    updatedAt: now,
+    members,
+    kickedIds: Array.isArray(incoming.kickedIds) ? incoming.kickedIds.slice(-50) : [],
+    books: incoming.books && typeof incoming.books === 'object' ? incoming.books : {},
+  };
+
+  shelves[code] = restoredShelf;
+  writeShelves(shelves);
+  broadcastShelfUpdate(code, restoredShelf);
+  res.json({ ok: true, shelf: restoredShelf, restored: true });
 });
 
 app.post('/api/shelves/:code/join', (req, res) => {
@@ -1814,6 +2067,7 @@ app.post('/api/shelves/:code/leave', (req, res) => {
       }
       delete shelves[code];
       writeShelves(shelves);
+      markShelfDeleted(code);
       broadcastShelfDeleted(code);
       return res.json({ ok: true, deleted: true });
     }
@@ -1858,6 +2112,7 @@ app.delete('/api/shelves/:code', (req, res) => {
   const code = normalizeRoomCode(req.params.code);
   const shelves = readShelves();
   const shelf = shelves[code];
+  markShelfDeleted(code);
   if (shelf) {
     for (const entry of Object.values(shelf.books || {})) {
       if (entry?.remoteFileName && entry.remoteFileName.startsWith('shelf_')) {
