@@ -80,13 +80,15 @@ export function parseGoogleAuthPayloadString(rawEncoded: string): GoogleDriveAut
 
 export function buildGoogleOAuthStartUrl(
   config: SyncConfig,
-  platform: 'android' | 'web',
+  platform: 'android' | 'desktop' | 'web',
   opts?: { loginHint?: string; forceConsent?: boolean; switchAccount?: boolean }
 ): string {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
   const params = new URLSearchParams();
-  params.set('platform', platform);
-  if (platform === 'web' && typeof window !== 'undefined') {
+  params.set('platform', platform === 'desktop' ? 'web' : platform);
+  if (platform === 'desktop' && typeof window !== 'undefined') {
+    params.set('returnTo', `${window.location.origin}/oauth-bridge`);
+  } else if (platform === 'web' && typeof window !== 'undefined') {
     params.set('returnTo', `${window.location.origin}${window.location.pathname}`);
   }
   if (opts?.loginHint?.trim()) {

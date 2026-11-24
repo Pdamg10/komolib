@@ -22,8 +22,7 @@ Snapshot maintained under AIEF L3.
 - `docs/standards/` — AIEF specifications & L3 cross-cutting patterns
 - `scripts/aief.mjs` — AIEF reference validator & health CLI
 - `.ai-adapters/` — AI tool adapter docs (`.cursor/rules/aief.mdc`, `.github/copilot-instructions.md`)
-- `.github/workflows/build-apk.yml` — CI workflow for web build & Android Debug APK
-- `netlify.toml` — Netlify build config & SPA redirect rules
+- `.github/workflows/build-apk.yml` — CI workflow for client build & Android Debug APK
 
 ## Modules / Services
 - **Frontend SPA (`src/`)**: Local-first reader, library UI, parsers, IndexedDB persistence, SSE sync client
@@ -32,7 +31,7 @@ Snapshot maintained under AIEF L3.
 
 ## Infra & CI
 - **CI:** GitHub Actions (`.github/workflows/build-apk.yml` — Node 22 + Java 21 Temurin → `app-debug.apk` artifact)
-- **Frontend Hosting:** Netlify (`netlify.toml`, Node 22, publish `dist`)
+- **Client Targets:** Desktop PC App + Android APK (`android/`, Capacitor 7)
 - **API Hosting:** Persistent Node.js host (Render / Railway / Fly.io / VPS) with volume at `KOMOLIB_STORAGE_DIR`
 
 ## Commands

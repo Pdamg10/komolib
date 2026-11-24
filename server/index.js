@@ -38,7 +38,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
 const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
-const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || 'https://komolib-reader.netlify.app').trim().replace(/\/+$/, '');
+const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
 let runtimePublicUrl = (process.env.PUBLIC_URL || '').trim().replace(/\/+$/, '');
 
 function getEffectivePublicUrl(req) {
@@ -767,7 +767,6 @@ function isAllowedGoogleReturnUrl(raw) {
   try {
     const u = new URL(raw);
     if (u.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/i.test(u.hostname)) return true;
-    if (u.protocol === 'https:' && /\.netlify\.app$/i.test(u.hostname)) return true;
     if (PUBLIC_APP_URL) {
       const pub = new URL(PUBLIC_APP_URL);
       if (u.origin === pub.origin) return true;

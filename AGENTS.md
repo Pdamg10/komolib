@@ -7,21 +7,21 @@ This is the repository-level entry point for AI-assisted engineering on **KomoLi
 - Keep code, filenames, CLI commands, types, and technical identifiers in **English**.
 
 ## Project Overview
-- **One-liner:** Universal multi-format digital library & reader (Web PWA + Capacitor Android APK + Node.js live sync & shared reading server).
-- **Core value:** Local-first reading experience (eBooks, Manga/Manhwa/Comics, Audiobooks) with warm customizable stationery, real-time Web ↔ APK sync via SSE, and spoiler-protected Buddy Read rooms (`KOMO-XXXX`) & mutual shelves (`SHELF-XXXX`).
+- **One-liner:** Universal multi-format digital library & reader (Desktop PC App + Capacitor Android APK + Node.js live sync & shared reading server).
+- **Core value:** Local-first reading experience (eBooks, PDF with text highlighting, Manga/Manhwa/Comics, Audiobooks) with warm customizable stationery, Google Drive & real-time PC ↔ APK sync via SSE, and spoiler-protected Buddy Read rooms (`KOMO-XXXX`) & mutual shelves (`SHELF-XXXX`).
 
 ## Quick Commands
-- **Dev (Web):** `npm run dev` (Vite on `http://localhost:5173`)
+- **Dev (Client):** `npm run dev` (Vite on `http://localhost:5173`)
 - **Dev (Sync/Rooms API):** `npm run dev:server` (or `cd server && npm start`, Express on `http://0.0.0.0:4123`)
 - **Typecheck & Build:** `npm run build` (`tsc -b && vite build`)
 - **Sync Android Capacitor:** `npm run cap:sync`
-- **Build Android Debug APK:** `cd android && ./gradlew assembleDebug`
+- **Build Android Debug APK:** `JAVA_HOME=/home/phame/.jdks/jdk-17.0.20.1+1 ./android/gradlew -p android assembleDebug`
 - **AIEF Health Check:** `npm run aief:doctor`
 - **AIEF Ref Validation:** `npm run aief:validate`
 
 ## Engineering Invariants & Guardrails
-1. **Two-piece architecture:** Netlify hosts the static React SPA (`dist/`) only; `server/` is a persistent Node.js API requiring disk (`KOMOLIB_STORAGE_DIR`) and long-lived SSE connections. Never assume serverless/Netlify can run `server/index.js`.
-2. **API calls must use `fetchApi` / `parseJsonResponse`:** All frontend requests to the sync/rooms API go through helpers in `src/services/syncService.ts` so Netlify SPA HTML fallbacks (`200 text/html`) produce actionable errors instead of `Unexpected token '<'`.
+1. **Client + Persistent API architecture:** The React/Vite frontend (`dist/`) runs as a local-first Desktop PC app and Android APK (Capacitor); `server/` is a persistent Node.js API (Render/Railway/VPS) requiring disk (`KOMOLIB_STORAGE_DIR`) and long-lived SSE connections.
+2. **API calls must use `fetchApi` / `parseJsonResponse`:** All frontend requests to the sync/rooms API go through helpers in `src/services/syncService.ts` so unexpected HTML proxy/503 responses produce actionable errors instead of `Unexpected token '<'` and Render cold starts wake cleanly.
 3. **Local-first storage:** IndexedDB (`komolib-db` v2 in `src/db/localDb.ts`) is the primary client store; remote sync merges state with deletion tombstones (`deleted*Ids`).
 4. **Build-time env vars:** `VITE_SYNC_SERVER_URL` and `VITE_PUBLIC_APP_URL` are baked into the bundle at `vite build` time.
 5. **Secrets & runtime storage:** Never commit `.env` or `server/storage/`.

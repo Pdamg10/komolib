@@ -1,0 +1,16 @@
+{
+  "name": "komolib-cloud-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:create": "wrangler d1 create komolib-db",
+    "db:init": "wrangler d1 execute komolib-db --remote --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute komolib-db --local --file=./schema.sql",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.14.0"
+  }
+}

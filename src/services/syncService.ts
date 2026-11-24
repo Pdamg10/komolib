@@ -124,7 +124,7 @@ function endpointLabel(url: string): string {
 }
 
 /**
- * Reads a JSON response and turns Netlify's SPA fallback (HTTP 200 + index.html)
+ * Reads a JSON response and turns unexpected HTML responses (HTTP 200 + index.html or proxy page)
  * into an actionable error instead of the cryptic "Unexpected token '<'".
  */
 export async function parseJsonResponse<T>(res: Response, url: string): Promise<T> {
@@ -148,9 +148,8 @@ export async function parseJsonResponse<T>(res: Response, url: string): Promise<
   if (trimmed.startsWith('<') || /text\/html/i.test(contentType)) {
     throw new Error(
       `El servidor ${endpointLabel(url)} devolvió HTML en vez de JSON. ` +
-        `Revisa que VITE_SYNC_SERVER_URL apunte a la URL base de TU API de KomoLib, sin /api ` +
-        `(por ejemplo https://komolib-api-xxxx.onrender.com), que el API esté despierto y que ` +
-        `/api/health responda JSON. Luego vuelve a desplegar el sitio en Netlify.`
+        `Revisa que la URL del API de KomoLib sea correcta (sin /api al final), ` +
+        `que el servicio esté activo y que /api/health responda JSON.`
     );
   }
 
@@ -393,10 +392,6 @@ export function resolveServerUrl(url: string): string {
     // If a dedicated sync server URL was compiled into the build, always prefer it over localhost.
     if (SYNC_SERVER_URL) {
       return SYNC_SERVER_URL;
-    }
-    // Never rewrite localhost to Netlify's static origin (Netlify cannot run the Node API).
-    if (/\.netlify\.app$/i.test(window.location.hostname)) {
-      return trimmed;
     }
     // When served over HTTPS, standard port (80/443), or directly from the KomoLib server port,
     // the API lives on the same origin (avoiding broken http://localhost:4123 URLs!).

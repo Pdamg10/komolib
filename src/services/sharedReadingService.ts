@@ -259,8 +259,47 @@ export function subscribeToRoomStream(
   onRoomUpdate: (room: SharedRoom) => void,
   onRoomDeleted?: (deletedCode: string) => void
 ): () => void {
-  if (typeof EventSource === 'undefined') return () => undefined;
-  const url = buildStreamUrl(config, `/api/rooms/${encodeURIComponent(code.trim().toUpperCase())}/stream`);
+  const normalizedCode = code.trim().toUpperCase();
+  const base = resolveServerUrl(config.serverUrl);
+  if (!base || !normalizedCode) return () => undefined;
+
+  // Cloudflare Workers (stateless edge) & environments without EventSource use lightweight 4s polling
+  const preferPolling = /\.workers\.dev\b/i.test(base) || typeof EventSource === 'undefined';
+  let active = true;
+  let pollTimer: number | null = null;
+  let lastUpdatedAt = 0;
+
+  const startPolling = () => {
+    if (pollTimer !== null || !active) return;
+    const tick = async () => {
+      if (!active || document.visibilityState === 'hidden') return;
+      try {
+        const room = await getSharedRoom(config, normalizedCode);
+        if (!active) return;
+        const ts = room.updatedAt || 0;
+        if (ts !== lastUpdatedAt) {
+          lastUpdatedAt = ts;
+          onRoomUpdate(room);
+        }
+      } catch (err) {
+        if (!active) return;
+        if (err instanceof SharedSpaceHttpError && err.deleted) {
+          onRoomDeleted?.(normalizedCode);
+        }
+      }
+    };
+    pollTimer = window.setInterval(() => void tick(), 4500);
+  };
+
+  if (preferPolling) {
+    startPolling();
+    return () => {
+      active = false;
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+    };
+  }
+
+  const url = buildStreamUrl(config, `/api/rooms/${encodeURIComponent(normalizedCode)}/stream`);
   if (!url) return () => undefined;
 
   const es = new EventSource(url);
@@ -275,14 +314,21 @@ export function subscribeToRoomStream(
   const deletedHandler = (ev: MessageEvent) => {
     try {
       const parsed = JSON.parse(ev.data) as { code?: string };
-      onRoomDeleted?.(parsed?.code || code.trim().toUpperCase());
+      onRoomDeleted?.(parsed?.code || normalizedCode);
     } catch {
-      onRoomDeleted?.(code.trim().toUpperCase());
+      onRoomDeleted?.(normalizedCode);
     }
   };
   es.addEventListener('room_update', handler as EventListener);
   es.addEventListener('room_deleted', deletedHandler as EventListener);
+  es.onerror = () => {
+    // Gracefully fall back to polling if host does not support long-lived SSE
+    es.close();
+    startPolling();
+  };
   return () => {
+    active = false;
+    if (pollTimer !== null) window.clearInterval(pollTimer);
     es.removeEventListener('room_update', handler as EventListener);
     es.removeEventListener('room_deleted', deletedHandler as EventListener);
     es.close();
@@ -499,11 +545,46 @@ export function subscribeToShelfStream(
   onShelfUpdate: (shelf: SharedShelf) => void,
   onShelfDeleted?: (deletedCode: string) => void
 ): () => void {
-  if (typeof EventSource === 'undefined') return () => undefined;
-  const url = buildStreamUrl(
-    config,
-    `/api/shelves/${encodeURIComponent(code.trim().toUpperCase())}/stream`
-  );
+  const normalizedCode = code.trim().toUpperCase();
+  const base = resolveServerUrl(config.serverUrl);
+  if (!base || !normalizedCode) return () => undefined;
+
+  const preferPolling = /\.workers\.dev\b/i.test(base) || typeof EventSource === 'undefined';
+  let active = true;
+  let pollTimer: number | null = null;
+  let lastUpdatedAt = 0;
+
+  const startPolling = () => {
+    if (pollTimer !== null || !active) return;
+    const tick = async () => {
+      if (!active || document.visibilityState === 'hidden') return;
+      try {
+        const shelf = await getSharedShelf(config, normalizedCode);
+        if (!active) return;
+        const ts = shelf.updatedAt || 0;
+        if (ts !== lastUpdatedAt) {
+          lastUpdatedAt = ts;
+          onShelfUpdate(shelf);
+        }
+      } catch (err) {
+        if (!active) return;
+        if (err instanceof SharedSpaceHttpError && err.deleted) {
+          onShelfDeleted?.(normalizedCode);
+        }
+      }
+    };
+    pollTimer = window.setInterval(() => void tick(), 5000);
+  };
+
+  if (preferPolling) {
+    startPolling();
+    return () => {
+      active = false;
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+    };
+  }
+
+  const url = buildStreamUrl(config, `/api/shelves/${encodeURIComponent(normalizedCode)}/stream`);
   if (!url) return () => undefined;
 
   const es = new EventSource(url);
@@ -518,14 +599,20 @@ export function subscribeToShelfStream(
   const delHandler = (ev: MessageEvent) => {
     try {
       const parsed = JSON.parse(ev.data) as { code?: string };
-      onShelfDeleted?.(parsed?.code || code.trim().toUpperCase());
+      onShelfDeleted?.(parsed?.code || normalizedCode);
     } catch {
-      onShelfDeleted?.(code.trim().toUpperCase());
+      onShelfDeleted?.(normalizedCode);
     }
   };
   es.addEventListener('shelf_update', handler as EventListener);
   es.addEventListener('shelf_deleted', delHandler as EventListener);
+  es.onerror = () => {
+    es.close();
+    startPolling();
+  };
   return () => {
+    active = false;
+    if (pollTimer !== null) window.clearInterval(pollTimer);
     es.removeEventListener('shelf_update', handler as EventListener);
     es.removeEventListener('shelf_deleted', delHandler as EventListener);
     es.close();

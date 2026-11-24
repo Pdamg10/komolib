@@ -87,6 +87,7 @@ export const SharedReadingView: React.FC = () => {
     sharedUserId,
     syncConfig,
     serverOnline,
+    refreshServerHealth,
     liveConnected,
     applyPairingLink,
     syncStatus,
@@ -333,7 +334,7 @@ export const SharedReadingView: React.FC = () => {
     includeBookmarks: shareIncludeBookmarks,
   };
 
-  // The invite link must open the web app (Netlify), not the API server.
+  // Build invite links using configured public app URL or the API base URL.
   const shareBaseUrl = useMemo(() => {
     if (typeof window !== 'undefined') {
       const { protocol, hostname, origin } = window.location;
@@ -661,14 +662,21 @@ export const SharedReadingView: React.FC = () => {
             <h3>
               <WifiOff size={15} /> Servidor de compartir sin conexión
             </h3>
+            <button
+              type="button"
+              className="pill-btn"
+              style={{ height: 28, fontSize: 11, padding: '0 10px' }}
+              onClick={() => void refreshServerHealth()}
+            >
+              <RefreshCw size={12} /> Reintentar
+            </button>
           </div>
           <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
             No se pudo conectar con{' '}
             <strong style={{ wordBreak: 'break-all' }}>
               {syncConfig.serverUrl || 'el servidor configurado'}
             </strong>
-            . Revisa que el servidor esté desplegado y que la variable{' '}
-            <code>VITE_SYNC_SERVER_URL</code> esté configurada en Netlify.
+            . Verifica tu conexión a internet o que tu servidor API en la nube esté activo.
           </div>
         </div>
       )}

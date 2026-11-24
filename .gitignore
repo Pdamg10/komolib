@@ -1,9 +1,12 @@
 # Dependencies
 node_modules/
 server/node_modules/
+cloudflare/node_modules/
+cloudflare/.wrangler/
 
 # Build outputs
 dist/
+release/
 *.tsbuildinfo
 
 # Local server storage

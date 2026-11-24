@@ -4,7 +4,7 @@
 
 KomoLib is split into three cooperating targets inside one repository:
 
-1. **Frontend SPA / PWA (`src/`)** — React 19, TypeScript 5.8 (`strict: true`), Vite 6 (`base: './'`, `target: 'es2022'`). Deployed as a static site on **Netlify** (`netlify.toml` SPA fallback `/* -> /index.html`).
+1. **Client App (`src/`)** — React 19, TypeScript 5.8 (`strict: true`), Vite 6 (`base: './'`, `target: 'es2022'`). Packaged for Desktop PC and Android APK.
 2. **Sync & Collaboration Server (`server/index.js`)** — Node.js 22 + Express 5 + Multer 2 + CORS. Deployed independently on a persistent Node host (Render / Railway / Fly.io / VPS) with disk storage (`KOMOLIB_STORAGE_DIR`, default `server/storage/`).
 3. **Android APK (`android/`)** — Capacitor 7 (`com.komolib.reader`) wrapping `dist/`. Configured with `androidScheme: 'http'`, `cleartext: true`, and `allowMixedContent: true` to support LAN sync servers alongside HTTPS hosts.
 
@@ -36,6 +36,6 @@ KomoLib is split into three cooperating targets inside one repository:
 
 ## Risks & Technical Debt
 - **Monolithic hot files:** `src/context/LibraryContext.tsx` (~3.2k lines) and `server/index.js` (~1.8k lines) concentrate many concerns; extract cohesive modules carefully before adding large features.
-- **SPA fallback misconfiguration:** Missing or mis-set `VITE_SYNC_SERVER_URL` makes API fetches hit Netlify's `index.html`; always keep `fetchApi`/`parseJsonResponse` in place.
+- **Unexpected HTML responses / Render cold starts:** Always keep `fetchApi`/`parseJsonResponse` in place so 503/HTML proxy responses never throw cryptic JSON parse errors.
 - **Ephemeral cloud disks:** Hosting `server/` without a mounted volume for `KOMOLIB_STORAGE_DIR` wipes uploaded books and room state on restart.
 - **No automated test suite yet:** Verification currently relies on `npm run build` (`tsc -b && vite build`), manual smoke tests, and CI APK builds (`.github/workflows/build-apk.yml`).

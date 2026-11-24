@@ -1,0 +1,14 @@
+name = "komolib-api"
+main = "src/index.js"
+compatibility_date = "2025-04-01"
+
+[vars]
+GEMINI_MODEL = "gemini-2.5-flash"
+
+# 1) Crea la base de datos D1 gratis (sin tarjeta):
+#      npx wrangler d1 create komolib-db
+# 2) Pega aquí abajo el database_id que te muestre wrangler:
+[[d1_databases]]
+binding = "DB"
+database_name = "komolib-db"
+database_id = "c3eeac51-44cb-4601-911f-b0fffc2ad335"

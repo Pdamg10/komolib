@@ -1,9 +1,9 @@
-# 📚 KomoLib — Librería Universal Personalizable (Web + APK Android + Sync Server)
+# 📚 KomoLib — Librería Universal Personalizable (App PC + APK Android + Sync Server)
 
-**KomoLib** es una librería y lector multi-formato diseñado con estética cálida de papelería/crema, totalmente personalizable y compatible con **Web (PWA)**, **APK Android (Capacitor)** y **sincronización en servidor propio Node.js**.
+**KomoLib** es una librería y lector multi-formato diseñado con estética cálida de papelería/crema, totalmente personalizable y compatible con **App de Escritorio (PC)**, **APK Android (Capacitor)**, **Google Drive personal** y **servidor propio Node.js** para salas compartidas y sincronización.
 
 ## Formatos Soportados
-- **eBooks y Documentos:** `EPUB`, `PDF`, `MOBI`, `AZW` / `AZW3` / `PRC`, `FB2`, `DOCX`, `TXT`, `Markdown (.md)`, `HTML`
+- **eBooks y Documentos:** `EPUB`, `PDF` (con selección y subrayado de texto + modo pines), `MOBI`, `AZW` / `AZW3` / `PRC`, `FB2`, `DOCX`, `TXT`, `Markdown (.md)`, `HTML`
 - **Mangas, Manhwas y Cómics:** `CBZ` / `ZIP`, `CBR` / `RAR` (WASM offline), `PDF` y carpetas/selecciones múltiples de imágenes (`JPG`, `PNG`, `WEBP`, `AVIF`)
 - **Audiolibros:** `MP3`, `M4B`, `M4A`, `OGG`, `WAV`
 
@@ -11,22 +11,18 @@
 - **Manhwa / Webtoon:** Tira vertical continua sin bordes (espaciado ajustable desde `0px`)
 - **Manga (RTL):** Lectura japonesa de derecha a izquierda (1 página o doble página)
 - **Cómic (LTR):** Lectura occidental de izquierda a derecha (1 o 2 páginas)
-- **Libros:** 5 temas de lectura (`Cream`, `Paper`, `Sepia`, `Dark`, `OLED`), tipografía, interlineado, ancho de columna, brillo y filtro de luz cálida nocturna
+- **Libros y PDF:** 5 temas de lectura (`Cream`, `Paper`, `Sepia`, `Dark`, `OLED`), tipografía, interlineado, ancho de columna, brillo, filtro de luz cálida nocturna, separadores visuales persistentes y herramientas completas de subrayado/anotación.
 
 ## Arquitectura
 
-KomoLib tiene dos piezas independientes:
-
-| Pieza | Carpeta | Se despliega en |
+| Pieza | Carpeta | Destino |
 | --- | --- | --- |
-| Frontend (React + Vite) | raíz del repo | **Netlify** (sitio estático) |
-| API de sync y salas | `server/` | **Render / Railway / Fly.io / VPS** (Node.js + disco persistente) |
-
-> **Importante:** Netlify solo publica el frontend. El servidor Express **no puede ejecutarse en Netlify** porque necesita un proceso Node permanente, disco para los libros y conexiones SSE en tiempo real. Sin un API desplegado, la web funciona como lector local, pero los códigos QR, las salas `KOMO-XXXX` y la sincronización Web ↔ APK no funcionarán.
+| Cliente (React + Vite) | `src/` | **App PC** + **APK Android** (`android/`) |
+| API de sync, OAuth Drive y salas | `server/` | **Render / Railway / Fly.io / VPS** (Node.js) |
 
 ## Comandos Rápidos
 
-### 1. Ejecutar en Web (Desarrollo)
+### 1. Ejecutar en Desarrollo
 ```bash
 npm install
 npm run dev
@@ -39,96 +35,25 @@ npm install
 npm start
 # Escucha en http://0.0.0.0:4123
 ```
-Configura las variables del servidor en `server/.env` o en el panel de tu hosting (ver `.env.example`).
+Configura las variables del servidor en `server/.env` o en el panel de Render (ver `.env.example`).
 
-- **Web ↔ APK en vivo:** los cambios de progreso, libros, notas, marcadores, tema y sesión activa (*"Continuar desde Web PC / APK Android"*) se sincronizan en tiempo real (SSE) contra el API.
-- **Salas de Lectura Compartida (Buddy Read):** crea una sala para cualquier libro (genera código `KOMO-XXXX`, enlace y QR), lee viendo el progreso mutuo en vivo y deja notas protegidas contra spoilers hasta que el otro lector alcance tu porcentaje.
-- **Estanterías compartidas:** comparte una selección de libros con un código `SHELF-XXXX` y su QR.
-- El enlace/QR de invitación abre la **app web** (Netlify) y añade `&server=<url-del-api>` para que el invitado se conecte aunque su build no tenga configurada la variable de entorno.
+- **PC ↔ APK sincronizados:** libros, progreso, portadas, separadores, anotaciones y tema sincronizados por Google Drive o servidor propio.
+- **Salas de Lectura Compartida (Buddy Read):** crea una sala para cualquier libro (`KOMO-XXXX`), lee viendo el progreso mutuo en vivo y deja notas protegidas contra spoilers.
+- **Estanterías compartidas:** comparte varios libros o tu biblioteca con un código `SHELF-XXXX` y su QR.
 
 ### 3. Compilar el APK Android
 ```bash
 npm run cap:sync
-cd android
-JAVA_HOME=/home/phame/.jdks/jdk-17.0.20.1+1 ./gradlew assembleDebug
+JAVA_HOME=/home/phame/.jdks/jdk-17.0.20.1+1 ./android/gradlew -p android assembleDebug
 ```
 El APK generado se guarda en:
-`android/app/build/outputs/apk/debug/app-debug.apk`
+`android/app/build/outputs/apk/debug/Komolib.apk`
 
 ---
 
-## 🚀 Desplegar el Frontend en Netlify
+## ☁️ Desplegar el API de Sincronización en Render
 
-El repo ya incluye `netlify.toml` con la configuración necesaria:
-
-```toml
-[build]
-  command = "npm run build"
-  publish = "dist"
-
-[build.environment]
-  NODE_VERSION = "22"
-```
-
-Pasos:
-
-1. Entra en [netlify.com](https://www.netlify.com) → **Add new site → Import an existing project**.
-2. Conecta el repositorio de KomoLib.
-3. Netlify detecta `netlify.toml`; si no, usa:
-   - **Build command:** `npm run build`
-   - **Publish directory:** `dist`
-4. En **Site configuration → Environment variables**, añade:
-
-   | Variable | Obligatoria | Valor |
-   | --- | --- | --- |
-   | `VITE_SYNC_SERVER_URL` | ✅ Sí | URL pública de **tu** API, p. ej. `https://komolib-api-xxxx.onrender.com` |
-   | `VITE_PUBLIC_APP_URL` | Opcional | URL del sitio en Netlify, p. ej. `https://komolib.netlify.app` |
-
-> ⚠️ `https://komolib-api.onrender.com` es solo un ejemplo de la documentación: **no es un servidor real**. Debes desplegar tu propio API y usar la URL que Render te asigne.
-
-5. Pulsa **Deploy site**.
-
-> Las variables `VITE_*` se insertan en el bundle **en tiempo de build**. Si cambias `VITE_SYNC_SERVER_URL`, vuelve a desplegar (`Deploys → Trigger deploy → Clear cache and deploy site`).
-
-### Error `Unexpected token '<', "<!doctype "... is not valid JSON`
-
-Ese error significa que la web pidió los datos a **Netlify** y recibió el `index.html` del SPA en vez de JSON del API. Causas habituales:
-
-1. `VITE_SYNC_SERVER_URL` no está definida en Netlify.
-2. La variable se agregó pero el sitio no se ha vuelto a desplegar (las `VITE_*` se compilan en el build).
-3. La variable apunta al dominio de Netlify o incluye `/api` al final.
-
-Solución:
-
-```text
-VITE_SYNC_SERVER_URL=https://<dominio-base-del-api>
-```
-
-Sin barra final y sin `/api`. Comprueba que `https://<dominio-base-del-api>/api/health` devuelve JSON y luego haz **Clear cache and deploy site** en Netlify.
-
-### Error `Failed to fetch`
-
-El navegador no pudo conectarse al API. No es un error del correo ni de Netlify: la petición ni siquiera llegó a responder. Revisa:
-
-1. Que `VITE_SYNC_SERVER_URL` sea una URL **pública HTTPS** del API, por ejemplo `https://komolib-api.onrender.com`.
-2. Que `https://<dominio-del-api>/api/health` abra en el navegador y muestre JSON.
-3. Que no uses `http://` (Netlify es HTTPS y el navegador bloquea contenido mixto), ni `localhost` o `192.168.x.x` (esos solo funcionan en tu red local).
-4. Que el servicio del API esté encendido. En Render Free puede tardar en despertar; recarga después de unos segundos.
-5. Abre **DevTools → Network** y mira el estado de `/api/sync/state`. Si dice `CORS`, revisa que el API use el middleware CORS del repo; si dice `ERR_CONNECTION_REFUSED`, el servidor está apagado o la URL es incorrecta.
-
-**¿Qué variable debo agregar?** Como mínimo:
-
-```text
-VITE_SYNC_SERVER_URL=https://<dominio-de-tu-api>
-```
-
-`VITE_PUBLIC_APP_URL` solo es necesaria si generas enlaces/QR desde el APK y quieres que apunten a tu dominio de Netlify.
-
----
-
-## ☁️ Desplegar el API de Sincronización
-
-El servidor está en `server/` y se despliega aparte. Ejemplo con **Render**:
+El servidor está en `server/` y se despliega como Web Service en **Render**:
 
 1. **New → Web Service** → conecta el repo.
 2. **Root Directory:** `server`
@@ -136,20 +61,16 @@ El servidor está en `server/` y se despliega aparte. Ejemplo con **Render**:
 4. **Start Command:** `npm start`
 5. **Environment:** Node 22.
 6. Añade las variables:
+   - `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` (para sincronización con Google Drive)
    - `GEMINI_API_KEY` (opcional, para funciones de IA)
    - `GEMINI_MODEL` (por defecto `gemini-2.5-flash`)
-   - `KOMOLIB_TOKEN` (recomendado si el API es público)
+   - `KOMOLIB_TOKEN` (opcional, protege sincronización sin Drive)
    - `PUBLIC_URL=https://<dominio-del-api>`
    - `KOMOLIB_STORAGE_DIR=/var/data` (si montas un disco persistente)
-7. Monta un **disco persistente** en `/var/data` y asígnalo a `KOMOLIB_STORAGE_DIR`. Sin disco, los libros subidos se pierden al reiniciar o redeployar.
-8. Copia la URL pública del servicio (p. ej. `https://komolib-api.onrender.com`) y úsala como `VITE_SYNC_SERVER_URL` en Netlify.
 
-> En planes gratuitos el servicio puede “dormir” y tardar unos segundos en la primera petición. CORS está abierto (`origin: true`), por lo que el dominio de Netlify y el APK pueden conectarse sin configuración extra.
+> En planes gratuitos de Render el servicio duerme tras inactividad y tarda unos segundos en despertar en la primera petición. CORS está abierto (`origin: true`), por lo que la app PC y el APK Android pueden conectarse sin configuración extra.
 
 ### Seguridad
-
-- Define `KOMOLIB_TOKEN` para proteger tu biblioteca personal y las subidas.
-- Los invitados pueden entrar a una sala o estantería concreta usando su código `KOMO-XXXX` / `SHELF-XXXX` sin conocer tu token.
 - No subas `.env` ni `server/storage/` a Git (ya están en `.gitignore`).
 
 ---
@@ -158,10 +79,9 @@ El servidor está en `server/` y se despliega aparte. Ejemplo con **Render**:
 
 ```text
 komolib/
-├── src/                 # Frontend React (componentes, contexto, servicios)
-├── server/              # API Express (sync, salas, estanterías, archivos)
-├── android/             # Proyecto Capacitor Android
-├── netlify.toml         # Build + redirects SPA para Netlify
+├── src/                 # Cliente React (componentes, contexto, lectores, servicios)
+├── server/              # API Express (OAuth Google Drive, sync, salas, estanterías, IA)
+├── android/             # Proyecto Capacitor Android (APK)
 ├── .env.example         # Variables de entorno documentadas
 └── vite.config.ts
 ```

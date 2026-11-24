@@ -51,6 +51,7 @@ import {
 import {
   consumePendingNativeGoogleAuth,
   isKomoAndroidNative,
+  isKomoDesktopNative,
   openExternalUrlNatively,
   readNativeUriAsBlob,
   saveTextFileLocally,
@@ -1161,10 +1162,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ...(savedSync || {}),
       };
 
-      // Netlify builds receive the API URL via VITE_SYNC_SERVER_URL. If this browser
-      // still has an old localhost, LAN IP, HTTP URL on HTTPS, temporary tunnel,
-      // Netlify origin, or outdated Render subdomain saved in IndexedDB, migrate it
-      // automatically to the deployed sync server.
+      // Production builds (Desktop PC / Android APK) receive the API URL via VITE_SYNC_SERVER_URL.
+      // If this device still has an old localhost, LAN IP, HTTP URL on HTTPS, temporary tunnel,
+      // or outdated Render subdomain saved in IndexedDB, migrate it automatically to SYNC_SERVER_URL.
       if (SYNC_SERVER_URL) {
         const savedServer = normalizeServerUrl(initialSync.serverUrl);
         const isHttpsPage =
@@ -1176,16 +1176,16 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const isPrivateLan =
           /^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(savedServer);
         const isMixedHttp = isHttpsPage && /^http:\/\//i.test(savedServer);
-        const isOutdatedRender =
-          /\.onrender\.com$/i.test(savedServer) && savedServer !== SYNC_SERVER_URL;
+        const isOutdatedHostedApi =
+          (/\.onrender\.com$/i.test(savedServer) || /\.workers\.dev$/i.test(savedServer)) &&
+          savedServer !== SYNC_SERVER_URL;
         const staleServer =
           !savedServer ||
           /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(savedServer) ||
           (isHttpsPage && isPrivateLan) ||
           isMixedHttp ||
-          isOutdatedRender ||
+          isOutdatedHostedApi ||
           /\.trycloudflare\.com$/i.test(savedServer) ||
-          /\.netlify\.app$/i.test(savedServer) ||
           (appOrigin && savedServer === appOrigin);
         if (staleServer || savedServer !== initialSync.serverUrl) {
           initialSync = {
@@ -4643,6 +4643,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const s = stateRef.current;
       const cfg = s.syncConfig;
       const isAndroid = isKomoAndroidNative();
+      const isDesktop = isKomoDesktopNative();
       let rememberedEmail =
         s.googleDriveAuth?.email || s.profile.email || cfg.accountEmail || '';
       if (!rememberedEmail && typeof window !== 'undefined') {
@@ -4652,12 +4653,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // ignore
         }
       }
-      const startUrl = buildGoogleOAuthStartUrl(cfg, isAndroid ? 'android' : 'web', {
+      const oauthPlatform = isAndroid ? 'android' : isDesktop ? 'desktop' : 'web';
+      const startUrl = buildGoogleOAuthStartUrl(cfg, oauthPlatform, {
         loginHint: opts?.switchAccount ? undefined : rememberedEmail || undefined,
         switchAccount: opts?.switchAccount,
         forceConsent: opts?.forceConsent,
       });
-      if (isAndroid) {
+      if (isAndroid || isDesktop) {
         const opened = openExternalUrlNatively(startUrl);
         if (!opened) {
           window.location.href = startUrl;
@@ -4919,7 +4921,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         !savedServer ||
         savedServer === appOrigin ||
         /^https?:\/\/(localhost|127\.0\.0\.1)(?:\/|$)/i.test(savedServer) ||
-        /\.netlify\.app$/i.test(savedServer) ||
         /\.trycloudflare\.com$/i.test(savedServer) ||
         (isHttpsPage && /^http:\/\//i.test(savedServer)) ||
         (SYNC_SERVER_URL && /\.onrender\.com$/i.test(savedServer) && savedServer !== SYNC_SERVER_URL);
@@ -4928,8 +4929,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         SYNC_SERVER_URL ||
         (appOrigin &&
         !/:5173$/.test(appOrigin) &&
-        !/^https?:\/\/(localhost|127\.0\.0\.1)(?:\/|$)/i.test(appOrigin) &&
-        !/\.netlify\.app$/i.test(appOrigin)
+        !/^https?:\/\/(localhost|127\.0\.0\.1)(?:\/|$)/i.test(appOrigin)
           ? appOrigin
           : 'http://localhost:4123');
 

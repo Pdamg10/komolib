@@ -429,7 +429,7 @@ export const ProfileModal: React.FC = () => {
                     >
                       <AlertTriangle size={14} style={{ color: '#d9534f', flexShrink: 0, marginTop: 1 }} />
                       <span>
-                        Falta configurar <strong>VITE_SYNC_SERVER_URL</strong> en Netlify con la URL del
+                        Falta configurar <strong>VITE_SYNC_SERVER_URL</strong> con la URL del
                         API de KomoLib.
                       </span>
                     </div>

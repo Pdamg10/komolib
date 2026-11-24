@@ -19,12 +19,11 @@ export function normalizeServerUrl(value: string | undefined): string {
     .replace(/\/+$/, '');
 }
 
-const OFFICIAL_SYNC_SERVER_URL = 'https://komolib-api.onrender.com';
-const OFFICIAL_PUBLIC_APP_URL = 'https://komolib-reader.netlify.app';
+const OFFICIAL_SYNC_SERVER_URL = 'https://komolib-api.komolib.workers.dev';
 
 /**
  * URL pública del servidor de sincronización / salas compartidas.
- * Usa `VITE_SYNC_SERVER_URL` si está definida; en builds de producción / APK Android
+ * Usa `VITE_SYNC_SERVER_URL` si está definida; en builds de producción (PC / APK Android)
  * usa automáticamente el servidor oficial de KomoLib para nunca caer en `http://localhost` del WebView.
  */
 export const SYNC_SERVER_URL =
@@ -32,9 +31,6 @@ export const SYNC_SERVER_URL =
   (import.meta.env.PROD ? OFFICIAL_SYNC_SERVER_URL : '');
 
 /**
- * URL pública de la app web, usada en los enlaces y QR de invitación.
- * Si no se define, usa el sitio oficial en builds de producción / APK Android.
+ * URL pública opcional para enlaces y QR de invitación.
  */
-export const PUBLIC_APP_URL =
-  trimUrl(import.meta.env.VITE_PUBLIC_APP_URL) ||
-  (import.meta.env.PROD ? OFFICIAL_PUBLIC_APP_URL : '');
+export const PUBLIC_APP_URL = trimUrl(import.meta.env.VITE_PUBLIC_APP_URL);

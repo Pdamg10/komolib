@@ -46,13 +46,28 @@ export interface NativePickedBackup {
   thumbsFoundCount: number;
 }
 
+interface KomoDesktopBridge {
+  isDesktop?: boolean;
+  platform?: string;
+  openExternal?: (url: string) => Promise<boolean> | boolean;
+}
+
 function getBridge(): KomoAndroidBridge | undefined {
   if (typeof window === 'undefined') return undefined;
   return (window as unknown as { KomoAndroid?: KomoAndroidBridge }).KomoAndroid;
 }
 
+function getDesktopBridge(): KomoDesktopBridge | undefined {
+  if (typeof window === 'undefined') return undefined;
+  return (window as unknown as { KomoDesktop?: KomoDesktopBridge }).KomoDesktop;
+}
+
 export function isKomoAndroidNative(): boolean {
   return Boolean(getBridge()?.saveFile);
+}
+
+export function isKomoDesktopNative(): boolean {
+  return Boolean(getDesktopBridge()?.isDesktop);
 }
 
 export function openExternalUrlNatively(url: string): boolean {
@@ -60,6 +75,15 @@ export function openExternalUrlNatively(url: string): boolean {
   if (bridge?.openExternalUrl) {
     try {
       return Boolean(bridge.openExternalUrl(url));
+    } catch {
+      return false;
+    }
+  }
+  const desktop = getDesktopBridge();
+  if (desktop?.openExternal) {
+    try {
+      void desktop.openExternal(url);
+      return true;
     } catch {
       return false;
     }
