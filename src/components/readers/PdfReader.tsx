@@ -9,7 +9,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { openPdfDocumentReliably } from '../../parsers/pdfParser';
+import { openPdfDocumentReliably, pdfjsLib } from '../../parsers/pdfParser';
 import type {
   BookAnnotation,
   BookItem,
@@ -18,6 +18,10 @@ import type {
 } from '../../types/library';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import type { ReaderSelectionPayload } from './TextRichReader';
+import {
+  applyAnnotationsToRoot,
+  injectReaderMarksStyle,
+} from '../../utils/readerMarks';
 
 interface PdfReaderProps {
   book: BookItem;
@@ -32,6 +36,22 @@ interface PdfReaderProps {
   onUpdateSettings?: (patch: Partial<ReaderSettings>) => void;
 }
 
+function getPdfCanvasFilter(theme: ReaderSettings['theme']): string | undefined {
+  switch (theme) {
+    case 'cream':
+      return 'sepia(0.14) contrast(0.98) brightness(0.99)';
+    case 'sepia':
+      return 'sepia(0.38) contrast(0.96) brightness(0.95)';
+    case 'dark':
+      return 'invert(0.88) hue-rotate(180deg) contrast(0.94)';
+    case 'oled':
+      return 'invert(0.96) hue-rotate(180deg) contrast(1.02)';
+    case 'paper':
+    default:
+      return undefined;
+  }
+}
+
 interface LazyPdfPageProps {
   pdfDoc: PDFDocumentProxy;
   pageNumber: number;
@@ -39,10 +59,13 @@ interface LazyPdfPageProps {
   targetMaxHeight: number;
   fitMode: 'width' | 'contain';
   zoom: number;
+  paperTheme: ReaderSettings['theme'];
   defaultAspect: number;
-  annotations: BookAnnotation[];
+  pinAnnotations: BookAnnotation[];
+  textAnnotations: BookAnnotation[];
   pinMode: boolean;
   numPages: number;
+  highlightAnnId?: string | null;
   onTextSelect?: (sel: ReaderSelectionPayload) => void;
   onAnnotationClick?: (ann: BookAnnotation) => void;
 }
@@ -55,17 +78,24 @@ const LazyPdfPage: React.FC<LazyPdfPageProps> = React.memo(
     targetMaxHeight,
     fitMode,
     zoom,
+    paperTheme,
     defaultAspect,
-    annotations,
+    pinAnnotations,
+    textAnnotations,
     pinMode,
     numPages,
+    highlightAnnId,
     onTextSelect,
     onAnnotationClick,
   }) => {
     const slotRef = useRef<HTMLDivElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const textLayerRef = useRef<HTMLDivElement>(null);
     const [isNearViewport, setIsNearViewport] = useState(pageNumber <= 3);
     const [renderedSize, setRenderedSize] = useState<{ w: number; h: number } | null>(null);
+    const [textReadyVersion, setTextReadyVersion] = useState(0);
+    const onAnnotationClickRef = useRef(onAnnotationClick);
+    onAnnotationClickRef.current = onAnnotationClick;
 
     useEffect(() => {
       const el = slotRef.current;
@@ -87,6 +117,7 @@ const LazyPdfPage: React.FC<LazyPdfPageProps> = React.memo(
       if (!isNearViewport || !canvasRef.current) return;
       let cancelled = false;
       let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
+      let textLayerTask: { cancel: () => void; render: () => Promise<void> } | null = null;
 
       (async () => {
         try {
@@ -101,6 +132,7 @@ const LazyPdfPage: React.FC<LazyPdfPageProps> = React.memo(
               : availW / baseVp.width;
           const cssScale = Math.max(0.25, baseScale * zoom);
           const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          const cssViewport = page.getViewport({ scale: cssScale });
           const viewport = page.getViewport({ scale: cssScale * dpr });
           const cssW = Math.max(1, Math.round(viewport.width / dpr));
           const cssH = Math.max(1, Math.round(viewport.height / dpr));
@@ -120,6 +152,31 @@ const LazyPdfPage: React.FC<LazyPdfPageProps> = React.memo(
           setRenderedSize({ w: cssW, h: cssH });
           renderTask = page.render({ canvasContext: ctx, viewport });
           await renderTask.promise;
+          if (cancelled) return;
+
+          const textContainer = textLayerRef.current;
+          if (textContainer) {
+            textContainer.innerHTML = '';
+            textContainer.style.setProperty('--scale-factor', String(cssScale));
+            textContainer.style.width = `${cssW}px`;
+            textContainer.style.height = `${cssH}px`;
+            try {
+              const textContent = await page.getTextContent();
+              if (cancelled || !textLayerRef.current) return;
+              const tl = new pdfjsLib.TextLayer({
+                textContentSource: textContent,
+                container: textContainer,
+                viewport: cssViewport,
+              });
+              textLayerTask = tl;
+              await tl.render();
+              if (!cancelled) {
+                setTextReadyVersion((v) => v + 1);
+              }
+            } catch {
+              // ignore cancelled or image-only PDF text layer errors
+            }
+          }
         } catch {
           // ignore cancelled render
         }
@@ -128,29 +185,52 @@ const LazyPdfPage: React.FC<LazyPdfPageProps> = React.memo(
       return () => {
         cancelled = true;
         renderTask?.cancel();
+        textLayerTask?.cancel();
       };
     }, [pdfDoc, pageNumber, isNearViewport, targetWidth, targetMaxHeight, fitMode, zoom]);
+
+    // Apply inline annotations (highlighter, pencil, pen, post-it, sticker, emoji) onto PDF text layer
+    useEffect(() => {
+      const container = textLayerRef.current;
+      if (!isNearViewport || !container || textReadyVersion === 0) return;
+      injectReaderMarksStyle(document);
+      applyAnnotationsToRoot(document, container, textAnnotations, {
+        onAnnotationClick: (ann) => onAnnotationClickRef.current?.(ann),
+      });
+      if (highlightAnnId) {
+        const markEl = container.querySelector(
+          `mark[data-ann-id="${CSS.escape(highlightAnnId)}"]`
+        ) as HTMLElement | null;
+        if (markEl) {
+          markEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          markEl.classList.add('komo-mark-pulse');
+          window.setTimeout(() => markEl.classList.remove('komo-mark-pulse'), 1800);
+        }
+      }
+    }, [isNearViewport, textReadyVersion, textAnnotations, highlightAnnId]);
 
     const estW = Math.max(240, Math.round(targetWidth * zoom));
     const estH = Math.round(estW * defaultAspect);
     const boxW = renderedSize?.w ?? estW;
     const boxH = renderedSize?.h ?? estH;
+    const canvasFilter = getPdfCanvasFilter(paperTheme);
 
     return (
       <div
         ref={slotRef}
         data-pdf-page={pageNumber}
+        className={`pdf-page-shell pdf-page-theme-${paperTheme}`}
         style={{
           position: 'relative',
           width: boxW,
           minHeight: boxH,
           marginLeft: 'auto',
           marginRight: 'auto',
-          background: '#ffffff',
+          background: paperTheme === 'dark' || paperTheme === 'oled' ? '#121318' : '#ffffff',
           borderRadius: 4,
           boxShadow: '0 4px 16px rgba(0,0,0,0.14)',
           overflow: 'hidden',
-          cursor: pinMode ? 'crosshair' : 'default',
+          cursor: pinMode ? 'crosshair' : 'text',
           flexShrink: 0,
         }}
         onClick={(e) => {
@@ -169,7 +249,21 @@ const LazyPdfPage: React.FC<LazyPdfPageProps> = React.memo(
         }}
       >
         {isNearViewport ? (
-          <canvas ref={canvasRef} style={{ display: 'block', background: '#fff' }} />
+          <>
+            <canvas
+              ref={canvasRef}
+              style={{
+                display: 'block',
+                background: '#fff',
+                filter: canvasFilter,
+              }}
+            />
+            <div
+              ref={textLayerRef}
+              className={`pdf-text-layer${pinMode ? ' pin-mode-disabled' : ''}`}
+              data-pdf-text-page={pageNumber}
+            />
+          </>
         ) : (
           <div
             style={{
@@ -185,7 +279,7 @@ const LazyPdfPage: React.FC<LazyPdfPageProps> = React.memo(
             Pág. {pageNumber}
           </div>
         )}
-        {annotations.map((a) => (
+        {pinAnnotations.map((a) => (
           <button
             key={a.id}
             type="button"
@@ -232,16 +326,79 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [singleTextReadyVersion, setSingleTextReadyVersion] = useState(0);
+  const [pulsingAnnId, setPulsingAnnId] = useState<string | null>(null);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const singleTextLayerRef = useRef<HTMLDivElement>(null);
   const scrollTimerRef = useRef<number | null>(null);
+  const selectionTimerRef = useRef<number | null>(null);
+  const lastCapturedSelRef = useRef<string>('');
   const lastReportedPageRef = useRef<number>(Math.max(1, book.currentPage || 1));
   const didInitialScrollRef = useRef(false);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const onTextSelectRef = useRef(onTextSelect);
+  onTextSelectRef.current = onTextSelect;
+  const onAnnotationClickRef = useRef(onAnnotationClick);
+  onAnnotationClickRef.current = onAnnotationClick;
 
   const isContinuous = (settings.pdfFlow || 'continuous') === 'continuous';
   const fitMode: 'width' | 'contain' = settings.pdfFit || 'width';
+
+  // Capture text selections across any PDF page (desktop mouse + Android/iOS touch selection handles!)
+  const capturePdfTextSelection = useCallback(() => {
+    if (pinMode || !onTextSelectRef.current || !stageRef.current) return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) {
+      lastCapturedSelRef.current = '';
+      return;
+    }
+    const text = sel.toString().replace(/\s+/g, ' ').trim();
+    if (text.length < 2) return;
+
+    const anchorEl =
+      sel.anchorNode instanceof HTMLElement ? sel.anchorNode : sel.anchorNode?.parentElement;
+    const focusEl =
+      sel.focusNode instanceof HTMLElement ? sel.focusNode : sel.focusNode?.parentElement;
+    const layerEl =
+      (anchorEl?.closest('.pdf-text-layer') as HTMLElement | null) ||
+      (focusEl?.closest('.pdf-text-layer') as HTMLElement | null);
+    if (!layerEl || !stageRef.current.contains(layerEl)) return;
+
+    const detectedPage = Number(layerEl.dataset.pdfTextPage) || pageNum;
+    const sig = `${detectedPage}::${text}`;
+    if (lastCapturedSelRef.current === sig) return;
+    lastCapturedSelRef.current = sig;
+
+    const pct = numPages ? Math.round((detectedPage / numPages) * 100) : 0;
+    onTextSelectRef.current({
+      quote: text.slice(0, 400),
+      page: detectedPage,
+      progress: pct,
+    });
+  }, [pinMode, pageNum, numPages]);
+
+  // Listen for selectionchange (essential for Android WebView long-press word/phrase selection!)
+  useEffect(() => {
+    if (pinMode || loading) return;
+    const onSelectionChange = () => {
+      if (selectionTimerRef.current) window.clearTimeout(selectionTimerRef.current);
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        lastCapturedSelRef.current = '';
+        return;
+      }
+      selectionTimerRef.current = window.setTimeout(() => {
+        capturePdfTextSelection();
+      }, 320);
+    };
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', onSelectionChange);
+      if (selectionTimerRef.current) window.clearTimeout(selectionTimerRef.current);
+    };
+  }, [pinMode, loading, capturePdfTextSelection]);
 
   // Measure actual available reader viewport so PDF pages ALWAYS fit phones & tablets cleanly!
   useEffect(() => {
@@ -327,11 +484,12 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
     }
   }, [isContinuous, numPages, loading]);
 
-  // Paginated single-page canvas render (auto-fitted to viewportBox + zoom!)
+  // Paginated single-page canvas + selectable text layer render
   useEffect(() => {
     if (isContinuous || !pdfDoc || !canvasRef.current) return;
     let cancelled = false;
     let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
+    let textLayerTask: { cancel: () => void; render: () => Promise<void> } | null = null;
 
     (async () => {
       try {
@@ -346,7 +504,10 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
             : availW / baseVp.width;
         const cssScale = Math.max(0.25, baseScale * zoom);
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const cssViewport = page.getViewport({ scale: cssScale });
         const viewport = page.getViewport({ scale: cssScale * dpr });
+        const cssW = Math.max(1, Math.round(viewport.width / dpr));
+        const cssH = Math.max(1, Math.round(viewport.height / dpr));
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
@@ -354,13 +515,39 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
 
         canvas.width = Math.max(1, Math.round(viewport.width));
         canvas.height = Math.max(1, Math.round(viewport.height));
-        canvas.style.width = `${Math.max(1, Math.round(viewport.width / dpr))}px`;
-        canvas.style.height = `${Math.max(1, Math.round(viewport.height / dpr))}px`;
+        canvas.style.width = `${cssW}px`;
+        canvas.style.height = `${cssH}px`;
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
         renderTask = page.render({ canvasContext: ctx, viewport });
         await renderTask.promise;
+        if (cancelled) return;
+
+        const textContainer = singleTextLayerRef.current;
+        if (textContainer) {
+          textContainer.innerHTML = '';
+          textContainer.style.setProperty('--scale-factor', String(cssScale));
+          textContainer.style.width = `${cssW}px`;
+          textContainer.style.height = `${cssH}px`;
+          try {
+            const textContent = await page.getTextContent();
+            if (cancelled || !singleTextLayerRef.current) return;
+            const tl = new pdfjsLib.TextLayer({
+              textContentSource: textContent,
+              container: textContainer,
+              viewport: cssViewport,
+            });
+            textLayerTask = tl;
+            await tl.render();
+            if (!cancelled) {
+              setSingleTextReadyVersion((v) => v + 1);
+            }
+          } catch {
+            // ignore cancelled or scanned-only PDF text layer errors
+          }
+        }
+
         if (!cancelled && pageNum !== lastReportedPageRef.current) {
           lastReportedPageRef.current = pageNum;
           onProgress(pageNum, pdfDoc.numPages);
@@ -373,8 +560,32 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
     return () => {
       cancelled = true;
       renderTask?.cancel();
+      textLayerTask?.cancel();
     };
   }, [isContinuous, pdfDoc, pageNum, zoom, fitMode, viewportBox.w, viewportBox.h]);
+
+  // Apply inline annotations onto paginated PDF text layer
+  useEffect(() => {
+    if (isContinuous || !singleTextLayerRef.current || singleTextReadyVersion === 0) return;
+    const container = singleTextLayerRef.current;
+    const pageTextAnns = annotations.filter(
+      (a) => a.page === pageNum && (a.pageX === undefined || a.pageY === undefined)
+    );
+    injectReaderMarksStyle(document);
+    applyAnnotationsToRoot(document, container, pageTextAnns, {
+      onAnnotationClick: (ann) => onAnnotationClickRef.current?.(ann),
+    });
+    if (pulsingAnnId) {
+      const markEl = container.querySelector(
+        `mark[data-ann-id="${CSS.escape(pulsingAnnId)}"]`
+      ) as HTMLElement | null;
+      if (markEl) {
+        markEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        markEl.classList.add('komo-mark-pulse');
+        window.setTimeout(() => markEl.classList.remove('komo-mark-pulse'), 1800);
+      }
+    }
+  }, [isContinuous, pageNum, singleTextReadyVersion, annotations, pulsingAnnId]);
 
   useEffect(() => {
     if (jumpTarget?.page && numPages > 0) {
@@ -383,6 +594,10 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
       lastReportedPageRef.current = clamped;
       onProgress(clamped, numPages);
       if (isContinuous) scrollToPdfPage(clamped, true);
+      if (jumpTarget.annotationId) {
+        setPulsingAnnId(jumpTarget.annotationId);
+        window.setTimeout(() => setPulsingAnnId(null), 2600);
+      }
     }
   }, [jumpTarget?.id, numPages, isContinuous, scrollToPdfPage]);
 
@@ -441,6 +656,7 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
 
   const continuousTargetWidth = Math.min(viewportBox.w, 1020);
   const pageNumbers = Array.from({ length: numPages }, (_, i) => i + 1);
+  const singleCanvasFilter = getPdfCanvasFilter(settings.theme);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
@@ -448,6 +664,8 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
         <div
           ref={stageRef}
           onScroll={handleContinuousScroll}
+          onMouseUp={capturePdfTextSelection}
+          onTouchEnd={() => window.setTimeout(capturePdfTextSelection, 220)}
           style={{
             flex: 1,
             minHeight: 0,
@@ -470,12 +688,17 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
               targetMaxHeight={viewportBox.h}
               fitMode={fitMode}
               zoom={zoom}
+              paperTheme={settings.theme}
               defaultAspect={defaultAspect}
-              annotations={annotations.filter(
+              pinAnnotations={annotations.filter(
                 (a) => a.page === pn && a.pageX !== undefined && a.pageY !== undefined
+              )}
+              textAnnotations={annotations.filter(
+                (a) => a.page === pn && (a.pageX === undefined || a.pageY === undefined)
               )}
               pinMode={pinMode}
               numPages={numPages}
+              highlightAnnId={jumpTarget?.page === pn ? pulsingAnnId : null}
               onTextSelect={onTextSelect}
               onAnnotationClick={onAnnotationClick}
             />
@@ -484,6 +707,7 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
       ) : (
         <div
           ref={stageRef}
+          onMouseUp={capturePdfTextSelection}
           style={{
             flex: 1,
             minHeight: 0,
@@ -500,6 +724,12 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
             }
           }}
           onTouchEnd={(e) => {
+            window.setTimeout(capturePdfTextSelection, 220);
+            const activeSel = window.getSelection();
+            if (activeSel && !activeSel.isCollapsed) {
+              touchStartRef.current = null;
+              return;
+            }
             if (!touchStartRef.current || pinMode || zoom > 1.05) return;
             const t = e.changedTouches[0];
             const dx = t.clientX - touchStartRef.current.x;
@@ -512,11 +742,17 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
           }}
         >
           <div
+            className={`pdf-page-shell pdf-page-theme-${settings.theme}`}
             style={{
               position: 'relative',
               display: 'inline-block',
               margin: 'auto',
-              cursor: pinMode ? 'crosshair' : 'default',
+              cursor: pinMode ? 'crosshair' : 'text',
+              borderRadius: 6,
+              overflow: 'hidden',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.16)',
+              background:
+                settings.theme === 'dark' || settings.theme === 'oled' ? '#121318' : '#ffffff',
             }}
             onClick={(e) => {
               if (!pinMode || !onTextSelect) return;
@@ -537,10 +773,14 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
               ref={canvasRef}
               style={{
                 display: 'block',
-                borderRadius: 6,
-                boxShadow: '0 8px 24px rgba(0,0,0,0.16)',
                 background: '#fff',
+                filter: singleCanvasFilter,
               }}
+            />
+            <div
+              ref={singleTextLayerRef}
+              className={`pdf-text-layer${pinMode ? ' pin-mode-disabled' : ''}`}
+              data-pdf-text-page={pageNum}
             />
             {annotations
               .filter((a) => a.page === pageNum && a.pageX !== undefined && a.pageY !== undefined)

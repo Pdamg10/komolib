@@ -88,6 +88,7 @@ import {
   deleteBookFromServer,
   deriveEmailSpaceId,
   downloadBookFromServer,
+  isTransientNetworkError,
   fetchRemoteSyncState,
   identifyBookWithAiApi,
   parsePairingInput,
@@ -288,8 +289,7 @@ interface LibraryContextValue {
   googleDriveAuth: GoogleDriveAuth | null;
   connectGoogleDrive: (opts?: { switchAccount?: boolean; forceConsent?: boolean }) => void;
   disconnectGoogleDrive: () => Promise<void>;
-  loginWithEmail: (email: string, pin?: string) => Promise<boolean>;
-  resetAccountPin: (newPin: string, emailOverride?: string) => Promise<boolean>;
+  loginWithEmail: (email: string) => Promise<boolean>;
   logoutAccount: () => Promise<void>;
   exportBackupJson: () => void;
   shareBackupJson: () => Promise<void>;
@@ -396,6 +396,112 @@ function getContrastColor(bgHex: string): string {
 }
 
 const SHELF_PREFS_STORAGE_KEY = 'komolib_shelf_prefs_v1';
+const THEME_CACHE_STORAGE_KEY = 'komolib_theme_cache_v1';
+const READER_SETTINGS_STORAGE_KEY = 'komolib_reader_settings_v1';
+const GDRIVE_AUTH_STORAGE_KEY = 'komolib_gdrive_auth_v1';
+
+function readCachedThemeForStartup(): ThemeConfig {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return DEFAULT_THEME;
+    const raw = window.localStorage.getItem(THEME_CACHE_STORAGE_KEY);
+    if (!raw) return DEFAULT_THEME;
+    const parsed = JSON.parse(raw) as Partial<ThemeConfig>;
+    if (!parsed || typeof parsed !== 'object') return DEFAULT_THEME;
+    return { ...DEFAULT_THEME, ...parsed };
+  } catch {
+    return DEFAULT_THEME;
+  }
+}
+
+function writeCachedTheme(t: ThemeConfig): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    // Omit huge base64 wallpapers from localStorage so quota is never exceeded;
+    // colors, fonts, mode, radius & layout paint synchronously on Frame 0!
+    const compact: ThemeConfig = {
+      ...t,
+      customWallpaperUrl:
+        t.customWallpaperUrl && t.customWallpaperUrl.length <= 140_000 ? t.customWallpaperUrl : '',
+    };
+    window.localStorage.setItem(THEME_CACHE_STORAGE_KEY, JSON.stringify(compact));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function clearCachedTheme(): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(THEME_CACHE_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function readCachedReaderSettings(): { settings: ReaderSettings; updatedAt: number } | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null;
+    const raw = window.localStorage.getItem(READER_SETTINGS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { settings?: Partial<ReaderSettings>; updatedAt?: number };
+    if (!parsed || typeof parsed !== 'object' || !parsed.settings) return null;
+    return {
+      settings: { ...DEFAULT_READER_SETTINGS, ...parsed.settings },
+      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedReaderSettings(settings: ReaderSettings, updatedAt: number): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(
+      READER_SETTINGS_STORAGE_KEY,
+      JSON.stringify({ settings, updatedAt })
+    );
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function clearCachedReaderSettings(): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(READER_SETTINGS_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function readCachedGoogleDriveAuth(): GoogleDriveAuth | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null;
+    const raw = window.localStorage.getItem(GDRIVE_AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as GoogleDriveAuth | null;
+    if (!parsed || typeof parsed !== 'object' || !parsed.email || !parsed.accessToken) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedGoogleDriveAuth(auth: GoogleDriveAuth | null): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    if (!auth) {
+      window.localStorage.removeItem(GDRIVE_AUTH_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(GDRIVE_AUTH_STORAGE_KEY, JSON.stringify(auth));
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 type ShelfOrgPrefs = Pick<ThemeConfig, 'viewMode' | 'sortBy' | 'sortDir' | 'readingFilter'> & {
   updatedAt?: number;
@@ -579,9 +685,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [notes, setNotes] = useState<NoteItem[]>([]);
   const [categories, setCategories] = useState<CategoryItem[]>(DEFAULT_CATEGORIES);
   const [collections, setCollections] = useState<CollectionCard[]>(DEFAULT_COLLECTIONS);
-  const [theme, setTheme] = useState<ThemeConfig>(DEFAULT_THEME);
+  const [theme, setTheme] = useState<ThemeConfig>(() => {
+    const cached = readCachedThemeForStartup();
+    if (typeof document !== 'undefined') applyThemeCssVars(cached);
+    return cached;
+  });
   const [profile, setProfile] = useState<UserProfile>(DEFAULT_PROFILE);
-  const [readerSettings, setReaderSettings] = useState<ReaderSettings>(DEFAULT_READER_SETTINGS);
+  const [readerSettings, setReaderSettings] = useState<ReaderSettings>(
+    () => readCachedReaderSettings()?.settings || DEFAULT_READER_SETTINGS
+  );
   const [syncConfig, setSyncConfig] = useState<SyncConfig>(DEFAULT_SYNC_CONFIG);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(() => [
     createFreshChatSession(INITIAL_CHAT_MESSAGES),
@@ -626,7 +738,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [pendingShelfCode, setPendingShelfCode] = useState('');
   const [aiOnline, setAiOnline] = useState(false);
   const [aiModelName, setAiModelName] = useState('');
-  const [googleDriveAuth, setGoogleDriveAuth] = useState<GoogleDriveAuth | null>(null);
+  const [googleDriveAuth, setGoogleDriveAuth] = useState<GoogleDriveAuth | null>(() =>
+    readCachedGoogleDriveAuth()
+  );
   const [syncPopup, setSyncPopup] = useState<SyncPopupState>({
     visible: false,
     phase: 'syncing',
@@ -649,6 +763,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const toastTimerRef = useRef<number | null>(null);
   const themeUpdatedAtRef = useRef<number>(0);
   const profileUpdatedAtRef = useRef<number>(0);
+  const readerSettingsUpdatedAtRef = useRef<number>(readCachedReaderSettings()?.updatedAt || 0);
   const lastSyncedWallpaperRef = useRef<string>('');
   const syncedCoverSigRef = useRef<Map<string, string>>(new Map());
   const syncedBookUpdatedAtRef = useRef<Map<string, number>>(new Map());
@@ -728,6 +843,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const persistGoogleDriveAuth = useCallback((next: GoogleDriveAuth | null) => {
     stateRef.current.googleDriveAuth = next;
     setGoogleDriveAuth(next);
+    writeCachedGoogleDriveAuth(next);
     dbSetKV('googleDriveAuth', next).catch(console.error);
   }, []);
 
@@ -837,6 +953,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         savedPendingTombstones,
         savedThemeTs,
         savedProfileTs,
+        savedReaderSettingsTs,
         savedGoogleDriveAuth,
       ] = await Promise.all([
         dbGetKV<ThemeConfig>('theme'),
@@ -870,16 +987,38 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }>('pendingTombstones'),
         dbGetKV<number>('themeUpdatedAt'),
         dbGetKV<number>('profileUpdatedAt'),
+        dbGetKV<number>('readerSettingsUpdatedAt'),
         dbGetKV<GoogleDriveAuth | null>('googleDriveAuth'),
       ]);
 
-      if (savedGoogleDriveAuth && savedGoogleDriveAuth.accessToken) {
-        stateRef.current.googleDriveAuth = savedGoogleDriveAuth;
-        setGoogleDriveAuth(savedGoogleDriveAuth);
+      const cachedDriveAuth = readCachedGoogleDriveAuth();
+      const hydratedDriveAuth =
+        savedGoogleDriveAuth?.accessToken
+          ? {
+              ...savedGoogleDriveAuth,
+              refreshToken:
+                savedGoogleDriveAuth.refreshToken ||
+                (cachedDriveAuth?.email === savedGoogleDriveAuth.email
+                  ? cachedDriveAuth.refreshToken
+                  : '') ||
+                '',
+            }
+          : cachedDriveAuth;
+      if (hydratedDriveAuth && hydratedDriveAuth.accessToken) {
+        stateRef.current.googleDriveAuth = hydratedDriveAuth;
+        setGoogleDriveAuth(hydratedDriveAuth);
+        writeCachedGoogleDriveAuth(hydratedDriveAuth);
+        if (!savedGoogleDriveAuth?.accessToken) {
+          dbSetKV('googleDriveAuth', hydratedDriveAuth).catch(console.error);
+        }
       }
 
       if (typeof savedThemeTs === 'number') themeUpdatedAtRef.current = savedThemeTs;
       if (typeof savedProfileTs === 'number') profileUpdatedAtRef.current = savedProfileTs;
+      const cachedReader = readCachedReaderSettings();
+      const dbReaderTs = typeof savedReaderSettingsTs === 'number' ? savedReaderSettingsTs : 0;
+      const bestReaderTs = Math.max(dbReaderTs, cachedReader?.updatedAt || 0);
+      readerSettingsUpdatedAtRef.current = bestReaderTs;
 
       const storedShelfPrefs = readStoredShelfPrefs();
       const useStoredShelfPrefs =
@@ -1123,12 +1262,27 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const mergedTheme = effectiveStartupTheme;
       setTheme(mergedTheme);
       applyThemeCssVars(mergedTheme);
+      writeCachedTheme(mergedTheme);
       writeStoredShelfPrefs(mergedTheme, themeUpdatedAtRef.current || Date.now());
 
       if (savedCats?.length) setCategories(savedCats);
       if (savedCols?.length) setCollections(savedCols);
       if (savedProfile) setProfile({ ...DEFAULT_PROFILE, ...savedProfile });
-      if (savedReader) setReaderSettings({ ...DEFAULT_READER_SETTINGS, ...savedReader });
+      const effectiveStartupReader: ReaderSettings | null =
+        cachedReader && cachedReader.updatedAt > dbReaderTs
+          ? cachedReader.settings
+          : savedReader
+          ? { ...DEFAULT_READER_SETTINGS, ...savedReader }
+          : cachedReader?.settings || null;
+      if (effectiveStartupReader) {
+        stateRef.current.readerSettings = effectiveStartupReader;
+        setReaderSettings(effectiveStartupReader);
+        writeCachedReaderSettings(effectiveStartupReader, readerSettingsUpdatedAtRef.current);
+        if (cachedReader && cachedReader.updatedAt > dbReaderTs) {
+          dbSetKV('readerSettings', effectiveStartupReader).catch(console.error);
+          dbSetKV('readerSettingsUpdatedAt', cachedReader.updatedAt).catch(console.error);
+        }
+      }
       setSyncConfig(initialSync);
       const pendingChatDel = new Set(deletedChatSessionIdsRef.current);
       let initialSessions: ChatSession[] = [];
@@ -1195,7 +1349,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
 
       // Privacy invariant: Every new device/install MUST start 100% isolated and empty.
-      // Cloud sync ONLY pulls data after the user explicitly signs in with their email/PIN
+      // Cloud sync ONLY pulls data after the user explicitly signs in with Google Drive or email
       // or explicitly pairs via ?pair=1 — NEVER auto-connects any device to a shared/owner vault.
 
       setReady(true);
@@ -1533,7 +1687,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           (a, b) => (b.lastReadAt || b.addedAt) - (a.lastReadAt || a.addedAt)
         );
         if (booksStateChanged || nextBooks.length !== current.books.length) {
+          stateRef.current.books = nextBooks;
           setBooks(nextBooks);
+          setActiveBook((curr) => {
+            if (!curr) return curr;
+            const refreshed = mergedMap.get(curr.id);
+            if (!refreshed) return curr;
+            if ((curr.updatedAt || 0) > (refreshed.updatedAt || 0)) return curr;
+            return refreshed;
+          });
         }
 
         // Background auto-download ONLY the 3 most recently read books so low-end phones never freeze or flicker!
@@ -1735,17 +1897,24 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setCollections(merged.collections);
           await dbSetKV('collections', merged.collections);
         }
-        if (
+        const remoteReaderTs = Number(merged.readerSettingsUpdatedAt || 0);
+        const shouldApplyRemoteReader = Boolean(
           merged.readerSettings &&
-          (forceRestore ||
-            !themeUpdatedAtRef.current ||
-            (merged.themeUpdatedAt || 0) >= themeUpdatedAtRef.current)
-        ) {
+            (forceRestore ||
+              !readerSettingsUpdatedAtRef.current ||
+              (remoteReaderTs > 0 && remoteReaderTs > readerSettingsUpdatedAtRef.current))
+        );
+        if (shouldApplyRemoteReader && merged.readerSettings) {
           const mergedReader = { ...DEFAULT_READER_SETTINGS, ...merged.readerSettings };
+          const nextReaderTs = remoteReaderTs || readerSettingsUpdatedAtRef.current;
+          readerSettingsUpdatedAtRef.current = nextReaderTs;
+          stateRef.current.readerSettings = mergedReader;
           if (JSON.stringify(mergedReader) !== JSON.stringify(current.readerSettings)) {
             setReaderSettings(mergedReader);
-            await dbSetKV('readerSettings', mergedReader);
           }
+          writeCachedReaderSettings(mergedReader, nextReaderTs);
+          await dbSetKV('readerSettings', mergedReader);
+          await dbSetKV('readerSettingsUpdatedAt', nextReaderTs);
         }
         if (merged.theme && merged.theme.customWallpaperUrl !== '__KEEP__') {
           lastSyncedWallpaperRef.current = merged.theme.customWallpaperUrl || '';
@@ -1777,6 +1946,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           if (JSON.stringify(mergedTheme) !== JSON.stringify(current.theme)) {
             setTheme(mergedTheme);
             applyThemeCssVars(mergedTheme);
+            writeCachedTheme(mergedTheme);
             writeStoredShelfPrefs(mergedTheme, themeUpdatedAtRef.current || Date.now());
             await dbSetKV('theme', mergedTheme);
           }
@@ -2032,6 +2202,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             categories: sendPersonalization ? s.categories : undefined,
             collections: sendPersonalization ? s.collections : undefined,
             readerSettings: sendPersonalization ? s.readerSettings : undefined,
+            readerSettingsUpdatedAt: sendPersonalization ? readerSettingsUpdatedAtRef.current || 0 : 0,
             theme: pushTheme ? s.theme : null,
             themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
             profile: pushProfile ? s.profile : null,
@@ -2129,8 +2300,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Error al sincronizar en segundo plano';
-          setSyncStatus('error');
-          setSyncMessage(msg);
+          if (isTransientNetworkError(err)) {
+            console.warn('[KomoLib] Background auto-sync deferred (transient network):', msg);
+          } else {
+            setSyncStatus('error');
+            setSyncMessage(msg);
+          }
         } finally {
           syncInFlightRef.current = false;
         }
@@ -2153,6 +2328,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ) {
           next.searchGradient = `linear-gradient(100deg, ${next.accentSecondary} 0%, ${next.accentPrimary} 100%)`;
         }
+        stateRef.current.theme = next;
+        applyThemeCssVars(next);
+        writeCachedTheme(next);
         writeStoredShelfPrefs(next, ts);
         dbSetKV('theme', next).catch(console.error);
         return next;
@@ -2174,6 +2352,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         sortDir: prev.sortDir || DEFAULT_THEME.sortDir,
         readingFilter: prev.readingFilter || DEFAULT_THEME.readingFilter,
       };
+      stateRef.current.theme = next;
+      applyThemeCssVars(next);
+      writeCachedTheme(next);
       writeStoredShelfPrefs(next, ts);
       dbSetKV('theme', next).catch(console.error);
       return next;
@@ -2184,11 +2365,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const updateReaderSettings = useCallback(
     (patch: Partial<ReaderSettings>) => {
-      setReaderSettings((prev) => {
-        const next = { ...prev, ...patch };
-        dbSetKV('readerSettings', next).catch(console.error);
-        return next;
-      });
+      const ts = Date.now();
+      readerSettingsUpdatedAtRef.current = ts;
+      const next: ReaderSettings = { ...stateRef.current.readerSettings, ...patch };
+      stateRef.current.readerSettings = next;
+      setReaderSettings(next);
+      writeCachedReaderSettings(next, ts);
+      dbSetKV('readerSettings', next).catch(console.error);
+      dbSetKV('readerSettingsUpdatedAt', ts).catch(console.error);
       scheduleAutoSync(false, 'personalization');
     },
     [scheduleAutoSync]
@@ -2934,80 +3118,87 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const updateBook = useCallback(
     async (id: string, patch: Partial<BookItem>) => {
       const now = Date.now();
-      let latestBook: BookItem | undefined;
-      setBooks((prev) => {
-        const next = prev.map((b) => {
-          if (b.id !== id) return b;
-          const isReadingUpdate =
-            patch.progress !== undefined ||
-            patch.currentPage !== undefined ||
-            patch.currentChapter !== undefined ||
-            patch.currentCfi !== undefined ||
-            patch.scrollRatio !== undefined ||
-            patch.audioTime !== undefined ||
-            patch.lastReadAt !== undefined;
+      const applyBookPatch = (b: BookItem): BookItem => {
+        const isReadingUpdate =
+          patch.progress !== undefined ||
+          patch.currentPage !== undefined ||
+          patch.currentChapter !== undefined ||
+          patch.currentCfi !== undefined ||
+          patch.scrollRatio !== undefined ||
+          patch.audioTime !== undefined ||
+          patch.lastReadAt !== undefined;
 
-          const enriched: Partial<BookItem> = { ...patch };
+        const enriched: Partial<BookItem> = { ...patch };
 
-          if (isReadingUpdate) {
-            if (enriched.lastReadAt === undefined) {
-              enriched.lastReadAt = now;
-            }
-            const nextProgress = enriched.progress ?? b.progress ?? 0;
-            if (!b.startedAt && !enriched.startedAt && (nextProgress > 0 || enriched.lastReadAt)) {
-              enriched.startedAt = now;
-            }
-
-            // Detect chapter completion when advancing from a previous chapter to a new one
-            if (
-              enriched.currentChapter &&
-              b.currentChapter &&
-              enriched.currentChapter.trim() !== b.currentChapter.trim()
-            ) {
-              enriched.lastChapterFinishedAt = now;
-              enriched.lastChapterFinishedTitle = b.currentChapter.trim();
-            } else if (
-              enriched.currentPage !== undefined &&
-              (enriched.pageCount ?? b.pageCount) &&
-              enriched.currentPage >= (enriched.pageCount ?? b.pageCount ?? 0) &&
-              (b.currentPage ?? 0) < (enriched.pageCount ?? b.pageCount ?? 0)
-            ) {
-              enriched.lastChapterFinishedAt = now;
-              enriched.lastChapterFinishedTitle =
-                enriched.currentChapter || b.currentChapter || `Pág. ${enriched.currentPage}`;
-            }
-
-            // Detect book completion automatically when progress reaches >= 98%
-            if (nextProgress >= 98) {
-              if (!b.finishedAt || (b.progress || 0) < 98) {
-                enriched.finishedAt = enriched.finishedAt ?? now;
-              }
-              if (!enriched.readingStatus && b.readingStatus !== 'completed') {
-                enriched.readingStatus = 'completed';
-              }
-            } else if (
-              nextProgress > 0 &&
-              !enriched.readingStatus &&
-              (!b.readingStatus || b.readingStatus === 'want_to_read')
-            ) {
-              enriched.readingStatus = 'reading';
-            }
+        if (isReadingUpdate) {
+          if (enriched.lastReadAt === undefined) {
+            enriched.lastReadAt = now;
+          }
+          const nextProgress = enriched.progress ?? b.progress ?? 0;
+          if (!b.startedAt && !enriched.startedAt && (nextProgress > 0 || enriched.lastReadAt)) {
+            enriched.startedAt = now;
           }
 
-          if (enriched.readingStatus === 'completed' && !b.finishedAt && !enriched.finishedAt) {
-            enriched.finishedAt = now;
+          // Detect chapter completion when advancing from a previous chapter to a new one
+          if (
+            enriched.currentChapter &&
+            b.currentChapter &&
+            enriched.currentChapter.trim() !== b.currentChapter.trim()
+          ) {
+            enriched.lastChapterFinishedAt = now;
+            enriched.lastChapterFinishedTitle = b.currentChapter.trim();
+          } else if (
+            enriched.currentPage !== undefined &&
+            (enriched.pageCount ?? b.pageCount) &&
+            enriched.currentPage >= (enriched.pageCount ?? b.pageCount ?? 0) &&
+            (b.currentPage ?? 0) < (enriched.pageCount ?? b.pageCount ?? 0)
+          ) {
+            enriched.lastChapterFinishedAt = now;
+            enriched.lastChapterFinishedTitle =
+              enriched.currentChapter || b.currentChapter || `Pág. ${enriched.currentPage}`;
           }
 
-          return { ...b, ...enriched, updatedAt: now };
-        });
-        latestBook = next.find((b) => b.id === id);
-        if (latestBook) {
-          dbPutBook(latestBook).catch(console.error);
+          // Detect book completion automatically when progress reaches >= 98%
+          if (nextProgress >= 98) {
+            if (!b.finishedAt || (b.progress || 0) < 98) {
+              enriched.finishedAt = enriched.finishedAt ?? now;
+            }
+            if (!enriched.readingStatus && b.readingStatus !== 'completed') {
+              enriched.readingStatus = 'completed';
+            }
+          } else if (
+            nextProgress > 0 &&
+            !enriched.readingStatus &&
+            (!b.readingStatus || b.readingStatus === 'want_to_read')
+          ) {
+            enriched.readingStatus = 'reading';
+          }
         }
-        return next;
-      });
+
+        if (enriched.readingStatus === 'completed' && !b.finishedAt && !enriched.finishedAt) {
+          enriched.finishedAt = now;
+        }
+
+        return { ...b, ...enriched, updatedAt: now };
+      };
+
+      const existing = stateRef.current.books.find((b) => b.id === id);
+      const latestBook: BookItem | undefined = existing ? applyBookPatch(existing) : undefined;
+      if (latestBook) {
+        stateRef.current.books = stateRef.current.books.map((b) => (b.id === id ? latestBook : b));
+        dbPutBook(latestBook).catch(console.error);
+      }
+
+      setBooks((prev) =>
+        prev.map((b) => {
+          if (b.id !== id) return b;
+          const updated = latestBook ? { ...b, ...latestBook } : applyBookPatch(b);
+          if (!latestBook) dbPutBook(updated).catch(console.error);
+          return updated;
+        })
+      );
       setActiveBook((curr) =>
-        curr && curr.id === id ? (latestBook ? latestBook : { ...curr, ...patch }) : curr
+        curr && curr.id === id ? (latestBook ? latestBook : { ...curr, ...patch, updatedAt: now }) : curr
       );
 
       // Update active reading session for Web <-> APK continuity
@@ -3446,8 +3637,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return;
       }
 
-      // Respect user's chosen comic/manga reading mode (continuous strip by default) instead of forcing paged mode
-      setActiveBook(book);
+      // Respect user's chosen comic/manga reading mode & always open the freshest book snapshot
+      const freshestBook = stateRef.current.books.find((b) => b.id === book.id) || book;
+      setActiveBook(freshestBook);
     },
     [audioUrl, showToast, updateBook, updateReaderSettings]
   );
@@ -4140,6 +4332,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           categories: sendPersonalization ? s.categories : undefined,
           collections: sendPersonalization ? s.collections : undefined,
           readerSettings: sendPersonalization ? s.readerSettings : undefined,
+          readerSettingsUpdatedAt: sendPersonalization ? readerSettingsUpdatedAtRef.current || 0 : 0,
           theme: pushTheme ? s.theme : null,
           themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
           profile: pushProfile ? s.profile : null,
@@ -4543,11 +4736,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (pulled.state) {
           showSyncPopupProgress(75, 'Restaurando libros, progreso y personalización...', 'Sincronizando Google Drive');
           await applyRemotePayload(pulled.state, s.books.filter((b) => !b.isDemo).length === 0);
-          // Sync saved PIN automatically from Drive profile if present
-          const remotePin = pulled.state.profile?.accountPin?.trim();
-          if (remotePin && stateRef.current.syncConfig.savedPin !== remotePin) {
-            updateSyncConfig({ savedPin: remotePin, accountEmail: initialized.email });
-          }
+          updateSyncConfig({ accountEmail: initialized.email });
         }
         if (s.books.filter((b) => !b.isDemo).length > 0 || !pulled.state) {
           dirtyScopesRef.current.add('books');
@@ -4613,6 +4802,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const syncDriveNow = async (checkVersionOnly = false) => {
       const auth = stateRef.current.googleDriveAuth;
       if (!active || !auth?.accessToken || syncInFlightRef.current) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
       try {
         // If this device has pending local edits, push+merge them immediately!
         if (dirtyScopesRef.current.size > 0) {
@@ -4654,6 +4844,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       } catch (err) {
         if (!active) return;
         const msg = err instanceof Error ? err.message : '';
+        if (isTransientNetworkError(err)) {
+          console.warn('[KomoLib] Background Drive sync deferred (transient network):', msg);
+          return;
+        }
         if (msg) {
           setSyncStatus('error');
           setSyncMessage(msg);
@@ -4702,22 +4896,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   }, [ready, googleDriveAuth?.email, applyRemotePayload, persistGoogleDriveAuth, triggerSync]);
 
-  // Cloud Account by Email + Required PIN + Full Backup / Restore
+  // Cloud Account by Email + Full Backup / Restore (no PIN required)
   const loginWithEmail = useCallback(
-    async (rawEmail: string, rawPin = ''): Promise<boolean> => {
+    async (rawEmail: string): Promise<boolean> => {
       const cleanEmail = rawEmail.trim().toLowerCase();
       if (!cleanEmail || cleanEmail.length < 3) {
         showToast('Ingresa tu correo electrónico o nombre de usuario');
         return false;
       }
-      const cleanPin = (rawPin || stateRef.current.syncConfig.savedPin || stateRef.current.profile.accountPin || '').trim();
-      if (!cleanPin) {
-        showToast('Se requiere PIN');
-        return false;
-      }
       await dbSetKV('explicitLogout', false);
 
-      const spaceId = deriveEmailSpaceId(cleanEmail, cleanPin);
+      const spaceId = deriveEmailSpaceId(cleanEmail, '');
       const s = stateRef.current;
       const savedServer = normalizeServerUrl(s.syncConfig.serverUrl);
       const isHttpsPage =
@@ -4749,7 +4938,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         serverUrl: resolvedServer,
         spaceId,
         accountEmail: cleanEmail,
-        savedPin: cleanPin,
         autoSync: true,
         liveSync: true,
       };
@@ -4788,7 +4976,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             ...DEFAULT_PROFILE,
             ...(remote.profile || s.profile),
             email: cleanEmail,
-            accountPin: cleanPin,
           };
           setProfile(mergedProfile);
           await dbSetKV('profile', mergedProfile);
@@ -4816,12 +5003,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               ...DEFAULT_PROFILE,
               ...remote.profile,
               email: cleanEmail,
-              accountPin: cleanPin,
             }
           : {
               ...s.profile,
               email: cleanEmail,
-              accountPin: cleanPin,
             };
 
         if (remoteProfileWins) {
@@ -4880,6 +5065,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             categories: s.categories,
             collections: s.collections,
             readerSettings: s.readerSettings,
+            readerSettingsUpdatedAt: readerSettingsUpdatedAtRef.current || 0,
             theme: pushTheme ? s.theme : null,
             themeUpdatedAt: themeTsToSend,
             profile: pushProfile ? updatedProfile : null,
@@ -4930,72 +5116,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [applyRemotePayload, completeSyncPopup, failSyncPopup, showSyncPopupProgress, showToast, updateProfile, updateSyncConfig]
   );
 
-  const resetAccountPin = useCallback(
-    async (rawNewPin: string, emailOverride?: string): Promise<boolean> => {
-      const cleanPin = rawNewPin.trim();
-      if (cleanPin.length < 4) {
-        showToast('El nuevo PIN debe tener al menos 4 caracteres');
-        return false;
-      }
-      const s = stateRef.current;
-      const targetEmail = (
-        emailOverride?.trim() ||
-        s.googleDriveAuth?.email ||
-        s.syncConfig.accountEmail ||
-        s.profile.email ||
-        ''
-      ).toLowerCase();
-
-      const nextProfile: UserProfile = {
-        ...s.profile,
-        ...(targetEmail ? { email: targetEmail } : {}),
-        accountPin: cleanPin,
-      };
-      profileUpdatedAtRef.current = Date.now();
-      setProfile(nextProfile);
-      await dbSetKV('profile', nextProfile);
-      await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
-
-      if (s.googleDriveAuth?.accessToken) {
-        const nextCfg: SyncConfig = {
-          ...s.syncConfig,
-          savedPin: cleanPin,
-          ...(targetEmail ? { accountEmail: targetEmail } : {}),
-        };
-        stateRef.current.syncConfig = nextCfg;
-        updateSyncConfig(nextCfg);
-        dirtyScopesRef.current.add('personalization');
-        await triggerSync(true);
-        showToast('PIN restablecido y guardado en tu Google Drive');
-        return true;
-      }
-
-      if (targetEmail) {
-        const newSpaceId = deriveEmailSpaceId(targetEmail, cleanPin);
-        const nextCfg: SyncConfig = {
-          ...s.syncConfig,
-          spaceId: newSpaceId,
-          accountEmail: targetEmail,
-          savedPin: cleanPin,
-          autoSync: true,
-          liveSync: true,
-        };
-        stateRef.current.syncConfig = nextCfg;
-        updateSyncConfig(nextCfg);
-        dirtyScopesRef.current.add('books');
-        dirtyScopesRef.current.add('personalization');
-        await triggerSync(true);
-        showToast('PIN restablecido. Tu biblioteca actual quedó respaldada con tu nuevo PIN.');
-        return true;
-      }
-
-      updateSyncConfig({ savedPin: cleanPin });
-      showToast('PIN actualizado en este dispositivo');
-      return true;
-    },
-    [showToast, triggerSync, updateSyncConfig]
-  );
-
   const logoutAccount = useCallback(async () => {
     // Flush any pending changes to the user's cloud vault (Drive or Email) before clearing local device
     const s = stateRef.current;
@@ -5023,6 +5143,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             categories: s.categories,
             collections: s.collections,
             readerSettings: s.readerSettings,
+            readerSettingsUpdatedAt: readerSettingsUpdatedAtRef.current || 0,
             theme: pushTheme ? s.theme : null,
             themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
             profile: pushProfile ? s.profile : null,
@@ -5052,6 +5173,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     await dbClearAllUserData();
     persistGoogleDriveAuth(null);
+    clearCachedTheme();
+    clearCachedReaderSettings();
 
     const newDeviceId = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const freshSpaceId = `vault_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -5074,6 +5197,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     closedShelfCodesRef.current = [];
     themeUpdatedAtRef.current = 0;
     profileUpdatedAtRef.current = 0;
+    readerSettingsUpdatedAtRef.current = 0;
     lastSyncedWallpaperRef.current = '';
     syncedCoverSigRef.current.clear();
     syncedBookUpdatedAtRef.current.clear();
@@ -7126,7 +7250,6 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         connectGoogleDrive,
         disconnectGoogleDrive,
         loginWithEmail,
-        resetAccountPin,
         logoutAccount,
         exportBackupJson,
         shareBackupJson,

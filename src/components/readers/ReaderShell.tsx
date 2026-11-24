@@ -162,14 +162,22 @@ export const ReaderShell: React.FC = () => {
     [bookmarks, activeBook?.id]
   );
 
+  const effectiveBookmarkDesignId =
+    activeBook?.activeBookmarkDesignId ?? readerSettings.defaultBookmarkDesignId;
+
   const activeBookmarkDesign = useMemo(() => {
-    const id = activeBook?.activeBookmarkDesignId;
+    const id = effectiveBookmarkDesignId;
     if (id === 'none') return null;
     if (id) {
       return allBookmarkDesigns.find((d) => d.id === id) || allBookmarkDesigns[0] || null;
     }
     return allBookmarkDesigns[0] || null;
-  }, [activeBook?.activeBookmarkDesignId, allBookmarkDesigns]);
+  }, [effectiveBookmarkDesignId, allBookmarkDesigns]);
+
+  useEffect(() => {
+    if (!activeBook) return;
+    setShowHangingBookmark(effectiveBookmarkDesignId !== 'none');
+  }, [activeBook?.id, effectiveBookmarkDesignId]);
 
   // Auto-tuck the hanging bookmark smoothly after entering the book (or closing the separadores drawer)
   // so it never blocks text while reading, while keeping a tiny non-invasive ribbon peek at the top edge.
@@ -443,8 +451,9 @@ export const ReaderShell: React.FC = () => {
 
   const handleSelectBookmarkDesign = async (designId: string) => {
     await updateBook(activeBook.id, { activeBookmarkDesignId: designId });
+    updateReaderSettings({ defaultBookmarkDesignId: designId });
     setShowHangingBookmark(designId !== 'none');
-    showToast(designId === 'none' ? 'Separador oculto en este libro' : 'Separador colocado en el libro');
+    showToast(designId === 'none' ? 'Separador oculto' : 'Separador guardado');
   };
 
   const handleUploadCustomBookmark = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -454,6 +463,7 @@ export const ReaderShell: React.FC = () => {
     if (created) {
       setCustomBmName('');
       await updateBook(activeBook.id, { activeBookmarkDesignId: created.id });
+      updateReaderSettings({ defaultBookmarkDesignId: created.id });
       setShowHangingBookmark(true);
     }
     e.target.value = '';
@@ -1223,7 +1233,7 @@ export const ReaderShell: React.FC = () => {
                   style={{ height: 31, minHeight: 31, fontSize: 10.5, padding: '0 9px' }}
                   onClick={() =>
                     handleSelectBookmarkDesign(
-                      activeBook.activeBookmarkDesignId === 'none'
+                      effectiveBookmarkDesignId === 'none'
                         ? allBookmarkDesigns[0]?.id || ''
                         : 'none'
                     )

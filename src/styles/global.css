@@ -3579,6 +3579,69 @@ mark.komo-mark-pulse {
   animation: komoMarkPulse 0.9s ease 2;
 }
 
+/* PDF Selectable Text Layer + Inline Annotations (100% parity with EPUB) */
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-size-adjust: none;
+  -webkit-text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 3;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.pdf-text-layer.pin-mode-disabled {
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pdf-text-layer span,
+.pdf-text-layer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.pdf-text-layer .markedContent {
+  top: 0;
+  height: 0;
+}
+
+.pdf-text-layer ::selection {
+  background: rgba(232, 111, 104, 0.34);
+  color: transparent;
+}
+
+.pdf-text-layer mark.komo-inline-mark {
+  color: transparent !important;
+  mix-blend-mode: multiply;
+  pointer-events: auto;
+}
+
+.pdf-page-theme-dark .pdf-text-layer mark.komo-inline-mark,
+.pdf-page-theme-oled .pdf-text-layer mark.komo-inline-mark {
+  mix-blend-mode: normal;
+}
+
+.pdf-text-layer .komo-inline-badge {
+  position: relative;
+  z-index: 5;
+  color: #1f1b18;
+  mix-blend-mode: normal;
+  pointer-events: auto;
+}
+
+.pdf-text-layer .komo-inline-badge.badge-sticker {
+  color: #ffffff;
+}
+
 /* PDF / Comic / Manga Pinned Visual Annotations */
 .page-pin-badge {
   position: absolute;

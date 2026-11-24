@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { PanelRight, Plus, Search, Upload, X } from 'lucide-react';
+import { PanelRight, Search, Upload, X } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
 
 export const TopBar: React.FC = () => {
@@ -88,22 +88,5 @@ export const TopBar: React.FC = () => {
         <PanelRight size={18} />
       </button>
     </header>
-  );
-};
-
-export const QuickImportFloat: React.FC = () => {
-  const { setImportModalOpen } = useLibrary();
-  return (
-    <button
-      className="pill-btn"
-      onClick={() => setImportModalOpen(true)}
-      style={{
-        background: 'var(--accent-primary)',
-        color: 'var(--accent-contrast)',
-        borderColor: 'transparent',
-      }}
-    >
-      <Plus size={14} /> Importar
-    </button>
   );
 };

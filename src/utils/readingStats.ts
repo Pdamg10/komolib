@@ -57,18 +57,6 @@ export function getEffectiveStatus(book: BookItem): ReadingStatus {
   return 'want_to_read';
 }
 
-export function formatShortDate(ts?: number): string {
-  if (!ts) return '—';
-  try {
-    return new Date(ts).toLocaleDateString('es-ES', {
-      day: 'numeric',
-      month: 'short',
-    });
-  } catch {
-    return '—';
-  }
-}
-
 export function formatDateTime(ts?: number): string {
   if (!ts) return '—';
   try {

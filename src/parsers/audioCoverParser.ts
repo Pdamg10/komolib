@@ -259,8 +259,3 @@ export async function extractAudioMetaAndCover(blob: Blob): Promise<AudioMetaAnd
     return {};
   }
 }
-
-export async function extractAudioCover(blob: Blob): Promise<string | undefined> {
-  const res = await extractAudioMetaAndCover(blob);
-  return res.coverDataUrl;
-}

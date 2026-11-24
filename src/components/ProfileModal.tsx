@@ -7,7 +7,6 @@ import {
   Download,
   Flame,
   FolderUp,
-  KeyRound,
   LogOut,
   Mail,
   RefreshCw,
@@ -44,7 +43,6 @@ export const ProfileModal: React.FC = () => {
     disconnectGoogleDrive,
     refreshServerHealth,
     loginWithEmail,
-    resetAccountPin,
     logoutAccount,
     exportBackupJson,
     shareBackupJson,
@@ -60,30 +58,16 @@ export const ProfileModal: React.FC = () => {
 
   const imgRef = useRef<HTMLInputElement>(null);
   const backupFileRef = useRef<HTMLInputElement>(null);
-  const pinInputRef = useRef<HTMLInputElement>(null);
-  const savedPin = (syncConfig.savedPin || profile.accountPin || '').trim();
   const [emailInput, setEmailInput] = useState(profile.email || syncConfig.accountEmail || '');
-  const [pinInput, setPinInput] = useState(savedPin);
-  const [pinError, setPinError] = useState('');
   const [showEmailFallback, setShowEmailFallback] = useState(false);
-  const [showResetPin, setShowResetPin] = useState(false);
-  const [newPinInput, setNewPinInput] = useState('');
-  const [confirmPinInput, setConfirmPinInput] = useState('');
-  const [resetPinError, setResetPinError] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (profileModalOpen) {
       setEmailInput(profile.email || syncConfig.accountEmail || '');
-      setPinInput((syncConfig.savedPin || profile.accountPin || '').trim());
-      setPinError('');
       setShowEmailFallback(false);
-      setShowResetPin(false);
-      setNewPinInput('');
-      setConfirmPinInput('');
-      setResetPinError('');
     }
-  }, [profileModalOpen, profile.email, syncConfig.accountEmail, syncConfig.savedPin, profile.accountPin]);
+  }, [profileModalOpen, profile.email, syncConfig.accountEmail]);
 
   if (!profileModalOpen) return null;
 
@@ -140,29 +124,12 @@ export const ProfileModal: React.FC = () => {
     }
   };
 
-  const resolveEffectivePin = (): string => (pinInput.trim() || savedPin).trim();
-
-  const requirePinOrWarn = (): string | null => {
-    const effective = resolveEffectivePin();
-    if (!effective) {
-      setPinError('Se requiere PIN');
-      showToast('Se requiere PIN');
-      pinInputRef.current?.focus();
-      return null;
-    }
-    setPinError('');
-    return effective;
-  };
-
   const handleConnectEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!emailInput.trim() || busy) return;
-    const effectivePin = requirePinOrWarn();
-    if (!effectivePin) return;
     setBusy(true);
     try {
-      await loginWithEmail(emailInput, effectivePin);
-      setPinInput(effectivePin);
+      await loginWithEmail(emailInput);
     } finally {
       setBusy(false);
     }
@@ -170,8 +137,6 @@ export const ProfileModal: React.FC = () => {
 
   const handleSaveNow = async () => {
     if (busy) return;
-    const effectivePin = requirePinOrWarn();
-    if (!effectivePin) return;
     const targetEmail = (emailInput.trim() || linkedEmail).toLowerCase();
     if (!targetEmail) {
       showToast('Ingresa tu correo electrónico o nombre de usuario');
@@ -179,13 +144,12 @@ export const ProfileModal: React.FC = () => {
     }
     setBusy(true);
     try {
-      const derivedSpace = deriveEmailSpaceId(targetEmail, effectivePin);
+      const derivedSpace = deriveEmailSpaceId(targetEmail, '');
       if (syncConfig.spaceId === derivedSpace && syncConfig.accountEmail === targetEmail) {
         await triggerSync(false);
       } else {
-        await loginWithEmail(targetEmail, effectivePin);
+        await loginWithEmail(targetEmail);
       }
-      setPinInput(effectivePin);
     } finally {
       setBusy(false);
     }
@@ -193,45 +157,17 @@ export const ProfileModal: React.FC = () => {
 
   const handleSyncOfflineFiles = async () => {
     if (busy || offlineSyncProgress) return;
-    const effectivePin = requirePinOrWarn();
-    if (!effectivePin) return;
-    const targetEmail = (emailInput.trim() || linkedEmail).toLowerCase();
-    if (targetEmail) {
-      const derivedSpace = deriveEmailSpaceId(targetEmail, effectivePin);
-      if (syncConfig.spaceId !== derivedSpace || syncConfig.accountEmail !== targetEmail) {
-        const ok = await loginWithEmail(targetEmail, effectivePin);
-        if (!ok) return;
+    if (!isDriveConnected) {
+      const targetEmail = (emailInput.trim() || linkedEmail).toLowerCase();
+      if (targetEmail) {
+        const derivedSpace = deriveEmailSpaceId(targetEmail, '');
+        if (syncConfig.spaceId !== derivedSpace || syncConfig.accountEmail !== targetEmail) {
+          const ok = await loginWithEmail(targetEmail);
+          if (!ok) return;
+        }
       }
     }
     await syncAllBookFilesForOffline();
-  };
-
-  const handleResetPinSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (busy) return;
-    const p1 = newPinInput.trim();
-    const p2 = confirmPinInput.trim();
-    if (p1.length < 4) {
-      setResetPinError('El nuevo PIN debe tener al menos 4 caracteres');
-      return;
-    }
-    if (p1 !== p2) {
-      setResetPinError('Los PIN no coinciden');
-      return;
-    }
-    setResetPinError('');
-    setBusy(true);
-    try {
-      const ok = await resetAccountPin(p1, emailInput.trim() || undefined);
-      if (ok) {
-        setPinInput(p1);
-        setNewPinInput('');
-        setConfirmPinInput('');
-        setShowResetPin(false);
-      }
-    } finally {
-      setBusy(false);
-    }
   };
 
   const handleRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -358,7 +294,7 @@ export const ProfileModal: React.FC = () => {
           ))}
         </div>
 
-        {/* Unified Cloud & Sync Card (Google Drive primary, Email+PIN fallback) */}
+        {/* Unified Cloud & Sync Card (Google Drive primary, Email fallback) */}
         <div
           style={{
             background: isDriveConnected
@@ -427,32 +363,18 @@ export const ProfileModal: React.FC = () => {
                 <button
                   type="button"
                   className="pill-btn"
-                  style={{ height: 35, fontSize: 11.5, background: 'var(--card-bg)' }}
-                  onClick={() => setShowResetPin((v) => !v)}
-                  title="Configura o restablece el PIN guardado de tu cuenta"
-                >
-                  <KeyRound size={12} /> {savedPin ? 'Cambiar PIN' : 'Configurar PIN'}
-                </button>
-                <button
-                  type="button"
-                  className="pill-btn"
                   style={{ height: 35, fontSize: 11.5, color: '#c92a2a', background: 'var(--card-bg)' }}
                   onClick={() => void disconnectGoogleDrive()}
                 >
                   <LogOut size={12} /> Desconectar
                 </button>
               </div>
-              {savedPin && !showResetPin && (
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <CheckCircle2 size={11} style={{ color: '#2d936c' }} /> PIN guardado y sincronizado automáticamente.
-                </div>
-              )}
             </>
           ) : (
             <>
               <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45 }}>
                 {linkedEmail
-                  ? 'Sincronizado por correo y PIN. También puedes cambiar a Google Drive para guardar tus libros en tu propio espacio (15 GB gratis).'
+                  ? 'Sincronizado por correo. También puedes cambiar a Google Drive para guardar tus libros en tu propio espacio (15 GB gratis).'
                   : 'Sincroniza tus libros, portadas, progreso, marcas y personalización entre tu tablet, teléfono y web.'}
               </div>
 
@@ -487,7 +409,7 @@ export const ProfileModal: React.FC = () => {
                   }}
                   onClick={() => setShowEmailFallback(true)}
                 >
-                  <Mail size={12} /> ¿Sin Google? Usar correo y PIN
+                  <Mail size={12} /> ¿Sin Google? Usar correo
                 </button>
               ) : (
                 <>
@@ -514,62 +436,27 @@ export const ProfileModal: React.FC = () => {
                   )}
 
                   <form onSubmit={handleConnectEmail} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-                      <div style={{ position: 'relative', flex: '1 1 200px' }}>
-                        <Mail
-                          size={14}
-                          style={{
-                            position: 'absolute',
-                            left: 11,
-                            top: '50%',
-                            transform: 'translateY(-50%)',
-                            color: 'var(--text-muted)',
-                          }}
-                        />
-                        <input
-                          type="text"
-                          className="studio-input"
-                          style={{ paddingLeft: 32, width: '100%' }}
-                          placeholder="tucorreo@ejemplo.com o usuario"
-                          value={emailInput}
-                          onChange={(e) => setEmailInput(e.target.value)}
-                          required
-                        />
-                      </div>
-                      <input
-                        ref={pinInputRef}
-                        type="password"
-                        className="studio-input"
+                    <div style={{ position: 'relative' }}>
+                      <Mail
+                        size={14}
                         style={{
-                          flex: '1 1 100px',
-                          minWidth: 0,
-                          borderColor: pinError ? '#d9534f' : undefined,
+                          position: 'absolute',
+                          left: 11,
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          color: 'var(--text-muted)',
                         }}
-                        placeholder="PIN"
-                        value={pinInput}
-                        onChange={(e) => {
-                          setPinInput(e.target.value);
-                          if (pinError && e.target.value.trim()) setPinError('');
-                        }}
-                        title="PIN obligatorio para guardar y sincronizar tu bóveda en la nube"
+                      />
+                      <input
+                        type="text"
+                        className="studio-input"
+                        style={{ paddingLeft: 32, width: '100%' }}
+                        placeholder="tucorreo@ejemplo.com o usuario"
+                        value={emailInput}
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        required
                       />
                     </div>
-
-                    {pinError && (
-                      <div
-                        role="alert"
-                        style={{
-                          fontSize: 11.5,
-                          fontWeight: 800,
-                          color: '#d9534f',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 6,
-                        }}
-                      >
-                        <AlertTriangle size={13} /> {pinError}
-                      </div>
-                    )}
 
                     <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
                       <button
@@ -593,114 +480,16 @@ export const ProfileModal: React.FC = () => {
                           disabled={busy}
                           style={{ height: 34, fontSize: 11.5 }}
                           onClick={() => void handleSaveNow()}
-                          title="Guardar copia en la nube ahora usando tu PIN guardado"
+                          title="Guardar copia en la nube ahora"
                         >
                           <RefreshCw size={13} /> Guardar ahora
                         </button>
                       )}
                     </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                      {savedPin ? (
-                        <span style={{ fontSize: 10.5, color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                          <CheckCircle2 size={11} style={{ color: '#2d936c' }} /> PIN guardado automáticamente
-                        </span>
-                      ) : (
-                        <span />
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => setShowResetPin((v) => !v)}
-                        style={{
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color: 'var(--accent-primary)',
-                          textDecoration: 'underline',
-                          padding: 0,
-                          background: 'transparent',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {showResetPin ? 'Ocultar restablecer PIN' : '¿Olvidaste tu PIN? Restablecer PIN'}
-                      </button>
-                    </div>
                   </form>
                 </>
               )}
             </>
-          )}
-
-          {showResetPin && (
-            <form
-              onSubmit={handleResetPinSubmit}
-              style={{
-                background: 'var(--card-bg)',
-                border: '1px solid var(--border-subtle)',
-                borderRadius: 12,
-                padding: '10px 12px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-              }}
-            >
-              <div style={{ fontSize: 12, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <KeyRound size={13} style={{ color: 'var(--accent-primary)' }} />
-                Restablecer PIN de cuenta
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
-                Crea un nuevo PIN (mínimo 4 caracteres). Se guardará automáticamente en este dispositivo y en tu nube para confirmar sin volver a escribirlo.
-              </div>
-              <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-                <input
-                  type="password"
-                  className="studio-input"
-                  style={{ flex: '1 1 130px', minWidth: 0 }}
-                  placeholder="Nuevo PIN"
-                  value={newPinInput}
-                  onChange={(e) => {
-                    setNewPinInput(e.target.value);
-                    if (resetPinError) setResetPinError('');
-                  }}
-                />
-                <input
-                  type="password"
-                  className="studio-input"
-                  style={{ flex: '1 1 130px', minWidth: 0 }}
-                  placeholder="Confirmar nuevo PIN"
-                  value={confirmPinInput}
-                  onChange={(e) => {
-                    setConfirmPinInput(e.target.value);
-                    if (resetPinError) setResetPinError('');
-                  }}
-                />
-              </div>
-              {resetPinError && (
-                <div role="alert" style={{ fontSize: 11, fontWeight: 800, color: '#d9534f', display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <AlertTriangle size={12} /> {resetPinError}
-                </div>
-              )}
-              <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
-                <button
-                  type="button"
-                  className="pill-btn"
-                  style={{ height: 30, fontSize: 11 }}
-                  onClick={() => {
-                    setShowResetPin(false);
-                    setResetPinError('');
-                  }}
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className="coral-cta-btn"
-                  disabled={busy}
-                  style={{ height: 30, fontSize: 11.5, padding: '0 13px' }}
-                >
-                  {busy ? 'Guardando...' : 'Guardar nuevo PIN'}
-                </button>
-              </div>
-            </form>
           )}
 
           {syncMessage && (
@@ -830,7 +619,6 @@ export const ProfileModal: React.FC = () => {
                 onClick={async () => {
                   await logoutAccount();
                   setEmailInput('');
-                  setPinInput('');
                   setProfileModalOpen(false);
                 }}
                 title="Guarda tu copia en la nube y deja este dispositivo vacío como usuario nuevo"

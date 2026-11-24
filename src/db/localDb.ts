@@ -2,17 +2,8 @@ import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type {
   BookAnnotation,
   BookItem,
-  BookmarkDesign,
   BookmarkItem,
-  CategoryItem,
-  ChatMessage,
-  ChatSession,
-  CollectionCard,
   NoteItem,
-  ReaderSettings,
-  SyncConfig,
-  ThemeConfig,
-  UserProfile,
 } from '../types/library';
 
 interface KomoLibSchema extends DBSchema {
@@ -199,17 +190,3 @@ export async function dbClearAllUserData(): Promise<void> {
   ]);
   await tx.done;
 }
-
-export type PersistedKvMap = {
-  theme: ThemeConfig;
-  categories: CategoryItem[];
-  collections: CollectionCard[];
-  profile: UserProfile;
-  readerSettings: ReaderSettings;
-  syncConfig: SyncConfig;
-  chatMessages: ChatMessage[];
-  chatSessions: ChatSession[];
-  activeChatSessionId: string;
-  customBookmarkDesigns: BookmarkDesign[];
-  seeded: boolean;
-};

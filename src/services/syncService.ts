@@ -71,6 +71,7 @@ export interface RemoteSyncPayload {
   categories: CategoryItem[] | null;
   collections?: CollectionCard[] | null;
   readerSettings?: ReaderSettings | null;
+  readerSettingsUpdatedAt?: number;
   theme: ThemeConfig | null;
   themeUpdatedAt?: number;
   profile: UserProfile | null;
@@ -91,7 +92,7 @@ export interface RemoteSyncPayload {
 }
 
 /**
- * Deterministically derives a private cloud vault ID (`acct_<hex>`) from an email + required PIN
+ * Deterministically derives a private cloud vault ID (`acct_<hex>`) from an email/namespace
  * using dual 32-bit FNV-1a/cyrb hashes so it works identically on HTTP LAN, HTTPS, localhost & APK.
  */
 export function deriveEmailSpaceId(email: string, pin = ''): string {
@@ -163,11 +164,102 @@ export async function parseJsonResponse<T>(res: Response, url: string): Promise<
 }
 
 /**
- * Fetch wrapper that replaces the browser's generic "Failed to fetch" with a
- * message that explains what to check (URL, HTTPS, localhost, CORS, server down).
- * Retries idempotent GET requests once on Render to absorb cold-start hiccups.
+ * Typed transient network/connectivity error so background syncs can retry quietly
+ * instead of showing scary developer diagnostics in the UI.
+ */
+export class ApiNetworkError extends Error {
+  readonly isTransientNetworkError = true;
+  readonly isOffline: boolean;
+  readonly endpoint: string;
+  readonly detail: string;
+
+  constructor(message: string, opts: { isOffline?: boolean; endpoint: string; detail: string }) {
+    super(message);
+    this.name = 'ApiNetworkError';
+    this.isOffline = Boolean(opts.isOffline);
+    this.endpoint = opts.endpoint;
+    this.detail = opts.detail;
+  }
+}
+
+export function isTransientNetworkError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof ApiNetworkError) return true;
+  if (typeof err === 'object' && 'isTransientNetworkError' in err) {
+    return Boolean((err as { isTransientNetworkError?: boolean }).isTransientNetworkError);
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /failed to fetch|networkerror|load failed|network request failed|sin conexión a internet|no se pudo conectar con la nube/i.test(
+    msg
+  );
+}
+
+const renderLastAwakeAt = new Map<string, number>();
+const renderWakePromises = new Map<string, Promise<boolean>>();
+
+/**
+ * Gently wakes a sleeping Render Free instance using a simple CORS GET `/api/health`
+ * (no custom headers => no CORS preflight OPTIONS blocked by Render's 502 cold-start proxy).
+ * Uses single-flight deduplication per origin so concurrent calls share a single wake-up.
+ */
+export async function waitForRenderWakeUp(origin: string, maxWaitMs = 55_000): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
+  const existing = renderWakePromises.get(origin);
+  if (existing) return existing;
+
+  const task = (async (): Promise<boolean> => {
+    const deadline = Date.now() + maxWaitMs;
+    let step = 0;
+    while (Date.now() < deadline) {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return false;
+      }
+      try {
+        const res = await fetch(`${origin}/api/health`, {
+          method: 'GET',
+          cache: 'no-store',
+        });
+        if (res.ok) {
+          renderLastAwakeAt.set(origin, Date.now());
+          return true;
+        }
+      } catch {
+        // Render edge proxy may drop/block CORS while container is spinning up
+      }
+      step += 1;
+      const delayMs = Math.min(4000, 1500 + step * 750);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, remaining)));
+    }
+    return false;
+  })();
+
+  renderWakePromises.set(origin, task);
+  try {
+    return await task;
+  } finally {
+    renderWakePromises.delete(origin);
+  }
+}
+
+/**
+ * Fetch wrapper with Render Free cold-start wake-up + clean user-facing errors.
+ * Technical details (URL, origin, CORS hint) are logged to console.warn instead of
+ * cluttering the UI.
  */
 export async function fetchApi(url: string, init?: RequestInit): Promise<Response> {
+  const endpoint = endpointLabel(url);
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw new ApiNetworkError(
+      'Sin conexión a internet. Tus cambios se guardan en este dispositivo y se sincronizarán al reconectar.',
+      { isOffline: true, endpoint, detail: 'navigator.onLine is false' }
+    );
+  }
+
   const method = (init?.method || 'GET').toUpperCase();
   const isRender = /\.onrender\.com\b/i.test(url);
   const isIdempotentPost =
@@ -175,40 +267,60 @@ export async function fetchApi(url: string, init?: RequestInit): Promise<Respons
     /\/api\/(?:google\/refresh|(?:rooms|shelves)\/[^/]+\/join)\b/i.test(url);
   const canRetryColdStart =
     isRender && (method === 'GET' || method === 'PUT' || method === 'PATCH' || isIdempotentPost);
-  const maxAttempts = canRetryColdStart ? 4 : 1;
 
+  let origin = '';
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    origin = '';
+  }
+
+  // For preflighted requests to Render (e.g. POST /api/google/refresh with JSON),
+  // if Render hasn't responded in the last 10 minutes, wake it via simple GET /api/health
+  // first when a quick attempt fails so CORS preflight never dies on a 502 cold-start.
+  const maxAttempts = canRetryColdStart ? 3 : 1;
   let lastError: unknown;
+  let wokeOnce = false;
+
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const res = await fetch(url, init);
+      if (res.status < 500 && isRender && origin) {
+        renderLastAwakeAt.set(origin, Date.now());
+      }
       if (
         canRetryColdStart &&
         attempt < maxAttempts - 1 &&
         (res.status === 502 || res.status === 503 || res.status === 504)
       ) {
-        try {
-          const origin = new URL(url).origin;
-          await fetch(`${origin}/api/health`).catch(() => undefined);
-        } catch {
-          // ignore wake-up probe errors
+        if (origin && !wokeOnce) {
+          wokeOnce = true;
+          const awake = await waitForRenderWakeUp(origin, 55_000);
+          if (awake) continue;
         }
-        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 2500));
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 2000));
         continue;
       }
       return res;
     } catch (error) {
       lastError = error;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        throw new ApiNetworkError(
+          'Sin conexión a internet. Tus cambios se guardan en este dispositivo y se sincronizarán al reconectar.',
+          { isOffline: true, endpoint, detail: 'Device went offline' }
+        );
+      }
       if (canRetryColdStart && attempt < maxAttempts - 1) {
-        // Wake Render cold-start service gently before retrying
-        if (method !== 'GET') {
-          try {
-            const origin = new URL(url).origin;
-            await fetch(`${origin}/api/health`).catch(() => undefined);
-          } catch {
-            // ignore wake-up probe errors
-          }
+        if (origin && !wokeOnce) {
+          wokeOnce = true;
+          // If Render was recently healthy (< 10 min), try a shorter recovery window;
+          // otherwise wait up to 55s for Render Free cold start to finish cleanly.
+          const lastHealthy = renderLastAwakeAt.get(origin) || 0;
+          const wakeBudgetMs = Date.now() - lastHealthy < 10 * 60 * 1000 ? 18_000 : 55_000;
+          const awake = await waitForRenderWakeUp(origin, wakeBudgetMs);
+          if (awake) continue;
         }
-        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 2500));
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 2000));
         continue;
       }
     }
@@ -217,33 +329,38 @@ export async function fetchApi(url: string, init?: RequestInit): Promise<Respons
   const detail = lastError instanceof Error ? lastError.message : 'Error de red';
   const appOrigin =
     typeof window !== 'undefined' ? window.location.origin : 'el navegador';
-  let hint = '';
 
+  console.warn(`[KomoLib API] Connection failed for ${endpoint} (origin: ${appOrigin}): ${detail}`);
+
+  let userMessage = '';
   try {
     const target = new URL(url);
     if (typeof window !== 'undefined' && window.location.protocol === 'https:' && target.protocol === 'http:') {
-      hint =
-        'La página está en HTTPS y el API en HTTP, así que el navegador bloquea la conexión. Usa la URL HTTPS del API.';
+      userMessage =
+        'El servidor configurado usa HTTP desde una página HTTPS. Usa la dirección HTTPS del servidor.';
     } else if (
       typeof window !== 'undefined' &&
       /^(localhost|127\.0\.0\.1)$/i.test(target.hostname) &&
       !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
     ) {
-      hint =
-        'La URL apunta a localhost; desde Netlify eso es tu propio navegador, no el servidor. Usa la URL pública del API.';
+      userMessage =
+        'La dirección del servidor apunta a localhost. Configura la URL pública del servidor.';
     }
   } catch {
     // ignore malformed URL
   }
 
-  if (!hint) {
-    hint =
-      `Verifica que el API esté desplegado y en línea, que la URL sea correcta ` +
-      `(sin /api al final) y que permita CORS desde ${appOrigin}. ` +
-      `Si está en Render, confirma que el subdominio coincida exactamente con tu servicio y espera unos segundos si estaba dormido.`;
+  if (!userMessage) {
+    userMessage = isRender
+      ? 'No se pudo conectar con la nube en este momento. Tus libros locales siguen disponibles; intenta de nuevo en unos segundos.'
+      : 'No se pudo conectar con el servidor en este momento. Verifica tu conexión e intenta de nuevo.';
   }
 
-  throw new Error(`No se pudo conectar con ${endpointLabel(url)}. ${hint} Detalle: ${detail}`);
+  throw new ApiNetworkError(userMessage, {
+    isOffline: typeof navigator !== 'undefined' && navigator.onLine === false,
+    endpoint,
+    detail,
+  });
 }
 
 export function buildAuthHeaders(config: SyncConfig, isJson = true): HeadersInit {
@@ -626,6 +743,7 @@ export async function syncFullState(
     categories?: CategoryItem[];
     collections?: CollectionCard[];
     readerSettings?: ReaderSettings;
+    readerSettingsUpdatedAt?: number;
     theme: ThemeConfig | null;
     themeUpdatedAt?: number;
     profile: UserProfile | null;
@@ -743,6 +861,7 @@ export async function syncFullState(
       categories: localData.categories,
       collections: localData.collections ?? null,
       readerSettings: localData.readerSettings ?? null,
+      readerSettingsUpdatedAt: localData.readerSettingsUpdatedAt || 0,
       theme: themePayload,
       themeUpdatedAt: localData.themeUpdatedAt || 0,
       profile: localData.profile,

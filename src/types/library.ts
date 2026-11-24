@@ -242,6 +242,7 @@ export interface ReaderSettings {
   brightness: number; // 50 - 120
   warmth: number; // 0 - 60 (blue light filter)
   epubFlow: 'scrolled' | 'paginated';
+  defaultBookmarkDesignId?: string; // Preferred visual bookmark ribbon persisted across books & devices
 }
 
 export interface ThemeConfig {
@@ -292,7 +293,6 @@ export interface ThemeConfig {
 export interface UserProfile {
   name: string;
   email?: string;
-  accountPin?: string;
   avatarEmoji: string;
   avatarBg: string;
   avatarImageUrl?: string;
@@ -320,7 +320,6 @@ export interface SyncConfig {
   publicUrl?: string;
   spaceId?: string; // Private per-user vault ID for isolated personal cloud/server sync
   accountEmail?: string; // User email linked to cloud backup vault
-  savedPin?: string; // Saved user PIN for seamless confirmation across actions & devices
   token: string;
   autoSync: boolean;
   liveSync?: boolean;

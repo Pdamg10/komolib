@@ -202,11 +202,6 @@ export async function extractCoverPaletteFromDataUrl(
   });
 }
 
-export async function extractDominantColorFromDataUrl(dataUrl: string, fallback: string): Promise<string> {
-  const { spineColor } = await extractCoverPaletteFromDataUrl(dataUrl, fallback);
-  return spineColor;
-}
-
 export async function optimizeCoverDataUrl(dataUrl: string, maxDim = 420): Promise<string> {
   if (!dataUrl || dataUrl.startsWith('data:image/svg+xml')) return dataUrl;
   return new Promise((resolve) => {

@@ -14,6 +14,62 @@
       href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,600;1,400&family=Nunito:wght@400;500;600;700;800&family=Quicksand:wght@500;600;700&display=swap"
       rel="stylesheet"
     />
+    <script>
+      (function () {
+        try {
+          var raw = window.localStorage && window.localStorage.getItem('komolib_theme_cache_v1');
+          if (!raw) return;
+          var t = JSON.parse(raw);
+          if (!t || typeof t !== 'object') return;
+          var root = document.documentElement;
+          var hexLum = function (hex) {
+            var c = String(hex || '#ffffff').replace('#', '');
+            if (c.length === 3) c = c[0] + c[0] + c[1] + c[1] + c[2] + c[2];
+            if (!/^[0-9a-fA-F]{6}$/.test(c)) return 1;
+            var r = parseInt(c.slice(0, 2), 16) / 255;
+            var g = parseInt(c.slice(2, 4), 16) / 255;
+            var b = parseInt(c.slice(4, 6), 16) / 255;
+            var lin = function (v) { return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+            return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+          };
+          var contrast = function (bg) { return hexLum(bg) > 0.45 ? '#231f1c' : '#ffffff'; };
+          var isDark = hexLum(t.shellBg) < 0.28;
+          root.style.colorScheme = isDark ? 'dark' : 'light';
+          root.dataset.themeMode = isDark ? 'dark' : 'light';
+          var set = function (k, v) { if (v !== undefined && v !== null && v !== '') root.style.setProperty(k, String(v)); };
+          set('--outer-bg', t.outerBg);
+          set('--shell-bg', t.shellBg);
+          set('--sidebar-bg', t.sidebarBg);
+          set('--panel-bg', t.panelBg);
+          set('--card-bg', t.cardBg);
+          set('--banner-bg', t.bannerBg);
+          set('--input-bg', isDark ? t.shellBg : t.cardBg);
+          set('--text-primary', t.textPrimary);
+          set('--text-muted', t.textMuted);
+          set('--author-color', t.authorColor);
+          set('--accent-primary', t.accentPrimary);
+          set('--accent-secondary', t.accentSecondary);
+          if (t.accentPrimary) set('--accent-contrast', contrast(t.accentPrimary));
+          if (t.accentSecondary) set('--accent-secondary-contrast', contrast(t.accentSecondary));
+          set('--sidebar-pill-bg', t.sidebarPillBg);
+          if (t.sidebarPillBg) set('--sidebar-pill-contrast', contrast(t.sidebarPillBg));
+          set('--search-gradient', t.searchGradient);
+          set('--chat-user-bubble', t.chatUserBubble);
+          if (t.chatUserBubble) set('--chat-user-contrast', contrast(t.chatUserBubble));
+          set('--chat-bot-bubble', t.chatBotBubble);
+          if (t.fontFamily) set('--font-ui', "'" + t.fontFamily + "', 'Nunito', system-ui, sans-serif");
+          if (typeof t.uiScale === 'number') set('--ui-scale', t.uiScale);
+          if (typeof t.borderRadius === 'number') {
+            set('--radius-shell', t.borderRadius + 'px');
+            set('--radius-card', Math.max(12, Math.round(t.borderRadius * 0.72)) + 'px');
+          }
+          if (typeof t.wallpaperOpacity === 'number') set('--glass-opacity', t.wallpaperOpacity);
+          if (typeof t.wallpaperBlur === 'number') set('--glass-blur', t.wallpaperBlur + 'px');
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta && t.sidebarBg) meta.setAttribute('content', t.sidebarBg);
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -101,32 +101,58 @@ export function buildGoogleOAuthStartUrl(
   return `${base}/api/google/start?${params.toString()}`;
 }
 
+// Single-flight deduplication so concurrent Drive operations never fire duplicate /api/google/refresh calls
+const inFlightGoogleRefresh = new Map<string, Promise<GoogleDriveAuth>>();
+
 export async function refreshGoogleAccessToken(
   config: SyncConfig,
   auth: GoogleDriveAuth
 ): Promise<GoogleDriveAuth> {
-  if (!auth.refreshToken) {
+  const cleanRefresh = (auth.refreshToken || '').trim();
+  const cleanEmail = (auth.email || '').trim().toLowerCase();
+  if (!cleanRefresh && !cleanEmail) {
     throw new Error('Tu sesión de Google Drive expiró. Vuelve a pulsar "Conectar con Google Drive".');
   }
-  const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
-  const url = `${base}/api/google/refresh`;
-  const res = await fetchApi(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refreshToken: auth.refreshToken }),
-  });
-  const data = await parseJsonResponse<{ accessToken?: string; expiresAt?: number; error?: string }>(
-    res,
-    url
-  );
-  if (!data.accessToken) {
-    throw new Error(data.error || 'No se pudo renovar el acceso a Google Drive.');
+  const key = cleanRefresh || `email:${cleanEmail}`;
+  const existing = inFlightGoogleRefresh.get(key);
+  if (existing) {
+    return existing;
   }
-  return {
-    ...auth,
-    accessToken: data.accessToken,
-    expiresAt: data.expiresAt || Date.now() + 55 * 60 * 1000,
-  };
+
+  const task = (async (): Promise<GoogleDriveAuth> => {
+    const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
+    const url = `${base}/api/google/refresh`;
+    const res = await fetchApi(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        refreshToken: cleanRefresh,
+        email: cleanEmail,
+      }),
+    });
+    const data = await parseJsonResponse<{
+      accessToken?: string;
+      expiresAt?: number;
+      refreshToken?: string;
+      error?: string;
+    }>(res, url);
+    if (!data.accessToken) {
+      throw new Error(data.error || 'No se pudo renovar el acceso a Google Drive.');
+    }
+    return {
+      ...auth,
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken || cleanRefresh,
+      expiresAt: data.expiresAt || Date.now() + 55 * 60 * 1000,
+    };
+  })();
+
+  inFlightGoogleRefresh.set(key, task);
+  try {
+    return await task;
+  } finally {
+    inFlightGoogleRefresh.delete(key);
+  }
 }
 
 export async function ensureFreshDriveAuth(
@@ -157,7 +183,7 @@ async function driveFetch(
   };
 
   let res = await fetch(url, { ...init, headers: makeHeaders(current.accessToken) });
-  if (res.status === 401 && current.refreshToken) {
+  if (res.status === 401 && (current.refreshToken || current.email)) {
     current = await refreshGoogleAccessToken(config, current);
     onAuthUpdated?.(current);
     res = await fetch(url, { ...init, headers: makeHeaders(current.accessToken) });
@@ -479,6 +505,7 @@ function mergeSyncStatesClientSide(
     categories?: CategoryItem[];
     collections?: CollectionCard[];
     readerSettings?: ReaderSettings;
+    readerSettingsUpdatedAt?: number;
     theme: ThemeConfig | null;
     themeUpdatedAt?: number;
     profile: UserProfile | null;
@@ -510,6 +537,7 @@ function mergeSyncStatesClientSide(
     categories: null,
     collections: null,
     readerSettings: null,
+    readerSettingsUpdatedAt: 0,
     theme: null,
     themeUpdatedAt: 0,
     profile: null,
@@ -663,6 +691,13 @@ function mergeSyncStatesClientSide(
     localData.profile && (!current.profile || (incomingProfileTs > 0 && incomingProfileTs >= currentProfileTs))
   );
 
+  const incomingReaderTs = Number(localData.readerSettingsUpdatedAt || 0);
+  const currentReaderTs = Number(current.readerSettingsUpdatedAt || 0);
+  const useIncomingReaderSettings = Boolean(
+    localData.readerSettings &&
+      (!current.readerSettings || (incomingReaderTs > 0 && incomingReaderTs >= currentReaderTs))
+  );
+
   const incomingSession = localData.lastActiveSession;
   const currentSession = current.lastActiveSession;
   const mergedSession =
@@ -752,7 +787,8 @@ function mergeSyncStatesClientSide(
     customStationery: localData.customStationery || current.customStationery || null,
     categories: localData.categories || current.categories || null,
     collections: localData.collections || current.collections || null,
-    readerSettings: localData.readerSettings || current.readerSettings || null,
+    readerSettings: useIncomingReaderSettings ? localData.readerSettings : current.readerSettings || null,
+    readerSettingsUpdatedAt: useIncomingReaderSettings ? incomingReaderTs : currentReaderTs,
     theme: resolvedTheme,
     themeUpdatedAt: useIncomingTheme ? incomingThemeTs : currentThemeTs,
     profile: useIncomingProfile ? localData.profile : current.profile,

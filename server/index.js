@@ -53,39 +53,6 @@ function getEffectivePublicUrl(req) {
   return '';
 }
 
-let hostPublicIp = '';
-async function refreshHostPublicIp() {
-  try {
-    const res = await fetch('https://api.ipify.org?format=json');
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.ip) hostPublicIp = String(data.ip).trim();
-    }
-  } catch {
-    // ignore offline
-  }
-}
-refreshHostPublicIp();
-
-function isLocalOrLanRequest(req) {
-  const ip = String(req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
-  return (
-    ip === '127.0.0.1' ||
-    ip === '::1' ||
-    ip.startsWith('192.168.') ||
-    ip.startsWith('10.') ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
-  );
-}
-
-function isOwnerNetworkRequest(req) {
-  const cfIp = String(req?.headers?.['cf-connecting-ip'] || '').trim();
-  if (cfIp) {
-    return Boolean(hostPublicIp && cfIp === hostPublicIp);
-  }
-  return isLocalOrLanRequest(req);
-}
-
 const STORAGE_DIR = process.env.KOMOLIB_STORAGE_DIR
   ? path.resolve(process.env.KOMOLIB_STORAGE_DIR)
   : path.join(__dirname, 'storage');
@@ -98,6 +65,7 @@ const ROOMS_FILE = path.join(STORAGE_DIR, 'rooms.json');
 const DELETED_ROOMS_FILE = path.join(STORAGE_DIR, 'deleted_rooms.json');
 const SHELVES_FILE = path.join(STORAGE_DIR, 'shelves.json');
 const DELETED_SHELVES_FILE = path.join(STORAGE_DIR, 'deleted_shelves.json');
+const GOOGLE_TOKENS_FILE = path.join(STORAGE_DIR, 'google_tokens.json');
 
 fs.mkdirSync(SPACES_DIR, { recursive: true });
 fs.mkdirSync(FILES_DIR, { recursive: true });
@@ -167,6 +135,7 @@ function emptyState() {
     categories: null,
     collections: null,
     readerSettings: null,
+    readerSettingsUpdatedAt: 0,
     theme: null,
     profile: null,
     deletedBookIds: [],
@@ -760,7 +729,38 @@ app.post('/api/ai/identify-book', async (req, res) => {
   }
 });
 
-/* -------- Stateless Google Drive OAuth Helper (0 bytes stored on Render!) -------- */
+/* -------- Google Drive OAuth Helper + Per-Email Refresh Token Vault -------- */
+
+function readGoogleTokenStore() {
+  try {
+    if (!fs.existsSync(GOOGLE_TOKENS_FILE)) return {};
+    const parsed = JSON.parse(fs.readFileSync(GOOGLE_TOKENS_FILE, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function getSavedGoogleRefreshToken(email) {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) return '';
+  const store = readGoogleTokenStore();
+  const entry = store[cleanEmail];
+  return typeof entry?.refreshToken === 'string' ? entry.refreshToken.trim() : '';
+}
+
+function saveGoogleRefreshToken(email, refreshToken) {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const cleanToken = String(refreshToken || '').trim();
+  if (!cleanEmail || !cleanToken) return;
+  try {
+    const store = readGoogleTokenStore();
+    store[cleanEmail] = { refreshToken: cleanToken, updatedAt: Date.now() };
+    fs.writeFileSync(GOOGLE_TOKENS_FILE, JSON.stringify(store, null, 2), 'utf8');
+  } catch {
+    // ignore non-fatal disk errors
+  }
+}
 
 function isAllowedGoogleReturnUrl(raw) {
   if (!raw || typeof raw !== 'string') return false;
@@ -826,12 +826,16 @@ app.get('/api/google/start', (req, res) => {
   if (loginHint) {
     params.set('login_hint', loginHint);
   }
-  // Only force consent/account chooser when explicitly requested; otherwise Google
-  // auto-detects the already authorized account on other devices without re-confirming.
+  // Request consent only when explicitly asked OR when we have never saved a refresh_token
+  // for this Google account yet. Once stored, secondary devices authenticate seamlessly with
+  // zero extra confirmation and still receive a permanent refresh_token!
+  const hasSavedRefresh = loginHint ? Boolean(getSavedGoogleRefreshToken(loginHint)) : false;
   if (forceConsent) {
     params.set('prompt', 'consent select_account');
   } else if (switchAccount) {
     params.set('prompt', 'select_account');
+  } else if (!hasSavedRefresh) {
+    params.set('prompt', 'consent');
   }
 
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
@@ -907,13 +911,21 @@ app.get('/api/google/callback', async (req, res) => {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
     const userInfo = await userRes.json().catch(() => ({}));
+    const resolvedEmail = String(userInfo.email || '').trim().toLowerCase();
+    let effectiveRefreshToken = String(tokenData.refresh_token || '').trim();
+    if (resolvedEmail && effectiveRefreshToken) {
+      saveGoogleRefreshToken(resolvedEmail, effectiveRefreshToken);
+    } else if (resolvedEmail && !effectiveRefreshToken) {
+      // Secondary device signed in without re-consent: reuse the saved refresh token for this account!
+      effectiveRefreshToken = getSavedGoogleRefreshToken(resolvedEmail);
+    }
 
     return sendBack({
-      email: String(userInfo.email || '').trim().toLowerCase(),
+      email: resolvedEmail,
       name: String(userInfo.name || '').trim(),
       picture: String(userInfo.picture || '').trim(),
       accessToken: tokenData.access_token,
-      refreshToken: tokenData.refresh_token || '',
+      refreshToken: effectiveRefreshToken,
       expiresAt: Date.now() + Math.max(300, Number(tokenData.expires_in || 3600) - 120) * 1000,
     });
   } catch (err) {
@@ -927,9 +939,15 @@ app.post('/api/google/refresh', async (req, res) => {
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     return res.status(503).json({ error: 'Google Drive OAuth no configurado en el servidor' });
   }
-  const refreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken.trim() : '';
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  let refreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken.trim() : '';
+  if (!refreshToken && email) {
+    refreshToken = getSavedGoogleRefreshToken(email);
+  }
   if (!refreshToken) {
-    return res.status(400).json({ error: 'refreshToken requerido' });
+    return res.status(401).json({
+      error: 'Tu sesión de Google Drive expiró. Vuelve a pulsar "Conectar con Google Drive".',
+    });
   }
   try {
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -944,13 +962,43 @@ app.post('/api/google/refresh', async (req, res) => {
     });
     const tokenData = await tokenRes.json().catch(() => ({}));
     if (!tokenRes.ok || !tokenData.access_token) {
+      // If client sent a stale refreshToken, try the server's latest saved token for that email
+      const fallbackToken = email ? getSavedGoogleRefreshToken(email) : '';
+      if (fallbackToken && fallbackToken !== refreshToken) {
+        const retryRes = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: GOOGLE_CLIENT_ID,
+            client_secret: GOOGLE_CLIENT_SECRET,
+            refresh_token: fallbackToken,
+            grant_type: 'refresh_token',
+          }),
+        });
+        const retryData = await retryRes.json().catch(() => ({}));
+        if (retryRes.ok && retryData.access_token) {
+          const finalRefresh = String(retryData.refresh_token || fallbackToken).trim();
+          if (email && finalRefresh) saveGoogleRefreshToken(email, finalRefresh);
+          return res.json({
+            ok: true,
+            accessToken: retryData.access_token,
+            refreshToken: finalRefresh,
+            expiresAt: Date.now() + Math.max(300, Number(retryData.expires_in || 3600) - 120) * 1000,
+          });
+        }
+      }
       return res.status(401).json({
         error: tokenData.error_description || tokenData.error || 'Sesión de Google Drive expirada',
       });
     }
+    const finalRefresh = String(tokenData.refresh_token || refreshToken).trim();
+    if (email && finalRefresh) {
+      saveGoogleRefreshToken(email, finalRefresh);
+    }
     return res.json({
       ok: true,
       accessToken: tokenData.access_token,
+      refreshToken: finalRefresh,
       expiresAt: Date.now() + Math.max(300, Number(tokenData.expires_in || 3600) - 120) * 1000,
     });
   } catch (err) {
@@ -1190,6 +1238,14 @@ app.put('/api/sync/state', (req, res) => {
         (incomingProfileTs > 0 && incomingProfileTs >= currentProfileTs))
   );
 
+  const incomingReaderTs = Number(incoming.readerSettingsUpdatedAt || 0);
+  const currentReaderTs = Number(current.readerSettingsUpdatedAt || 0);
+  const useIncomingReaderSettings = Boolean(
+    incoming.readerSettings &&
+      (!current.readerSettings ||
+        (incomingReaderTs > 0 && incomingReaderTs >= currentReaderTs))
+  );
+
   const normCode = (c) => String(c || '').trim().toUpperCase();
   const closedRoomCodes = Array.from(
     new Set(
@@ -1297,7 +1353,8 @@ app.put('/api/sync/state', (req, res) => {
     customStationery: incoming.customStationery || current.customStationery || null,
     categories: incoming.categories || current.categories,
     collections: incoming.collections || current.collections || null,
-    readerSettings: incoming.readerSettings || current.readerSettings || null,
+    readerSettings: useIncomingReaderSettings ? incoming.readerSettings : current.readerSettings || null,
+    readerSettingsUpdatedAt: useIncomingReaderSettings ? incomingReaderTs : currentReaderTs,
     theme: useIncomingTheme ? resolvedIncomingTheme : current.theme,
     themeUpdatedAt: useIncomingTheme ? incomingThemeTs : currentThemeTs,
     profile: useIncomingProfile ? incoming.profile : current.profile,
