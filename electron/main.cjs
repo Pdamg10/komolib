@@ -155,12 +155,14 @@ function startStaticServer() {
 }
 
 async function createWindow(port) {
+  const iconPath = path.join(__dirname, 'icon.png');
   const win = new BrowserWindow({
     width: 1280,
     height: 840,
     minWidth: 860,
     minHeight: 600,
     title: 'Komolib',
+    icon: fs.existsSync(iconPath) ? iconPath : undefined,
     backgroundColor: '#f3ede4',
     autoHideMenuBar: true,
     webPreferences: {

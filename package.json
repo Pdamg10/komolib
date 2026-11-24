@@ -33,12 +33,15 @@
       "target": [
         "AppImage"
       ],
-      "category": "Education"
+      "icon": "electron/icon.png",
+      "category": "Education",
+      "artifactName": "Komolib-${version}.AppImage"
     },
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "electron/icon.png"
     }
   },
   "dependencies": {
