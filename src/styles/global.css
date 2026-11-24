@@ -86,7 +86,7 @@ body,
   grid-template-columns: 76px minmax(0, 1fr) 338px;
   overflow: hidden;
   position: relative;
-  transition: all 0.25s ease;
+  transition: background-color 0.2s ease;
   font-size: calc(14px * var(--ui-scale));
 }
 
@@ -96,7 +96,7 @@ body,
   box-shadow: none;
 }
 
-/* Custom Wallpaper Glass Mode: makes uploaded background clearly visible while keeping UI readable */
+/* Custom Wallpaper Glass Mode: single top-level GPU blur pass (avoids nested backdrop-filter lag!) */
 .app-shell.has-wallpaper {
   background: color-mix(in srgb, var(--shell-bg) calc(var(--glass-opacity, 0.78) * 76%), transparent);
   backdrop-filter: blur(var(--glass-blur, 12px));
@@ -109,12 +109,10 @@ body,
 
 .app-shell.has-wallpaper .left-rail {
   background: color-mix(in srgb, var(--sidebar-bg) calc(var(--glass-opacity, 0.78) * 90%), transparent);
-  backdrop-filter: blur(var(--glass-blur, 12px));
 }
 
 .app-shell.has-wallpaper .right-panel {
-  background-color: color-mix(in srgb, var(--panel-bg) calc(var(--glass-opacity, 0.78) * 84%), transparent);
-  backdrop-filter: blur(var(--glass-blur, 12px));
+  background-color: color-mix(in srgb, var(--panel-bg) calc(var(--glass-opacity, 0.78) * 86%), transparent);
 }
 
 .app-shell.has-wallpaper .right-panel-header {
@@ -131,7 +129,6 @@ body,
 .app-shell.has-wallpaper .search-box,
 .app-shell.has-wallpaper .workspace-tab-strip {
   background: color-mix(in srgb, var(--card-bg) calc(var(--glass-opacity, 0.78) * 96%), transparent);
-  backdrop-filter: blur(calc(var(--glass-blur, 12px) * 0.7));
 }
 
 .app-shell.no-right-panel {
@@ -305,6 +302,8 @@ body,
   position: relative;
   min-width: 0;
   max-width: 100%;
+  contain: layout style;
+  will-change: scroll-position;
 }
 
 .main-canvas > * {
@@ -643,10 +642,13 @@ body,
   width: 100%;
   min-width: 0;
   max-width: 100%;
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: 165px 285px;
 }
 
 .book-card:hover {
-  transform: translateY(-5px);
+  transform: translateY(-4px);
 }
 
 .book-hardcover-wrap {
@@ -665,11 +667,10 @@ body,
   padding: 0 0 14px 6px;
   box-shadow: var(--shadow-book);
   overflow: visible;
-  transition: box-shadow 0.2s ease;
 }
 
 .book-card:hover .book-hardcover {
-  box-shadow: 0 16px 28px rgba(58, 44, 34, 0.23);
+  box-shadow: var(--shadow-book);
 }
 
 .book-cover-img-box {
@@ -4681,6 +4682,9 @@ mark.komo-mark-postit.komo-variant-translucent,
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 76px;
   transition: transform 0.14s ease, border-color 0.14s ease;
 }
 

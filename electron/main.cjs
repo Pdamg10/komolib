@@ -3,6 +3,24 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// GPU & Wayland hardware-acceleration tuning for smooth 60-144 FPS on Linux (Wayland/X11) & Windows
+app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch(
+  'enable-features',
+  'WaylandWindowDecorations,CanvasOopRasterization,VaapiVideoDecoder'
+);
+
+app.setName('Komolib');
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.komolib.reader');
+}
+if (process.platform === 'linux' && typeof app.setDesktopName === 'function') {
+  app.setDesktopName('komolib.desktop');
+}
+
 const DIST_DIR = path.join(__dirname, '..', 'dist');
 const PREFERRED_PORT = 41735;
 
@@ -27,6 +45,7 @@ const MIME_TYPES = {
 
 let mainWindow = null;
 let localServer = null;
+const staticCache = new Map();
 
 function createOAuthBridgeHtml() {
   return `<!doctype html>
@@ -70,6 +89,22 @@ function createOAuthBridgeHtml() {
   </script>
 </body>
 </html>`;
+}
+
+function readCachedAsset(filePath) {
+  let cached = staticCache.get(filePath);
+  if (cached) return cached;
+  const buf = fs.readFileSync(filePath);
+  const ext = path.extname(filePath).toLowerCase();
+  cached = {
+    buf,
+    contentType: MIME_TYPES[ext] || 'application/octet-stream',
+    cacheControl: ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+  };
+  if (buf.byteLength <= 4 * 1024 * 1024) {
+    staticCache.set(filePath, cached);
+  }
+  return cached;
 }
 
 function startStaticServer() {
@@ -116,7 +151,7 @@ function startStaticServer() {
         return;
       }
 
-      // Serve static files from dist/
+      // Serve static files from dist/ with fast in-memory caching
       const safeRel = pathname === '/' ? '/index.html' : pathname;
       let filePath = path.normalize(path.join(DIST_DIR, safeRel));
       if (!filePath.startsWith(DIST_DIR)) {
@@ -127,17 +162,22 @@ function startStaticServer() {
       if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
         filePath = path.join(DIST_DIR, 'index.html');
       }
-      const ext = path.extname(filePath).toLowerCase();
-      res.writeHead(200, {
-        'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
-        'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000',
-      });
-      fs.createReadStream(filePath).pipe(res);
+      try {
+        const asset = readCachedAsset(filePath);
+        res.writeHead(200, {
+          'Content-Type': asset.contentType,
+          'Content-Length': String(asset.buf.byteLength),
+          'Cache-Control': asset.cacheControl,
+        });
+        res.end(asset.buf);
+      } catch {
+        res.writeHead(404);
+        res.end('Not found');
+      }
     });
 
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
-        // Fallback to any free localhost port if 41735 is busy
         server.listen(0, '127.0.0.1', () => {
           const addr = server.address();
           resolve({ server, port: addr.port });
@@ -161,6 +201,7 @@ async function createWindow(port) {
     height: 840,
     minWidth: 860,
     minHeight: 600,
+    show: false,
     title: 'Komolib',
     icon: fs.existsSync(iconPath) ? iconPath : undefined,
     backgroundColor: '#f3ede4',
@@ -170,10 +211,15 @@ async function createWindow(port) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      backgroundThrottling: false,
     },
   });
 
   mainWindow = win;
+
+  win.once('ready-to-show', () => {
+    win.show();
+  });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) {

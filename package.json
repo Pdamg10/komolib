@@ -1,6 +1,9 @@
 {
   "name": "komolib",
   "version": "1.12.0",
+  "description": "KomoLib — Librería universal multi-formato personalizable",
+  "author": "KomoLib",
+  "desktopName": "komolib.desktop",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -35,6 +38,7 @@
       ],
       "icon": "electron/icon.png",
       "category": "Education",
+      "syncDesktopName": true,
       "artifactName": "Komolib-${version}.AppImage"
     },
     "win": {
