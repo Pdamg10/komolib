@@ -483,6 +483,8 @@ app.post('/api/ai/chat', async (req, res) => {
     annotations = [],
     activeBook = null,
     profileName = '',
+    aiProfile = null,
+    tasteSummary = '',
   } = req.body || {};
   const userMessage = typeof message === 'string' ? message.trim() : '';
   if (!userMessage) {
@@ -525,9 +527,41 @@ app.post('/api/ai/chat', async (req, res) => {
     : '';
   const readerInfo = profileName ? `\nNombre del lector: ${String(profileName).slice(0, 40)}.` : '';
 
-  const systemPrompt = `Eres el asistente literario inteligente de KomoLib. Responde siempre en español de forma cálida, útil y concisa.${readerInfo}
-Puedes recomendar lecturas, resumir ideas, analizar citas o post-its que el usuario haya marcado, sugerir libros de su estantería, ayudar con metas de lectura, reseñas o responder preguntas sobre libros, mangas y manhwas.
-No inventes títulos que no existan si te preguntan específicamente qué hay en su biblioteca.${activeInfo}
+  const aiProf = aiProfile && typeof aiProfile === 'object' ? aiProfile : null;
+  const styleGuide =
+    aiProf?.preferredStyle === 'concise'
+      ? 'Responde de forma breve, directa y muy clara (máximo 3 a 5 líneas o 3 puntos cortos).'
+      : aiProf?.preferredStyle === 'detailed'
+      ? 'Responde con buen nivel de detalle, bien organizado en párrafos cortos y claros.'
+      : 'Responde de forma equilibrada, clara y natural, sin relleno.';
+  const spoilerRule =
+    aiProf?.avoidSpoilers === false
+      ? 'Puedes incluir spoilers solo si la consulta lo pide.'
+      : 'Evita spoilers de trama a menos que te los pidan explícitamente.';
+  const learnedParts = [];
+  if (Array.isArray(aiProf?.likedTopics) && aiProf.likedTopics.length) {
+    learnedParts.push(`Temas/géneros preferidos: ${aiProf.likedTopics.slice(0, 8).join(', ')}.`);
+  }
+  if (Array.isArray(aiProf?.dislikedTopics) && aiProf.dislikedTopics.length) {
+    learnedParts.push(`Evitar recomendar: ${aiProf.dislikedTopics.slice(0, 8).join(', ')}.`);
+  }
+  if (Array.isArray(aiProf?.learnedNotes) && aiProf.learnedNotes.length) {
+    learnedParts.push(`Preferencias aprendidas: ${aiProf.learnedNotes.slice(0, 6).join(' | ')}`);
+  }
+  if (typeof tasteSummary === 'string' && tasteSummary.trim()) {
+    learnedParts.push(`Patrón real de lectura: ${tasteSummary.trim().slice(0, 400)}`);
+  }
+
+  const systemPrompt = `Eres el asistente literario personal de KomoLib. Responde siempre en español natural, cercano y claro.${readerInfo}
+REGLAS ESTRICTAS DE FORMATO:
+- NUNCA uses asteriscos (*, **, ***) ni almohadillas (#) ni sintaxis Markdown cruda.
+- Escribe texto limpio con párrafos cortos. Si haces una lista, usa viñetas con "• " o numeración "1. ", "2. ".
+- ${styleGuide}
+- ${spoilerRule}
+Puedes recomendar lecturas, resumir ideas, analizar citas o post-its que haya marcado, sugerir libros de su estantería, ayudar con metas de lectura, reseñas o responder preguntas sobre libros, mangas y manhwas.
+No inventes títulos que no existan si te preguntan específicamente qué hay en su biblioteca.${activeInfo}${
+    learnedParts.length ? `\n\nPerfil aprendido del usuario:\n${learnedParts.join('\n')}` : ''
+  }
 
 Biblioteca actual del usuario:
 ${catalogSummary}
@@ -581,11 +615,20 @@ ${notesSummary}`;
 
     const data = await response.json();
     const parts = data?.candidates?.[0]?.content?.parts || [];
-    const reply =
+    const rawReply =
       parts
         .map((p) => (typeof p?.text === 'string' ? p.text : ''))
         .join('')
         .trim() || 'Listo, pero no recibí texto del modelo.';
+    const reply =
+      rawReply
+        .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+        .replace(/^\s*[*+]\s+/gm, '• ')
+        .replace(/\*\*\*([^*\n]+?)\*\*\*/g, '$1')
+        .replace(/\*\*([^*\n]+?)\*\*/g, '$1')
+        .replace(/\*/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim() || rawReply;
 
     // Detect books from the user's library mentioned in the reply or query
     const lowerCombined = `${userMessage} ${reply}`.toLowerCase();
@@ -1245,6 +1288,42 @@ app.put('/api/sync/state', (req, res) => {
         (incomingReaderTs > 0 && incomingReaderTs >= currentReaderTs))
   );
 
+  const incomingStationeryTs = Number(incoming.customStationeryUpdatedAt || 0);
+  const currentStationeryTs = Number(current.customStationeryUpdatedAt || 0);
+  const useIncomingStationery = Boolean(
+    incoming.customStationery &&
+      (!current.customStationery ||
+        (incomingStationeryTs > 0 && incomingStationeryTs >= currentStationeryTs))
+  );
+
+  const incomingCategoriesTs = Number(incoming.categoriesUpdatedAt || 0);
+  const currentCategoriesTs = Number(current.categoriesUpdatedAt || 0);
+  const useIncomingCategories = Boolean(
+    Array.isArray(incoming.categories) &&
+      incoming.categories.length > 0 &&
+      (!Array.isArray(current.categories) ||
+        current.categories.length === 0 ||
+        (incomingCategoriesTs > 0 && incomingCategoriesTs >= currentCategoriesTs))
+  );
+
+  const incomingCollectionsTs = Number(incoming.collectionsUpdatedAt || 0);
+  const currentCollectionsTs = Number(current.collectionsUpdatedAt || 0);
+  const useIncomingCollections = Boolean(
+    Array.isArray(incoming.collections) &&
+      incoming.collections.length > 0 &&
+      (!Array.isArray(current.collections) ||
+        current.collections.length === 0 ||
+        (incomingCollectionsTs > 0 && incomingCollectionsTs >= currentCollectionsTs))
+  );
+
+  const incomingAiProfileTs = Number(incoming.aiProfileUpdatedAt || 0);
+  const currentAiProfileTs = Number(current.aiProfileUpdatedAt || 0);
+  const useIncomingAiProfile = Boolean(
+    incoming.aiProfile &&
+      (!current.aiProfile ||
+        (incomingAiProfileTs > 0 && incomingAiProfileTs >= currentAiProfileTs))
+  );
+
   const normCode = (c) => String(c || '').trim().toUpperCase();
   const closedRoomCodes = Array.from(
     new Set(
@@ -1349,15 +1428,22 @@ app.put('/api/sync/state', (req, res) => {
           deletedBookmarkDesignsSet
         )
       : (current.customBookmarkDesigns || []).filter((x) => !deletedBookmarkDesignsSet.has(x.id)),
-    customStationery: incoming.customStationery || current.customStationery || null,
-    categories: incoming.categories || current.categories,
-    collections: incoming.collections || current.collections || null,
+    customStationery: useIncomingStationery
+      ? incoming.customStationery
+      : current.customStationery || null,
+    customStationeryUpdatedAt: useIncomingStationery ? incomingStationeryTs : currentStationeryTs,
+    categories: useIncomingCategories ? incoming.categories : current.categories,
+    categoriesUpdatedAt: useIncomingCategories ? incomingCategoriesTs : currentCategoriesTs,
+    collections: useIncomingCollections ? incoming.collections : current.collections || null,
+    collectionsUpdatedAt: useIncomingCollections ? incomingCollectionsTs : currentCollectionsTs,
     readerSettings: useIncomingReaderSettings ? incoming.readerSettings : current.readerSettings || null,
     readerSettingsUpdatedAt: useIncomingReaderSettings ? incomingReaderTs : currentReaderTs,
     theme: useIncomingTheme ? resolvedIncomingTheme : current.theme,
     themeUpdatedAt: useIncomingTheme ? incomingThemeTs : currentThemeTs,
     profile: useIncomingProfile ? incoming.profile : current.profile,
     profileUpdatedAt: useIncomingProfile ? incomingProfileTs : currentProfileTs,
+    aiProfile: useIncomingAiProfile ? incoming.aiProfile : current.aiProfile || null,
+    aiProfileUpdatedAt: useIncomingAiProfile ? incomingAiProfileTs : currentAiProfileTs,
     lastActiveSession: mergedSession,
     deletedBookIds,
     deletedBookmarkIds,

@@ -51,15 +51,15 @@ function getReadingBucket(book: BookItem): Exclude<ReadingFilterKey, 'all'> {
 }
 
 function isLowEndBatchSize(): number {
-  if (typeof navigator === 'undefined') return 36;
+  if (typeof navigator === 'undefined') return 28;
   const nav = navigator as Navigator & { deviceMemory?: number };
   const lowMem = typeof nav.deviceMemory === 'number' && nav.deviceMemory <= 4;
   const lowCpu = typeof nav.hardwareConcurrency === 'number' && nav.hardwareConcurrency <= 4;
   const narrow = typeof window !== 'undefined' && window.innerWidth <= 900;
-  return lowMem || lowCpu || narrow ? 24 : 40;
+  return lowMem || lowCpu || narrow ? 20 : 30;
 }
 
-export const BookShelf: React.FC = () => {
+const BookShelfInner: React.FC = () => {
   const {
     books,
     navSection,
@@ -237,7 +237,7 @@ export const BookShelf: React.FC = () => {
           setVisibleCount((c) => Math.min(sortedBooks.length, c + renderBatch));
         }
       },
-      { rootMargin: '240px' }
+      { rootMargin: '320px' }
     );
     observer.observe(sentinelRef.current);
     return () => observer.disconnect();
@@ -640,3 +640,5 @@ export const BookShelf: React.FC = () => {
     </section>
   );
 };
+
+export const BookShelf = React.memo(BookShelfInner);

@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   dbClearAllUserData,
   dbDeleteAnnotation,
@@ -149,8 +149,15 @@ import type {
   ShareMarksSelection,
   SyncConfig,
   ThemeConfig,
+  UserAiProfile,
   UserProfile,
 } from '../types/library';
+import {
+  DEFAULT_USER_AI_PROFILE,
+  deriveReaderTasteSummary,
+  learnFromInteraction,
+  sanitizeAiReplyText,
+} from '../utils/aiAssistantUtils';
 
 export type RightPanelTab = 'chat' | 'notes';
 
@@ -269,6 +276,9 @@ interface LibraryContextValue {
   deleteChatSession: (id: string) => void;
   aiOnline: boolean;
   aiModelName: string;
+  aiProfile: UserAiProfile;
+  provideAiFeedback: (feedback: 'shorter' | 'detailed' | 'no-spoilers' | 'helpful') => void;
+  resetAiProfile: () => void;
   // Sync & Live Continuity (Web <-> APK)
   deviceId: string;
   sharedUserId: string;
@@ -797,6 +807,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [pendingShelfCode, setPendingShelfCode] = useState('');
   const [aiOnline, setAiOnline] = useState(false);
   const [aiModelName, setAiModelName] = useState('');
+  const [aiProfile, setAiProfile] = useState<UserAiProfile>(DEFAULT_USER_AI_PROFILE);
   const [googleDriveAuth, setGoogleDriveAuth] = useState<GoogleDriveAuth | null>(() =>
     readCachedGoogleDriveAuth()
   );
@@ -823,6 +834,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const themeUpdatedAtRef = useRef<number>(0);
   const profileUpdatedAtRef = useRef<number>(0);
   const readerSettingsUpdatedAtRef = useRef<number>(readCachedReaderSettings()?.updatedAt || 0);
+  const categoriesUpdatedAtRef = useRef<number>(0);
+  const collectionsUpdatedAtRef = useRef<number>(0);
+  const customStationeryUpdatedAtRef = useRef<number>(0);
+  const aiProfileUpdatedAtRef = useRef<number>(0);
   const lastSyncedWallpaperRef = useRef<string>('');
   const syncedCoverSigRef = useRef<Map<string, string>>(new Map());
   const syncedBookUpdatedAtRef = useRef<Map<string, number>>(new Map());
@@ -871,6 +886,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     readerSettings,
     theme,
     profile,
+    aiProfile,
     syncConfig,
     googleDriveAuth,
     deviceId,
@@ -892,6 +908,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     readerSettings,
     theme,
     profile,
+    aiProfile,
     syncConfig,
     googleDriveAuth,
     deviceId,
@@ -1015,6 +1032,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         savedProfileTs,
         savedReaderSettingsTs,
         savedGoogleDriveAuth,
+        savedCategoriesTs,
+        savedCollectionsTs,
+        savedStationeryTs,
+        savedAiProfile,
+        savedAiProfileTs,
       ] = await Promise.all([
         dbGetKV<ThemeConfig>('theme'),
         dbGetKV<CategoryItem[]>('categories'),
@@ -1049,6 +1071,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dbGetKV<number>('profileUpdatedAt'),
         dbGetKV<number>('readerSettingsUpdatedAt'),
         dbGetKV<GoogleDriveAuth | null>('googleDriveAuth'),
+        dbGetKV<number>('categoriesUpdatedAt'),
+        dbGetKV<number>('collectionsUpdatedAt'),
+        dbGetKV<number>('customStationeryUpdatedAt'),
+        dbGetKV<UserAiProfile>('aiProfile'),
+        dbGetKV<number>('aiProfileUpdatedAt'),
       ]);
 
       const cachedDriveAuth = readCachedGoogleDriveAuth();
@@ -1075,6 +1102,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       if (typeof savedThemeTs === 'number') themeUpdatedAtRef.current = savedThemeTs;
       if (typeof savedProfileTs === 'number') profileUpdatedAtRef.current = savedProfileTs;
+      if (typeof savedCategoriesTs === 'number') categoriesUpdatedAtRef.current = savedCategoriesTs;
+      if (typeof savedCollectionsTs === 'number') collectionsUpdatedAtRef.current = savedCollectionsTs;
+      if (typeof savedStationeryTs === 'number') customStationeryUpdatedAtRef.current = savedStationeryTs;
+      if (typeof savedAiProfileTs === 'number') aiProfileUpdatedAtRef.current = savedAiProfileTs;
+      if (savedAiProfile && typeof savedAiProfile === 'object') {
+        const hydratedAi: UserAiProfile = { ...DEFAULT_USER_AI_PROFILE, ...savedAiProfile };
+        stateRef.current.aiProfile = hydratedAi;
+        setAiProfile(hydratedAi);
+        if (!aiProfileUpdatedAtRef.current && hydratedAi.updatedAt) {
+          aiProfileUpdatedAtRef.current = hydratedAi.updatedAt;
+        }
+      }
       const cachedReader = readCachedReaderSettings();
       const dbReaderTs = typeof savedReaderSettingsTs === 'number' ? savedReaderSettingsTs : 0;
       const bestReaderTs = Math.max(dbReaderTs, cachedReader?.updatedAt || 0);
@@ -1835,13 +1874,22 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           for (const bm of current.bookmarks) {
             if (!deletedBookmarkSet.has(bm.id)) bmMap.set(bm.id, bm);
           }
+          let bmChanged = deletedBookmarkSet.size > 0;
           for (const bm of merged.bookmarks) {
             if (!deletedBookmarkSet.has(bm.id)) {
-              await dbPutBookmark(bm);
-              bmMap.set(bm.id, bm);
+              const prev = bmMap.get(bm.id);
+              if (!prev || JSON.stringify(prev) !== JSON.stringify(bm)) {
+                await dbPutBookmark(bm);
+                bmMap.set(bm.id, bm);
+                bmChanged = true;
+              }
             }
           }
-          setBookmarks(Array.from(bmMap.values()).sort((a, b) => b.createdAt - a.createdAt));
+          if (bmChanged || bmMap.size !== current.bookmarks.length) {
+            const nextBookmarks = Array.from(bmMap.values()).sort((a, b) => b.createdAt - a.createdAt);
+            stateRef.current.bookmarks = nextBookmarks;
+            setBookmarks(nextBookmarks);
+          }
         }
 
         if (merged.annotations) {
@@ -1852,6 +1900,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           for (const a of current.annotations) {
             if (!deletedAnnotationSet.has(a.id)) annMap.set(a.id, a);
           }
+          let annChanged = deletedAnnotationSet.size > 0;
           for (const a of merged.annotations) {
             if (!deletedAnnotationSet.has(a.id)) {
               const prev = annMap.get(a.id);
@@ -1860,12 +1909,19 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 forceRestore ||
                 (a.updatedAt || a.createdAt) >= (prev.updatedAt || prev.createdAt)
               ) {
-                await dbPutAnnotation(a);
-                annMap.set(a.id, a);
+                if (!prev || JSON.stringify(prev) !== JSON.stringify(a)) {
+                  await dbPutAnnotation(a);
+                  annMap.set(a.id, a);
+                  annChanged = true;
+                }
               }
             }
           }
-          setAnnotations(Array.from(annMap.values()).sort((a, b) => b.createdAt - a.createdAt));
+          if (annChanged || annMap.size !== current.annotations.length) {
+            const nextAnnotations = Array.from(annMap.values()).sort((a, b) => b.createdAt - a.createdAt);
+            stateRef.current.annotations = nextAnnotations;
+            setAnnotations(nextAnnotations);
+          }
         }
 
         if (merged.customBookmarkDesigns) {
@@ -1877,29 +1933,56 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             if (!deletedDesignSet.has(d.id)) designMap.set(d.id, d);
           }
           const mergedDesigns = Array.from(designMap.values());
-          setCustomBookmarkDesigns(mergedDesigns);
-          await dbSetKV('customBookmarkDesigns', mergedDesigns);
+          if (JSON.stringify(mergedDesigns) !== JSON.stringify(current.customBookmarkDesigns)) {
+            stateRef.current.customBookmarkDesigns = mergedDesigns;
+            setCustomBookmarkDesigns(mergedDesigns);
+            await dbSetKV('customBookmarkDesigns', mergedDesigns);
+          }
         }
 
         if (merged.customStationery) {
-          const currSt = current.customStationery;
-          const swMap = new Map<string, CustomSwatchItem>();
-          for (const s of currSt.swatches || []) swMap.set(s.id, s);
-          for (const s of merged.customStationery.swatches || []) swMap.set(s.id, s);
-          const stkMap = new Map<string, CustomStickerItem>();
-          for (const s of currSt.stickers || []) stkMap.set(s.id, s);
-          for (const s of merged.customStationery.stickers || []) stkMap.set(s.id, s);
-          const emSet = new Set([
-            ...(merged.customStationery.emojis || []),
-            ...(currSt.emojis || []),
-          ]);
-          const nextSt: CustomStationeryKit = {
-            swatches: Array.from(swMap.values()),
-            stickers: Array.from(stkMap.values()),
-            emojis: Array.from(emSet),
-          };
-          setCustomStationery(nextSt);
-          await dbSetKV('customStationery', nextSt);
+          const remoteStTs = Number(merged.customStationeryUpdatedAt || 0);
+          let nextSt: CustomStationeryKit;
+          if (
+            forceRestore ||
+            (remoteStTs > 0 && remoteStTs >= customStationeryUpdatedAtRef.current)
+          ) {
+            // Remote stationery has a newer authoritative snapshot (honors deletions too!)
+            nextSt = {
+              swatches: Array.isArray(merged.customStationery.swatches) ? merged.customStationery.swatches : [],
+              stickers: Array.isArray(merged.customStationery.stickers) ? merged.customStationery.stickers : [],
+              emojis: Array.isArray(merged.customStationery.emojis) ? merged.customStationery.emojis : [],
+            };
+            if (remoteStTs > 0) {
+              customStationeryUpdatedAtRef.current = remoteStTs;
+              await dbSetKV('customStationeryUpdatedAt', remoteStTs);
+            }
+          } else if (!customStationeryUpdatedAtRef.current) {
+            // Legacy merge when neither side had a timestamp yet
+            const currSt = current.customStationery;
+            const swMap = new Map<string, CustomSwatchItem>();
+            for (const s of currSt.swatches || []) swMap.set(s.id, s);
+            for (const s of merged.customStationery.swatches || []) swMap.set(s.id, s);
+            const stkMap = new Map<string, CustomStickerItem>();
+            for (const s of currSt.stickers || []) stkMap.set(s.id, s);
+            for (const s of merged.customStationery.stickers || []) stkMap.set(s.id, s);
+            const emSet = new Set([
+              ...(merged.customStationery.emojis || []),
+              ...(currSt.emojis || []),
+            ]);
+            nextSt = {
+              swatches: Array.from(swMap.values()),
+              stickers: Array.from(stkMap.values()),
+              emojis: Array.from(emSet),
+            };
+          } else {
+            nextSt = current.customStationery;
+          }
+          if (JSON.stringify(nextSt) !== JSON.stringify(current.customStationery)) {
+            stateRef.current.customStationery = nextSt;
+            setCustomStationery(nextSt);
+            await dbSetKV('customStationery', nextSt);
+          }
         }
 
         if (merged.notes) {
@@ -1910,6 +1993,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           for (const n of current.notes) {
             if (!deletedNoteSet.has(n.id)) noteMap.set(n.id, n);
           }
+          let noteChanged = deletedNoteSet.size > 0;
           for (const n of merged.notes) {
             if (!deletedNoteSet.has(n.id)) {
               const prev = noteMap.get(n.id);
@@ -1918,16 +2002,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 forceRestore ||
                 (n.updatedAt || n.createdAt) >= (prev.updatedAt || prev.createdAt)
               ) {
-                await dbPutNote(n);
-                noteMap.set(n.id, n);
+                if (!prev || JSON.stringify(prev) !== JSON.stringify(n)) {
+                  await dbPutNote(n);
+                  noteMap.set(n.id, n);
+                  noteChanged = true;
+                }
               }
             }
           }
-          setNotes(
-            Array.from(noteMap.values()).sort(
+          if (noteChanged || noteMap.size !== current.notes.length) {
+            const nextNotes = Array.from(noteMap.values()).sort(
               (a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)
-            )
-          );
+            );
+            stateRef.current.notes = nextNotes;
+            setNotes(nextNotes);
+          }
         }
 
         if (Array.isArray(merged.chatSessions)) {
@@ -1954,27 +2043,67 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           if (mergedSessions.length === 0) {
             mergedSessions = [createFreshChatSession(INITIAL_CHAT_MESSAGES)];
           }
-          setChatSessions(mergedSessions);
-          await dbSetKV('chatSessions', mergedSessions);
+          if (JSON.stringify(mergedSessions) !== JSON.stringify(current.chatSessions)) {
+            stateRef.current.chatSessions = mergedSessions;
+            setChatSessions(mergedSessions);
+            await dbSetKV('chatSessions', mergedSessions);
+          }
           if (!mergedSessions.some((cs) => cs.id === current.activeChatSessionId)) {
+            stateRef.current.activeChatSessionId = mergedSessions[0].id;
             setActiveChatSessionId(mergedSessions[0].id);
             await dbSetKV('activeChatSessionId', mergedSessions[0].id);
           }
         }
 
+        const remoteCatsTs = Number(merged.categoriesUpdatedAt || 0);
         if (
           merged.categories?.length &&
+          (forceRestore ||
+            !categoriesUpdatedAtRef.current ||
+            (remoteCatsTs > 0 && remoteCatsTs >= categoriesUpdatedAtRef.current)) &&
           JSON.stringify(merged.categories) !== JSON.stringify(current.categories)
         ) {
+          if (remoteCatsTs > 0) {
+            categoriesUpdatedAtRef.current = remoteCatsTs;
+            await dbSetKV('categoriesUpdatedAt', remoteCatsTs);
+          }
+          stateRef.current.categories = merged.categories;
           setCategories(merged.categories);
           await dbSetKV('categories', merged.categories);
         }
+        const remoteColsTs = Number(merged.collectionsUpdatedAt || 0);
         if (
           merged.collections?.length &&
+          (forceRestore ||
+            !collectionsUpdatedAtRef.current ||
+            (remoteColsTs > 0 && remoteColsTs >= collectionsUpdatedAtRef.current)) &&
           JSON.stringify(merged.collections) !== JSON.stringify(current.collections)
         ) {
+          if (remoteColsTs > 0) {
+            collectionsUpdatedAtRef.current = remoteColsTs;
+            await dbSetKV('collectionsUpdatedAt', remoteColsTs);
+          }
+          stateRef.current.collections = merged.collections;
           setCollections(merged.collections);
           await dbSetKV('collections', merged.collections);
+        }
+        const remoteAiTs = Number(merged.aiProfileUpdatedAt || merged.aiProfile?.updatedAt || 0);
+        if (
+          merged.aiProfile &&
+          (forceRestore ||
+            !aiProfileUpdatedAtRef.current ||
+            (remoteAiTs > 0 && remoteAiTs >= aiProfileUpdatedAtRef.current))
+        ) {
+          const nextAi: UserAiProfile = { ...DEFAULT_USER_AI_PROFILE, ...merged.aiProfile };
+          if (remoteAiTs > 0) {
+            aiProfileUpdatedAtRef.current = remoteAiTs;
+            await dbSetKV('aiProfileUpdatedAt', remoteAiTs);
+          }
+          if (JSON.stringify(nextAi) !== JSON.stringify(current.aiProfile)) {
+            stateRef.current.aiProfile = nextAi;
+            setAiProfile(nextAi);
+            await dbSetKV('aiProfile', nextAi);
+          }
         }
         const remoteReaderTs = Number(merged.readerSettingsUpdatedAt || 0);
         const shouldApplyRemoteReader = Boolean(
@@ -2270,6 +2399,23 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             }
           }
 
+          const hasCustomStationery =
+            customStationeryUpdatedAtRef.current > 0 ||
+            s.customStationery.swatches.length > 0 ||
+            s.customStationery.stickers.length > 0 ||
+            s.customStationery.emojis.length > 0;
+          const pushCategories =
+            sendPersonalization &&
+            (categoriesUpdatedAtRef.current > 0 ||
+              JSON.stringify(s.categories) !== JSON.stringify(DEFAULT_CATEGORIES));
+          const pushCollections =
+            sendPersonalization &&
+            (collectionsUpdatedAtRef.current > 0 ||
+              JSON.stringify(s.collections) !== JSON.stringify(DEFAULT_COLLECTIONS));
+          const pushAiProfile =
+            (sendPersonalization || sendChat) &&
+            (aiProfileUpdatedAtRef.current > 0 || s.aiProfile.interactionCount > 0);
+
           const syncPayloadData = {
             deviceId: s.deviceId,
             books: booksToSend,
@@ -2278,15 +2424,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             notes: sendNotes ? s.notes : undefined,
             chatSessions: syncableChats,
             customBookmarkDesigns: sendMarks ? s.customBookmarkDesigns : undefined,
-            customStationery: sendMarks ? s.customStationery : undefined,
-            categories: sendPersonalization ? s.categories : undefined,
-            collections: sendPersonalization ? s.collections : undefined,
+            customStationery: sendMarks && hasCustomStationery ? s.customStationery : undefined,
+            customStationeryUpdatedAt:
+              sendMarks && hasCustomStationery ? customStationeryUpdatedAtRef.current || 0 : 0,
+            categories: pushCategories ? s.categories : undefined,
+            categoriesUpdatedAt: pushCategories ? categoriesUpdatedAtRef.current || 0 : 0,
+            collections: pushCollections ? s.collections : undefined,
+            collectionsUpdatedAt: pushCollections ? collectionsUpdatedAtRef.current || 0 : 0,
             readerSettings: sendPersonalization ? s.readerSettings : undefined,
             readerSettingsUpdatedAt: sendPersonalization ? readerSettingsUpdatedAtRef.current || 0 : 0,
             theme: pushTheme ? s.theme : null,
             themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
             profile: pushProfile ? s.profile : null,
             profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
+            aiProfile: pushAiProfile ? s.aiProfile : null,
+            aiProfileUpdatedAt: pushAiProfile ? aiProfileUpdatedAtRef.current || s.aiProfile.updatedAt || Date.now() : 0,
             lastActiveSession: localActiveSessionRef.current,
             deletedBookIds: sentBooks,
             deletedBookmarkIds: sentBookmarks,
@@ -2644,12 +2796,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const addCategory = useCallback(
     (cat: Omit<CategoryItem, 'id'>) => {
-      const id = `cat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      setCategories((prev) => {
-        const next = [...prev, { ...cat, id }];
-        dbSetKV('categories', next).catch(console.error);
-        return next;
-      });
+      const ts = Date.now();
+      categoriesUpdatedAtRef.current = ts;
+      dbSetKV('categoriesUpdatedAt', ts).catch(console.error);
+      const id = `cat_${ts}_${Math.random().toString(36).slice(2, 6)}`;
+      const next = [...stateRef.current.categories, { ...cat, id }];
+      stateRef.current.categories = next;
+      setCategories(next);
+      dbSetKV('categories', next).catch(console.error);
       showToast(`Categoría "${cat.label}" añadida`);
       scheduleAutoSync(false, 'personalization');
     },
@@ -2658,11 +2812,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const deleteCategory = useCallback(
     (id: string) => {
-      setCategories((prev) => {
-        const next = prev.filter((c) => c.id !== id || c.id === 'all');
-        dbSetKV('categories', next).catch(console.error);
-        return next;
-      });
+      const ts = Date.now();
+      categoriesUpdatedAtRef.current = ts;
+      dbSetKV('categoriesUpdatedAt', ts).catch(console.error);
+      const next = stateRef.current.categories.filter((c) => c.id !== id || c.id === 'all');
+      stateRef.current.categories = next;
+      setCategories(next);
+      dbSetKV('categories', next).catch(console.error);
       setActiveCategory((curr) => (curr === id ? 'all' : curr));
       scheduleAutoSync(false, 'personalization');
     },
@@ -2671,11 +2827,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const updateCollection = useCallback(
     (id: string, patch: Partial<CollectionCard>) => {
-      setCollections((prev) => {
-        const next = prev.map((c) => (c.id === id ? { ...c, ...patch } : c));
-        dbSetKV('collections', next).catch(console.error);
-        return next;
-      });
+      const ts = Date.now();
+      collectionsUpdatedAtRef.current = ts;
+      dbSetKV('collectionsUpdatedAt', ts).catch(console.error);
+      const next = stateRef.current.collections.map((c) => (c.id === id ? { ...c, ...patch } : c));
+      stateRef.current.collections = next;
+      setCollections(next);
+      dbSetKV('collections', next).catch(console.error);
       scheduleAutoSync(false, 'personalization');
     },
     [scheduleAutoSync]
@@ -3918,9 +4076,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         createdAt: Date.now(),
       };
       await dbPutBookmark(item);
-      setBookmarks((prev) => [item, ...prev]);
+      const next = [item, ...stateRef.current.bookmarks];
+      stateRef.current.bookmarks = next;
+      setBookmarks(next);
       showToast('Marcador guardado');
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'marks');
       return item;
     },
     [scheduleAutoSync, showToast]
@@ -3931,9 +4091,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       await dbDeleteBookmark(id);
       if (!deletedBookmarkIdsRef.current.includes(id)) deletedBookmarkIdsRef.current.push(id);
       persistPendingTombstones();
-      setBookmarks((prev) => prev.filter((b) => b.id !== id));
+      const next = stateRef.current.bookmarks.filter((b) => b.id !== id);
+      stateRef.current.bookmarks = next;
+      setBookmarks(next);
       showToast('Marcador eliminado');
-      scheduleAutoSync(true);
+      scheduleAutoSync(true, 'marks');
     },
     [persistPendingTombstones, scheduleAutoSync, showToast]
   );
@@ -3950,7 +4112,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         updatedAt: now,
       };
       await dbPutAnnotation(item);
-      setAnnotations((prev) => [item, ...prev]);
+      const next = [item, ...stateRef.current.annotations];
+      stateRef.current.annotations = next;
+      setAnnotations(next);
       showToast(
         item.tool === 'postit'
           ? 'Post-it guardado en el texto'
@@ -3958,7 +4122,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           ? 'Sticker/emoji añadido al libro'
           : 'Marca guardada en tu libro'
       );
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'marks');
       return item;
     },
     [scheduleAutoSync, showToast]
@@ -3966,15 +4130,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const updateAnnotation = useCallback(
     async (id: string, patch: Partial<BookAnnotation>) => {
-      setAnnotations((prev) => {
-        const next = prev.map((a) =>
-          a.id === id ? { ...a, ...patch, updatedAt: Date.now() } : a
-        );
-        const updated = next.find((a) => a.id === id);
-        if (updated) dbPutAnnotation(updated).catch(console.error);
-        return next;
-      });
-      scheduleAutoSync();
+      const next = stateRef.current.annotations.map((a) =>
+        a.id === id ? { ...a, ...patch, updatedAt: Date.now() } : a
+      );
+      stateRef.current.annotations = next;
+      setAnnotations(next);
+      const updated = next.find((a) => a.id === id);
+      if (updated) dbPutAnnotation(updated).catch(console.error);
+      scheduleAutoSync(false, 'marks');
     },
     [scheduleAutoSync]
   );
@@ -3984,9 +4147,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       await dbDeleteAnnotation(id);
       if (!deletedAnnotationIdsRef.current.includes(id)) deletedAnnotationIdsRef.current.push(id);
       persistPendingTombstones();
-      setAnnotations((prev) => prev.filter((a) => a.id !== id));
+      const next = stateRef.current.annotations.filter((a) => a.id !== id);
+      stateRef.current.annotations = next;
+      setAnnotations(next);
       showToast('Marca eliminada');
-      scheduleAutoSync(true);
+      scheduleAutoSync(true, 'marks');
     },
     [persistPendingTombstones, scheduleAutoSync, showToast]
   );
@@ -4003,13 +4168,12 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           builtin: false,
           createdAt: Date.now(),
         };
-        setCustomBookmarkDesigns((prev) => {
-          const next = [design, ...prev];
-          dbSetKV('customBookmarkDesigns', next).catch(console.error);
-          return next;
-        });
+        const next = [design, ...stateRef.current.customBookmarkDesigns];
+        stateRef.current.customBookmarkDesigns = next;
+        setCustomBookmarkDesigns(next);
+        dbSetKV('customBookmarkDesigns', next).catch(console.error);
         showToast(`Separador "${design.name}" añadido (comprimido localmente)`);
-        scheduleAutoSync();
+        scheduleAutoSync(false, 'marks');
         return design;
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'No se pudo procesar la imagen');
@@ -4025,25 +4189,26 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         deletedBookmarkDesignIdsRef.current.push(id);
       }
       persistPendingTombstones();
-      setCustomBookmarkDesigns((prev) => {
-        const next = prev.filter((d) => d.id !== id);
-        dbSetKV('customBookmarkDesigns', next).catch(console.error);
-        return next;
-      });
+      const next = stateRef.current.customBookmarkDesigns.filter((d) => d.id !== id);
+      stateRef.current.customBookmarkDesigns = next;
+      setCustomBookmarkDesigns(next);
+      dbSetKV('customBookmarkDesigns', next).catch(console.error);
       showToast('Separador personalizado eliminado');
-      scheduleAutoSync(true);
+      scheduleAutoSync(true, 'marks');
     },
     [persistPendingTombstones, scheduleAutoSync, showToast]
   );
 
   const persistStationery = useCallback(
     (updater: (prev: CustomStationeryKit) => CustomStationeryKit) => {
-      setCustomStationery((prev) => {
-        const next = updater(prev);
-        dbSetKV('customStationery', next).catch(console.error);
-        return next;
-      });
-      scheduleAutoSync();
+      const ts = Date.now();
+      customStationeryUpdatedAtRef.current = ts;
+      dbSetKV('customStationeryUpdatedAt', ts).catch(console.error);
+      const next = updater(stateRef.current.customStationery);
+      stateRef.current.customStationery = next;
+      setCustomStationery(next);
+      dbSetKV('customStationery', next).catch(console.error);
+      scheduleAutoSync(false, 'marks');
     },
     [scheduleAutoSync]
   );
@@ -4131,9 +4296,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         updatedAt: now,
       };
       await dbPutNote(item);
-      setNotes((prev) => [item, ...prev]);
+      const next = [item, ...stateRef.current.notes];
+      stateRef.current.notes = next;
+      setNotes(next);
       showToast('Nota guardada');
-      scheduleAutoSync();
+      scheduleAutoSync(false, 'notes');
     },
     [scheduleAutoSync, showToast]
   );
@@ -4143,11 +4310,45 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       await dbDeleteNote(id);
       if (!deletedNoteIdsRef.current.includes(id)) deletedNoteIdsRef.current.push(id);
       persistPendingTombstones();
-      setNotes((prev) => prev.filter((n) => n.id !== id));
-      scheduleAutoSync(true);
+      const next = stateRef.current.notes.filter((n) => n.id !== id);
+      stateRef.current.notes = next;
+      setNotes(next);
+      scheduleAutoSync(true, 'notes');
     },
     [persistPendingTombstones, scheduleAutoSync]
   );
+
+  const provideAiFeedback = useCallback(
+    (feedback: 'shorter' | 'detailed' | 'no-spoilers' | 'helpful') => {
+      const { next, changed } = learnFromInteraction(stateRef.current.aiProfile, '', feedback);
+      if (!changed) return;
+      aiProfileUpdatedAtRef.current = next.updatedAt;
+      stateRef.current.aiProfile = next;
+      setAiProfile(next);
+      dbSetKV('aiProfile', next).catch(console.error);
+      dbSetKV('aiProfileUpdatedAt', next.updatedAt).catch(console.error);
+      scheduleAutoSync(false, 'personalization');
+      const labels: Record<typeof feedback, string> = {
+        shorter: 'IA ajustada: respuestas más breves y directas',
+        detailed: 'IA ajustada: respuestas con más detalle',
+        'no-spoilers': 'IA ajustada: evitar spoilers siempre',
+        helpful: 'Preferencia guardada para futuras respuestas',
+      };
+      showToast(labels[feedback]);
+    },
+    [scheduleAutoSync, showToast]
+  );
+
+  const resetAiProfile = useCallback(() => {
+    const reset: UserAiProfile = { ...DEFAULT_USER_AI_PROFILE, updatedAt: Date.now() };
+    aiProfileUpdatedAtRef.current = reset.updatedAt;
+    stateRef.current.aiProfile = reset;
+    setAiProfile(reset);
+    dbSetKV('aiProfile', reset).catch(console.error);
+    dbSetKV('aiProfileUpdatedAt', reset.updatedAt).catch(console.error);
+    scheduleAutoSync(false, 'personalization');
+    showToast('Aprendizaje de la IA reiniciado');
+  }, [scheduleAutoSync, showToast]);
 
   const sendChatMessage = useCallback(
     async (rawText: string) => {
@@ -4198,6 +4399,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const sorted = [...nextSessions]
             .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt))
             .slice(0, 60);
+          stateRef.current.chatSessions = sorted;
           dbSetKV('chatSessions', sorted).catch(console.error);
           const activeNow = sorted.find((cs) => cs.id === targetSessionId) || sorted[0];
           if (activeNow) {
@@ -4206,11 +4408,24 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           return sorted;
         });
         if (syncAfter) {
-          scheduleAutoSync();
+          scheduleAutoSync(false, 'chat');
         }
       };
 
       appendMessages([userMsg], false);
+
+      // Incrementally train the user's personal AI profile from natural cues in their message
+      const learned = learnFromInteraction(stateRef.current.aiProfile, text);
+      let activeAiProfile = stateRef.current.aiProfile;
+      if (learned.changed) {
+        activeAiProfile = learned.next;
+        aiProfileUpdatedAtRef.current = learned.next.updatedAt;
+        stateRef.current.aiProfile = learned.next;
+        setAiProfile(learned.next);
+        dbSetKV('aiProfile', learned.next).catch(console.error);
+        dbSetKV('aiProfileUpdatedAt', learned.next.updatedAt).catch(console.error);
+      }
+      const tasteSummary = deriveReaderTasteSummary(books, annotations, notes);
 
       // Quick command: /nota <texto>
       if (text.toLowerCase().startsWith('/nota ')) {
@@ -4259,7 +4474,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               messages: [
                 {
                   role: 'system',
-                  content: `Eres el asistente de lectura de KomoLib. Responde en español, conciso y cálido. Biblioteca del usuario:\n${catalog}`,
+                  content: `Eres el asistente literario de KomoLib. Responde en español natural, claro y sin usar asteriscos (*) ni almohadillas (#) ni Markdown crudo. Usa párrafos cortos y viñetas con "• ".\n${tasteSummary}\nBiblioteca actual:\n${catalog}`,
                 },
                 { role: 'user', content: text },
               ],
@@ -4276,7 +4491,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 {
                   id: `msg_${Date.now()}_a`,
                   sender: 'assistant',
-                  text: String(reply),
+                  text: sanitizeAiReplyText(String(reply)),
                   createdAt: Date.now(),
                 },
               ],
@@ -4289,7 +4504,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
-      // 2. Built-in Gemini AI assistant via local KomoLib server proxy (API key stays in .env)
+      // 2. Built-in Gemini AI assistant via KomoLib API proxy (Cloudflare Workers / Express)
       try {
         const aiRes = await sendAiChatViaServer(syncConfig, {
           message: text,
@@ -4324,6 +4539,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               }
             : null,
           profileName: profile.name,
+          aiProfile: activeAiProfile,
+          tasteSummary,
         });
         if (aiRes.ok && aiRes.reply) {
           setAiOnline(true);
@@ -4333,7 +4550,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               {
                 id: `msg_${Date.now()}_a`,
                 sender: 'assistant',
-                text: aiRes.reply,
+                text: sanitizeAiReplyText(aiRes.reply),
                 bookIds: aiRes.matchedBookIds?.length ? aiRes.matchedBookIds : undefined,
                 createdAt: Date.now(),
               },
@@ -4444,10 +4661,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           dbSetKV('activeChatSessionId', nextActive.id).catch(console.error);
           dbSetKV('chatMessages', nextActive.messages).catch(console.error);
         }
-        dbSetKV('chatSessions', next).catch(console.error);
-        return next;
-      });
-      scheduleAutoSync(true);
+          dbSetKV('chatSessions', next).catch(console.error);
+          stateRef.current.chatSessions = next;
+          return next;
+        });
+        scheduleAutoSync(true, 'chat');
     },
     [persistPendingTombstones, scheduleAutoSync]
   );
@@ -4561,6 +4779,23 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           Boolean(s.theme.customWallpaperUrl) &&
           s.theme.customWallpaperUrl === lastSyncedWallpaperRef.current;
 
+        const hasCustomStationery =
+          customStationeryUpdatedAtRef.current > 0 ||
+          s.customStationery.swatches.length > 0 ||
+          s.customStationery.stickers.length > 0 ||
+          s.customStationery.emojis.length > 0;
+        const pushCategories =
+          sendPersonalization &&
+          (categoriesUpdatedAtRef.current > 0 ||
+            JSON.stringify(s.categories) !== JSON.stringify(DEFAULT_CATEGORIES));
+        const pushCollections =
+          sendPersonalization &&
+          (collectionsUpdatedAtRef.current > 0 ||
+            JSON.stringify(s.collections) !== JSON.stringify(DEFAULT_COLLECTIONS));
+        const pushAiProfile =
+          (sendPersonalization || sendChat) &&
+          (aiProfileUpdatedAtRef.current > 0 || s.aiProfile.interactionCount > 0);
+
         const triggerPayloadData = {
           deviceId: s.deviceId,
           books: booksToSend,
@@ -4569,15 +4804,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           notes: sendNotes ? s.notes : undefined,
           chatSessions: syncableChats,
           customBookmarkDesigns: sendMarks ? s.customBookmarkDesigns : undefined,
-          customStationery: sendMarks ? s.customStationery : undefined,
-          categories: sendPersonalization ? s.categories : undefined,
-          collections: sendPersonalization ? s.collections : undefined,
+          customStationery: sendMarks && hasCustomStationery ? s.customStationery : undefined,
+          customStationeryUpdatedAt:
+            sendMarks && hasCustomStationery ? customStationeryUpdatedAtRef.current || 0 : 0,
+          categories: pushCategories ? s.categories : undefined,
+          categoriesUpdatedAt: pushCategories ? categoriesUpdatedAtRef.current || 0 : 0,
+          collections: pushCollections ? s.collections : undefined,
+          collectionsUpdatedAt: pushCollections ? collectionsUpdatedAtRef.current || 0 : 0,
           readerSettings: sendPersonalization ? s.readerSettings : undefined,
           readerSettingsUpdatedAt: sendPersonalization ? readerSettingsUpdatedAtRef.current || 0 : 0,
           theme: pushTheme ? s.theme : null,
           themeUpdatedAt: pushTheme ? themeUpdatedAtRef.current || Date.now() : 0,
           profile: pushProfile ? s.profile : null,
           profileUpdatedAt: pushProfile ? profileUpdatedAtRef.current || Date.now() : 0,
+          aiProfile: pushAiProfile ? s.aiProfile : null,
+          aiProfileUpdatedAt: pushAiProfile ? aiProfileUpdatedAtRef.current || s.aiProfile.updatedAt || Date.now() : 0,
           lastActiveSession: localActiveSessionRef.current,
           deletedBookIds: sentBooks,
           deletedBookmarkIds: sentBookmarks,
@@ -7393,152 +7634,291 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const dismissRemoteSession = useCallback(() => setRemoteActiveSession(null), []);
 
+  const contextValue = useMemo<LibraryContextValue>(
+    () => ({
+      ready,
+      books,
+      bookmarks,
+      annotations,
+      customBookmarkDesigns,
+      allBookmarkDesigns,
+      customStationery,
+      addCustomSwatch,
+      deleteCustomSwatch,
+      addCustomSticker,
+      deleteCustomSticker,
+      addCustomEmoji,
+      deleteCustomEmoji,
+      notes,
+      categories,
+      collections,
+      theme,
+      profile,
+      readerSettings,
+      syncConfig,
+      chatMessages,
+      chatSessions,
+      activeChatSessionId,
+      navSection,
+      setNavSection,
+      activeCategory,
+      setActiveCategory,
+      searchQuery,
+      setSearchQuery,
+      rightTab,
+      setRightTab,
+      mobilePanelOpen,
+      setMobilePanelOpen,
+      activeBook,
+      readerJumpTarget,
+      clearReaderJumpTarget,
+      openBook,
+      openBookAt,
+      closeReader,
+      audioBook,
+      audioUrl,
+      closeAudioPlayer,
+      editingBook,
+      setEditingBook,
+      missingFileBook,
+      setMissingFileBook,
+      importModalOpen,
+      setImportModalOpen,
+      studioModalOpen,
+      setStudioModalOpen,
+      profileModalOpen,
+      setProfileModalOpen,
+      importFiles,
+      importNativeFolderBooks,
+      duplicateBooksCount,
+      removeDuplicateBooks,
+      attachLocalFileToBook,
+      updateBook,
+      reExtractBookCover,
+      identifyBookWithAI,
+      deleteBook,
+      addBookmark,
+      deleteBookmark,
+      addAnnotation,
+      updateAnnotation,
+      deleteAnnotation,
+      addCustomBookmarkDesign,
+      deleteCustomBookmarkDesign,
+      addNote,
+      deleteNote,
+      updateTheme,
+      resetTheme,
+      updateReaderSettings,
+      updateProfile,
+      updateSyncConfig,
+      addCategory,
+      deleteCategory,
+      updateCollection,
+      sendChatMessage,
+      clearChat,
+      startNewChatSession,
+      selectChatSession,
+      deleteChatSession,
+      aiOnline,
+      aiModelName,
+      aiProfile,
+      provideAiFeedback,
+      resetAiProfile,
+      deviceId,
+      sharedUserId,
+      serverOnline,
+      liveConnected,
+      serverAuthRequired,
+      serverLanUrl,
+      refreshServerHealth,
+      applyPairingLink,
+      remoteActiveSession,
+      dismissRemoteSession,
+      syncStatus,
+      syncMessage,
+      syncPopup,
+      dismissSyncPopup,
+      offlineSyncProgress,
+      triggerSync,
+      syncAllBookFilesForOffline,
+      googleDriveAuth,
+      connectGoogleDrive,
+      disconnectGoogleDrive,
+      loginWithEmail,
+      logoutAccount,
+      exportBackupJson,
+      shareBackupJson,
+      importBackupJson,
+      importExternalBackup,
+      sharedRooms,
+      selectedRoomCode,
+      setSelectedRoomCode: selectRoomCode,
+      pendingJoinCode,
+      setPendingJoinCode,
+      refreshSharedRooms,
+      createRoomForBook,
+      joinRoomByCode,
+      sendRoomComment,
+      leaveOrDeleteRoom,
+      kickUserFromRoom,
+      updateLocalRoom,
+      removeLocalRoom,
+      sharedShelves,
+      selectedShelfCode,
+      setSelectedShelfCode: selectShelfCode,
+      pendingShelfCode,
+      setPendingShelfCode,
+      refreshSharedShelves,
+      createMutualShelf,
+      joinShelfByCode,
+      shareBooksToShelf,
+      removeBookFromSharedShelf,
+      importBookFromShelf,
+      leaveOrDeleteShelf,
+      kickUserFromShelf,
+      updateLocalShelf,
+      removeLocalShelf,
+      toast,
+      showToast,
+    }),
+    [
+      ready,
+      books,
+      bookmarks,
+      annotations,
+      customBookmarkDesigns,
+      allBookmarkDesigns,
+      customStationery,
+      addCustomSwatch,
+      deleteCustomSwatch,
+      addCustomSticker,
+      deleteCustomSticker,
+      addCustomEmoji,
+      deleteCustomEmoji,
+      notes,
+      categories,
+      collections,
+      theme,
+      profile,
+      readerSettings,
+      syncConfig,
+      chatMessages,
+      chatSessions,
+      activeChatSessionId,
+      navSection,
+      activeCategory,
+      searchQuery,
+      rightTab,
+      mobilePanelOpen,
+      activeBook,
+      readerJumpTarget,
+      clearReaderJumpTarget,
+      openBook,
+      openBookAt,
+      closeReader,
+      audioBook,
+      audioUrl,
+      closeAudioPlayer,
+      editingBook,
+      missingFileBook,
+      importModalOpen,
+      studioModalOpen,
+      profileModalOpen,
+      importFiles,
+      importNativeFolderBooks,
+      duplicateBooksCount,
+      removeDuplicateBooks,
+      attachLocalFileToBook,
+      updateBook,
+      reExtractBookCover,
+      identifyBookWithAI,
+      deleteBook,
+      addBookmark,
+      deleteBookmark,
+      addAnnotation,
+      updateAnnotation,
+      deleteAnnotation,
+      addCustomBookmarkDesign,
+      deleteCustomBookmarkDesign,
+      addNote,
+      deleteNote,
+      updateTheme,
+      resetTheme,
+      updateReaderSettings,
+      updateProfile,
+      updateSyncConfig,
+      addCategory,
+      deleteCategory,
+      updateCollection,
+      sendChatMessage,
+      clearChat,
+      startNewChatSession,
+      selectChatSession,
+      deleteChatSession,
+      aiOnline,
+      aiModelName,
+      aiProfile,
+      provideAiFeedback,
+      resetAiProfile,
+      deviceId,
+      sharedUserId,
+      serverOnline,
+      liveConnected,
+      serverAuthRequired,
+      serverLanUrl,
+      refreshServerHealth,
+      applyPairingLink,
+      remoteActiveSession,
+      dismissRemoteSession,
+      syncStatus,
+      syncMessage,
+      syncPopup,
+      dismissSyncPopup,
+      offlineSyncProgress,
+      triggerSync,
+      syncAllBookFilesForOffline,
+      googleDriveAuth,
+      connectGoogleDrive,
+      disconnectGoogleDrive,
+      loginWithEmail,
+      logoutAccount,
+      exportBackupJson,
+      shareBackupJson,
+      importBackupJson,
+      importExternalBackup,
+      sharedRooms,
+      selectedRoomCode,
+      selectRoomCode,
+      pendingJoinCode,
+      refreshSharedRooms,
+      createRoomForBook,
+      joinRoomByCode,
+      sendRoomComment,
+      leaveOrDeleteRoom,
+      kickUserFromRoom,
+      updateLocalRoom,
+      removeLocalRoom,
+      sharedShelves,
+      selectedShelfCode,
+      selectShelfCode,
+      pendingShelfCode,
+      refreshSharedShelves,
+      createMutualShelf,
+      joinShelfByCode,
+      shareBooksToShelf,
+      removeBookFromSharedShelf,
+      importBookFromShelf,
+      leaveOrDeleteShelf,
+      kickUserFromShelf,
+      updateLocalShelf,
+      removeLocalShelf,
+      toast,
+      showToast,
+    ]
+  );
+
   return (
-    <LibraryContext.Provider
-      value={{
-        ready,
-        books,
-        bookmarks,
-        annotations,
-        customBookmarkDesigns,
-        allBookmarkDesigns,
-        customStationery,
-        addCustomSwatch,
-        deleteCustomSwatch,
-        addCustomSticker,
-        deleteCustomSticker,
-        addCustomEmoji,
-        deleteCustomEmoji,
-        notes,
-        categories,
-        collections,
-        theme,
-        profile,
-        readerSettings,
-        syncConfig,
-        chatMessages,
-        chatSessions,
-        activeChatSessionId,
-        navSection,
-        setNavSection,
-        activeCategory,
-        setActiveCategory,
-        searchQuery,
-        setSearchQuery,
-        rightTab,
-        setRightTab,
-        mobilePanelOpen,
-        setMobilePanelOpen,
-        activeBook,
-        readerJumpTarget,
-        clearReaderJumpTarget,
-        openBook,
-        openBookAt,
-        closeReader,
-        audioBook,
-        audioUrl,
-        closeAudioPlayer,
-        editingBook,
-        setEditingBook,
-        missingFileBook,
-        setMissingFileBook,
-        importModalOpen,
-        setImportModalOpen,
-        studioModalOpen,
-        setStudioModalOpen,
-        profileModalOpen,
-        setProfileModalOpen,
-        importFiles,
-        importNativeFolderBooks,
-        duplicateBooksCount,
-        removeDuplicateBooks,
-        attachLocalFileToBook,
-        updateBook,
-        reExtractBookCover,
-        identifyBookWithAI,
-        deleteBook,
-        addBookmark,
-        deleteBookmark,
-        addAnnotation,
-        updateAnnotation,
-        deleteAnnotation,
-        addCustomBookmarkDesign,
-        deleteCustomBookmarkDesign,
-        addNote,
-        deleteNote,
-        updateTheme,
-        resetTheme,
-        updateReaderSettings,
-        updateProfile,
-        updateSyncConfig,
-        addCategory,
-        deleteCategory,
-        updateCollection,
-        sendChatMessage,
-        clearChat,
-        startNewChatSession,
-        selectChatSession,
-        deleteChatSession,
-        aiOnline,
-        aiModelName,
-        deviceId,
-        sharedUserId,
-        serverOnline,
-        liveConnected,
-        serverAuthRequired,
-        serverLanUrl,
-        refreshServerHealth,
-        applyPairingLink,
-        remoteActiveSession,
-        dismissRemoteSession,
-        syncStatus,
-        syncMessage,
-        syncPopup,
-        dismissSyncPopup,
-        offlineSyncProgress,
-        triggerSync,
-        syncAllBookFilesForOffline,
-        googleDriveAuth,
-        connectGoogleDrive,
-        disconnectGoogleDrive,
-        loginWithEmail,
-        logoutAccount,
-        exportBackupJson,
-        shareBackupJson,
-        importBackupJson,
-        importExternalBackup,
-        sharedRooms,
-        selectedRoomCode,
-        setSelectedRoomCode: selectRoomCode,
-        pendingJoinCode,
-        setPendingJoinCode,
-        refreshSharedRooms,
-        createRoomForBook,
-        joinRoomByCode,
-        sendRoomComment,
-        leaveOrDeleteRoom,
-        kickUserFromRoom,
-        updateLocalRoom,
-        removeLocalRoom,
-        sharedShelves,
-        selectedShelfCode,
-        setSelectedShelfCode: selectShelfCode,
-        pendingShelfCode,
-        setPendingShelfCode,
-        refreshSharedShelves,
-        createMutualShelf,
-        joinShelfByCode,
-        shareBooksToShelf,
-        removeBookFromSharedShelf,
-        importBookFromShelf,
-        leaveOrDeleteShelf,
-        kickUserFromShelf,
-        updateLocalShelf,
-        removeLocalShelf,
-        toast,
-        showToast,
-      }}
-    >
+    <LibraryContext.Provider value={contextValue}>
       {children}
     </LibraryContext.Provider>
   );

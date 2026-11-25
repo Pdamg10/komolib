@@ -17,6 +17,7 @@ import type {
   SharedShelf,
   SyncConfig,
   ThemeConfig,
+  UserAiProfile,
   UserProfile,
 } from '../types/library';
 import { dbGetBookFile, dbPutBookFile } from '../db/localDb';
@@ -68,14 +69,19 @@ export interface RemoteSyncPayload {
   chatSessions?: ChatSession[];
   customBookmarkDesigns?: BookmarkDesign[];
   customStationery?: CustomStationeryKit | null;
+  customStationeryUpdatedAt?: number;
   categories: CategoryItem[] | null;
+  categoriesUpdatedAt?: number;
   collections?: CollectionCard[] | null;
+  collectionsUpdatedAt?: number;
   readerSettings?: ReaderSettings | null;
   readerSettingsUpdatedAt?: number;
   theme: ThemeConfig | null;
   themeUpdatedAt?: number;
   profile: UserProfile | null;
   profileUpdatedAt?: number;
+  aiProfile?: UserAiProfile | null;
+  aiProfileUpdatedAt?: number;
   lastActiveSession?: ActiveReadingSession | null;
   deletedBookIds?: string[];
   deletedBookmarkIds?: string[];
@@ -505,6 +511,8 @@ export async function sendAiChatViaServer(
     annotations?: Array<{ bookTitle: string; chapter?: string; quote: string; note?: string }>;
     activeBook?: Pick<BookItem, 'id' | 'title' | 'author' | 'progress'> | null;
     profileName?: string;
+    aiProfile?: UserAiProfile | null;
+    tasteSummary?: string;
   }
 ): Promise<AiChatResponse> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');
@@ -735,14 +743,19 @@ export async function syncFullState(
     chatSessions?: ChatSession[];
     customBookmarkDesigns?: BookmarkDesign[];
     customStationery?: CustomStationeryKit;
+    customStationeryUpdatedAt?: number;
     categories?: CategoryItem[];
+    categoriesUpdatedAt?: number;
     collections?: CollectionCard[];
+    collectionsUpdatedAt?: number;
     readerSettings?: ReaderSettings;
     readerSettingsUpdatedAt?: number;
     theme: ThemeConfig | null;
     themeUpdatedAt?: number;
     profile: UserProfile | null;
     profileUpdatedAt?: number;
+    aiProfile?: UserAiProfile | null;
+    aiProfileUpdatedAt?: number;
     lastActiveSession?: ActiveReadingSession | null;
     deletedBookIds?: string[];
     deletedBookmarkIds?: string[];
@@ -853,14 +866,19 @@ export async function syncFullState(
       chatSessions: localData.chatSessions,
       customBookmarkDesigns: localData.customBookmarkDesigns,
       customStationery: localData.customStationery ?? null,
+      customStationeryUpdatedAt: localData.customStationeryUpdatedAt || 0,
       categories: localData.categories,
+      categoriesUpdatedAt: localData.categoriesUpdatedAt || 0,
       collections: localData.collections ?? null,
+      collectionsUpdatedAt: localData.collectionsUpdatedAt || 0,
       readerSettings: localData.readerSettings ?? null,
       readerSettingsUpdatedAt: localData.readerSettingsUpdatedAt || 0,
       theme: themePayload,
       themeUpdatedAt: localData.themeUpdatedAt || 0,
       profile: localData.profile,
       profileUpdatedAt: localData.profileUpdatedAt || 0,
+      aiProfile: localData.aiProfile ?? null,
+      aiProfileUpdatedAt: localData.aiProfileUpdatedAt || 0,
       lastActiveSession: localData.lastActiveSession || null,
       deletedBookIds: localData.deletedBookIds || [],
       deletedBookmarkIds: localData.deletedBookmarkIds || [],

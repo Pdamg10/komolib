@@ -227,6 +227,16 @@ export interface ChatSession {
   updatedAt: number;
 }
 
+export interface UserAiProfile {
+  preferredStyle: 'concise' | 'balanced' | 'detailed';
+  avoidSpoilers: boolean;
+  likedTopics: string[];
+  dislikedTopics: string[];
+  learnedNotes: string[];
+  interactionCount: number;
+  updatedAt: number;
+}
+
 export interface ReaderSettings {
   theme: 'cream' | 'paper' | 'sepia' | 'dark' | 'oled';
   fontFamily: 'Lora' | 'Nunito' | 'Quicksand' | 'Inter' | 'Georgia' | 'monospace';

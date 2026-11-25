@@ -4,13 +4,53 @@ import {
   History,
   MessageSquarePlus,
   Paperclip,
+  RotateCcw,
   Search,
   Send,
   Sparkles,
+  ThumbsUp,
   Trash2,
 } from 'lucide-react';
 import { useLibrary } from '../context/LibraryContext';
+import { parseCleanAiBlocks, sanitizeAiReplyText } from '../utils/aiAssistantUtils';
 import { BookCoverVisual } from './BookCoverVisual';
+
+const FormattedChatMessage: React.FC<{ text: string; isAssistant: boolean }> = React.memo(
+  ({ text, isAssistant }) => {
+    if (!isAssistant) {
+      return <div className="chat-msg-p">{text}</div>;
+    }
+    const blocks = parseCleanAiBlocks(text);
+    if (blocks.length === 0) return null;
+    return (
+      <div className="chat-msg-blocks">
+        {blocks.map((block, idx) => {
+          if (block.type === 'bullet') {
+            return (
+              <div key={idx} className="chat-msg-list-item">
+                <span className="chat-msg-bullet" aria-hidden="true">•</span>
+                <span>{block.text}</span>
+              </div>
+            );
+          }
+          if (block.type === 'numbered') {
+            return (
+              <div key={idx} className="chat-msg-list-item">
+                <span className="chat-msg-num">{block.index}.</span>
+                <span>{block.text}</span>
+              </div>
+            );
+          }
+          return (
+            <div key={idx} className="chat-msg-p">
+              {block.text}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+);
 
 function formatShortTime(ts: number): string {
   try {
@@ -52,6 +92,9 @@ export const ChatTab: React.FC = () => {
     deleteChatSession,
     sendChatMessage,
     clearChat,
+    aiProfile,
+    provideAiFeedback,
+    resetAiProfile,
     books,
     openBook,
     setImportModalOpen,
@@ -61,7 +104,24 @@ export const ChatTab: React.FC = () => {
   const [sending, setSending] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyQuery, setHistoryQuery] = useState('');
+  const [ratedMsgIds, setRatedMsgIds] = useState<Record<string, boolean>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const lastAssistantMsgId = useMemo(() => {
+    for (let i = chatMessages.length - 1; i >= 0; i--) {
+      if (chatMessages[i].sender === 'assistant' && chatMessages[i].id !== 'msg_welcome_1') {
+        return chatMessages[i].id;
+      }
+    }
+    return '';
+  }, [chatMessages]);
+
+  const aiStyleLabel =
+    aiProfile.preferredStyle === 'concise'
+      ? 'Breve'
+      : aiProfile.preferredStyle === 'detailed'
+      ? 'Detallado'
+      : 'Equilibrado';
 
   useEffect(() => {
     if (!historyOpen) {
@@ -260,7 +320,9 @@ export const ChatTab: React.FC = () => {
                         )}
                       </div>
                       {lastMsg && (
-                        <div className="chat-history-preview">{lastMsg.text}</div>
+                        <div className="chat-history-preview">
+                          {lastMsg.sender === 'assistant' ? sanitizeAiReplyText(lastMsg.text) : lastMsg.text}
+                        </div>
                       )}
                       <div className="chat-history-meta">
                         <span>{formatSessionDate(session.updatedAt || session.createdAt)}</span>
@@ -291,7 +353,7 @@ export const ChatTab: React.FC = () => {
         </div>
       ) : (
         <div className="right-panel-body">
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
             {quickPrompts.map((q) => (
               <button
                 key={q}
@@ -303,17 +365,40 @@ export const ChatTab: React.FC = () => {
                 <Sparkles size={11} /> {q}
               </button>
             ))}
+            {(aiProfile.interactionCount > 0 || aiProfile.preferredStyle !== 'balanced') && (
+              <span
+                className="chat-ai-status-pill"
+                title={`Estilo aprendido: ${aiStyleLabel}${
+                  aiProfile.likedTopics.length ? ` · Gustos: ${aiProfile.likedTopics.slice(0, 3).join(', ')}` : ''
+                }`}
+              >
+                IA: {aiStyleLabel}
+                <button
+                  type="button"
+                  onClick={resetAiProfile}
+                  title="Reiniciar aprendizaje de la IA"
+                  aria-label="Reiniciar aprendizaje de la IA"
+                >
+                  <RotateCcw size={10} />
+                </button>
+              </span>
+            )}
           </div>
 
           {chatMessages.map((msg) => {
             const attachedBooks = (msg.bookIds || [])
               .map((id) => books.find((b) => b.id === id))
               .filter(Boolean);
+            const showFeedback =
+              msg.sender === 'assistant' &&
+              msg.id === lastAssistantMsgId &&
+              !sending &&
+              !ratedMsgIds[msg.id];
 
             return (
               <div key={msg.id} className={`chat-bubble-row ${msg.sender}`}>
                 <div className={`chat-bubble ${msg.sender}`}>
-                  <div>{msg.text}</div>
+                  <FormattedChatMessage text={msg.text} isAssistant={msg.sender === 'assistant'} />
                   {attachedBooks.length > 0 && (
                     <div className="chat-embedded-books">
                       {attachedBooks.map((b) =>
@@ -351,6 +436,41 @@ export const ChatTab: React.FC = () => {
                           </div>
                         ) : null
                       )}
+                    </div>
+                  )}
+                  {showFeedback && (
+                    <div className="chat-feedback-row">
+                      <button
+                        type="button"
+                        className="chat-feedback-pill"
+                        onClick={() => {
+                          provideAiFeedback('shorter');
+                          setRatedMsgIds((prev) => ({ ...prev, [msg.id]: true }));
+                        }}
+                      >
+                        Más breve
+                      </button>
+                      <button
+                        type="button"
+                        className="chat-feedback-pill"
+                        onClick={() => {
+                          provideAiFeedback('detailed');
+                          setRatedMsgIds((prev) => ({ ...prev, [msg.id]: true }));
+                        }}
+                      >
+                        Más detalle
+                      </button>
+                      <button
+                        type="button"
+                        className="chat-feedback-pill"
+                        onClick={() => {
+                          provideAiFeedback('helpful');
+                          setRatedMsgIds((prev) => ({ ...prev, [msg.id]: true }));
+                        }}
+                        title="Recordar este estilo de respuesta"
+                      >
+                        <ThumbsUp size={10} /> Clara
+                      </button>
                     </div>
                   )}
                 </div>

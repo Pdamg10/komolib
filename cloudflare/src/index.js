@@ -256,14 +256,19 @@ function emptyState() {
     chatSessions: [],
     customBookmarkDesigns: [],
     customStationery: null,
+    customStationeryUpdatedAt: 0,
     categories: null,
+    categoriesUpdatedAt: 0,
     collections: null,
+    collectionsUpdatedAt: 0,
     readerSettings: null,
     readerSettingsUpdatedAt: 0,
     theme: null,
     themeUpdatedAt: 0,
     profile: null,
     profileUpdatedAt: 0,
+    aiProfile: null,
+    aiProfileUpdatedAt: 0,
     lastActiveSession: null,
     deletedBookIds: [],
     deletedBookmarkIds: [],
@@ -369,6 +374,39 @@ function mergeStates(currentRaw, incoming) {
     incoming.readerSettings && (!current.readerSettings || (incReaderTs > 0 && incReaderTs >= curReaderTs))
   );
 
+  const incStationeryTs = Number(incoming.customStationeryUpdatedAt || 0);
+  const curStationeryTs = Number(current.customStationeryUpdatedAt || 0);
+  const useIncStationery = Boolean(
+    incoming.customStationery &&
+      (!current.customStationery || (incStationeryTs > 0 && incStationeryTs >= curStationeryTs))
+  );
+
+  const incCategoriesTs = Number(incoming.categoriesUpdatedAt || 0);
+  const curCategoriesTs = Number(current.categoriesUpdatedAt || 0);
+  const useIncCategories = Boolean(
+    Array.isArray(incoming.categories) &&
+      incoming.categories.length > 0 &&
+      (!Array.isArray(current.categories) ||
+        current.categories.length === 0 ||
+        (incCategoriesTs > 0 && incCategoriesTs >= curCategoriesTs))
+  );
+
+  const incCollectionsTs = Number(incoming.collectionsUpdatedAt || 0);
+  const curCollectionsTs = Number(current.collectionsUpdatedAt || 0);
+  const useIncCollections = Boolean(
+    Array.isArray(incoming.collections) &&
+      incoming.collections.length > 0 &&
+      (!Array.isArray(current.collections) ||
+        current.collections.length === 0 ||
+        (incCollectionsTs > 0 && incCollectionsTs >= curCollectionsTs))
+  );
+
+  const incAiProfileTs = Number(incoming.aiProfileUpdatedAt || 0);
+  const curAiProfileTs = Number(current.aiProfileUpdatedAt || 0);
+  const useIncAiProfile = Boolean(
+    incoming.aiProfile && (!current.aiProfile || (incAiProfileTs > 0 && incAiProfileTs >= curAiProfileTs))
+  );
+
   const closedRoomCodes = Array.from(
     new Set([...(current.closedRoomCodes || []), ...(incoming.closedRoomCodes || [])].map(normalizeCode).filter(Boolean))
   ).slice(-100);
@@ -406,20 +444,27 @@ function mergeStates(currentRaw, incoming) {
     annotations: incoming.annotations ? mergeById(current.annotations, incoming.annotations, delAnn) : current.annotations,
     notes: incoming.notes ? mergeById(current.notes, incoming.notes, delNotes) : current.notes,
     chatSessions: Array.isArray(incoming.chatSessions)
-      ? mergeById(current.chatSessions, incoming.chatSessions, delChats).slice(0, 60)
-      : current.chatSessions,
+      ? mergeById(current.chatSessions, incoming.chatSessions, delChats)
+          .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+          .slice(0, 60)
+      : (current.chatSessions || []).filter((x) => !delChats.has(x?.id)),
     customBookmarkDesigns: incoming.customBookmarkDesigns
       ? mergeById(current.customBookmarkDesigns, incoming.customBookmarkDesigns, delDesigns)
-      : current.customBookmarkDesigns,
-    customStationery: incoming.customStationery || current.customStationery || null,
-    categories: incoming.categories || current.categories || null,
-    collections: incoming.collections || current.collections || null,
+      : (current.customBookmarkDesigns || []).filter((x) => !delDesigns.has(x?.id)),
+    customStationery: useIncStationery ? incoming.customStationery : current.customStationery || null,
+    customStationeryUpdatedAt: useIncStationery ? incStationeryTs : curStationeryTs,
+    categories: useIncCategories ? incoming.categories : current.categories || null,
+    categoriesUpdatedAt: useIncCategories ? incCategoriesTs : curCategoriesTs,
+    collections: useIncCollections ? incoming.collections : current.collections || null,
+    collectionsUpdatedAt: useIncCollections ? incCollectionsTs : curCollectionsTs,
     readerSettings: useIncReader ? incoming.readerSettings : current.readerSettings || null,
     readerSettingsUpdatedAt: useIncReader ? incReaderTs : curReaderTs,
     theme: useIncTheme ? resolvedTheme : current.theme,
     themeUpdatedAt: useIncTheme ? incThemeTs : curThemeTs,
     profile: useIncProfile ? incoming.profile : current.profile,
     profileUpdatedAt: useIncProfile ? incProfileTs : curProfileTs,
+    aiProfile: useIncAiProfile ? incoming.aiProfile : current.aiProfile || null,
+    aiProfileUpdatedAt: useIncAiProfile ? incAiProfileTs : curAiProfileTs,
     lastActiveSession:
       incoming.lastActiveSession &&
       (!current.lastActiveSession || (incoming.lastActiveSession.updatedAt || 0) >= (current.lastActiveSession.updatedAt || 0))
@@ -1505,14 +1550,73 @@ export default {
         const message = String(body?.message || '').trim();
         if (!message) return json(req, { error: 'Mensaje vacío' }, 400);
 
-        const booksSummary = (Array.isArray(body.books) ? body.books : [])
-          .slice(0, 60)
-          .map((b) => `- "${b.title}" por ${b.author || 'Desconocido'} (${b.progress || 0}%)`)
+        const booksList = Array.isArray(body.books) ? body.books : [];
+        const booksSummary = booksList
+          .slice(0, 50)
+          .map((b) => {
+            const ratingTxt = b.rating ? `, ${b.rating}/5` : '';
+            const statusTxt = b.readingStatus ? `, estado ${b.readingStatus}` : '';
+            const reviewTxt = b.review ? `, reseña: "${String(b.review).slice(0, 80)}"` : '';
+            return `• "${b.title}" por ${b.author || 'Desconocido'} (${b.kind || 'book'}, ${b.progress || 0}%${statusTxt}${ratingTxt}${reviewTxt})`;
+          })
           .join('\n');
 
+        const notesSummary = (Array.isArray(body.notes) ? body.notes : [])
+          .slice(0, 10)
+          .map((n) => `• ${n.bookTitle || 'Libro'}: ${String(n.text || '').slice(0, 120)}`)
+          .join('\n');
+
+        const annotationsSummary = (Array.isArray(body.annotations) ? body.annotations : [])
+          .slice(0, 15)
+          .map(
+            (a) =>
+              `• [${a.bookTitle || 'Libro'}${a.chapter ? ` · ${a.chapter}` : ''}] "${String(a.quote || '').slice(0, 140)}"${
+                a.note ? ` (Nota: ${String(a.note).slice(0, 80)})` : ''
+              }`
+          )
+          .join('\n');
+
+        const aiProf = body.aiProfile && typeof body.aiProfile === 'object' ? body.aiProfile : null;
+        const styleGuide =
+          aiProf?.preferredStyle === 'concise'
+            ? 'Responde de forma breve, directa y muy clara (máximo 3 a 5 líneas o 3 puntos cortos).'
+            : aiProf?.preferredStyle === 'detailed'
+            ? 'Responde con buen nivel de detalle, bien organizado en párrafos cortos y claros.'
+            : 'Responde de forma equilibrada, clara y natural, sin relleno.';
+        const spoilerRule =
+          aiProf?.avoidSpoilers === false
+            ? 'Puedes incluir spoilers solo si la consulta lo pide.'
+            : 'Evita spoilers de trama a menos que te los pidan explícitamente.';
+        const learnedParts = [];
+        if (Array.isArray(aiProf?.likedTopics) && aiProf.likedTopics.length) {
+          learnedParts.push(`Temas/géneros preferidos: ${aiProf.likedTopics.slice(0, 8).join(', ')}.`);
+        }
+        if (Array.isArray(aiProf?.dislikedTopics) && aiProf.dislikedTopics.length) {
+          learnedParts.push(`Evitar recomendar: ${aiProf.dislikedTopics.slice(0, 8).join(', ')}.`);
+        }
+        if (Array.isArray(aiProf?.learnedNotes) && aiProf.learnedNotes.length) {
+          learnedParts.push(`Preferencias aprendidas: ${aiProf.learnedNotes.slice(0, 6).join(' | ')}`);
+        }
+        if (typeof body.tasteSummary === 'string' && body.tasteSummary.trim()) {
+          learnedParts.push(`Patrón real de lectura: ${body.tasteSummary.trim().slice(0, 400)}`);
+        }
+        const activeBookLine = body.activeBook?.title
+          ? `Libro abierto actualmente: "${body.activeBook.title}" de ${body.activeBook.author || 'Desconocido'} (${body.activeBook.progress || 0}%).\n`
+          : '';
+
         const systemPrompt =
-          `Eres el asistente literario de KomoLib para ${body.profileName || 'el lector'}. Responde en español, conciso y cálido.\n` +
-          (booksSummary ? `Biblioteca actual:\n${booksSummary}\n` : '');
+          `Eres el asistente literario personal de KomoLib para ${body.profileName || 'quien lee'}. Responde siempre en español natural y cercano.\n` +
+          `REGLAS ESTRICTAS DE FORMATO:\n` +
+          `- NUNCA uses asteriscos (*, **, ***) ni almohadillas (#) ni sintaxis Markdown cruda.\n` +
+          `- Escribe texto limpio con párrafos cortos. Si haces una lista, usa viñetas con "• " o numeración "1. ", "2. ".\n` +
+          `- ${styleGuide}\n` +
+          `- ${spoilerRule}\n` +
+          `- No inventes títulos que no estén en su biblioteca cuando te pregunten qué tiene guardado.\n` +
+          (learnedParts.length ? `\nPerfil aprendido del usuario:\n${learnedParts.join('\n')}\n` : '') +
+          (activeBookLine ? `\n${activeBookLine}` : '') +
+          (booksSummary ? `\nBiblioteca actual:\n${booksSummary}\n` : '') +
+          (annotationsSummary ? `\nFrases marcadas / Post-its:\n${annotationsSummary}\n` : '') +
+          (notesSummary ? `\nNotas recientes:\n${notesSummary}\n` : '');
 
         const contents = [];
         for (const h of (Array.isArray(body.history) ? body.history : []).slice(-10)) {
@@ -1530,15 +1634,35 @@ export default {
             body: JSON.stringify({
               systemInstruction: { parts: [{ text: systemPrompt }] },
               contents,
+              generationConfig: {
+                temperature: 0.65,
+                maxOutputTokens: 1100,
+                thinkingConfig: {
+                  thinkingBudget: 0,
+                },
+              },
             }),
           }
         );
         const gData = await gRes.json().catch(() => ({}));
-        const reply = gData?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim();
+        const rawReply = gData?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim() || '';
+        const reply = rawReply
+          .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+          .replace(/^\s*[*+]\s+/gm, '• ')
+          .replace(/\*\*\*([^*\n]+?)\*\*\*/g, '$1')
+          .replace(/\*\*([^*\n]+?)\*\*/g, '$1')
+          .replace(/\*/g, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
         if (!gRes.ok || !reply) {
           return json(req, { error: gData?.error?.message || 'La IA no pudo responder en este momento' }, 502);
         }
-        return json(req, { ok: true, reply, model });
+        const lowerCombined = `${message} ${reply}`.toLowerCase();
+        const matchedBookIds = booksList
+          .filter((b) => b?.id && b?.title && lowerCombined.includes(String(b.title).toLowerCase()))
+          .slice(0, 4)
+          .map((b) => b.id);
+        return json(req, { ok: true, reply, model, matchedBookIds });
       }
 
       if (method === 'POST' && pathname === '/api/ai/identify-book') {

@@ -16,6 +16,7 @@ import type {
   SharedShelf,
   SyncConfig,
   ThemeConfig,
+  UserAiProfile,
   UserProfile,
 } from '../types/library';
 import { dbGetBookFile, dbPutBookFile } from '../db/localDb';
@@ -504,14 +505,19 @@ function mergeSyncStatesClientSide(
     chatSessions?: ChatSession[];
     customBookmarkDesigns?: BookmarkDesign[];
     customStationery?: CustomStationeryKit;
+    customStationeryUpdatedAt?: number;
     categories?: CategoryItem[];
+    categoriesUpdatedAt?: number;
     collections?: CollectionCard[];
+    collectionsUpdatedAt?: number;
     readerSettings?: ReaderSettings;
     readerSettingsUpdatedAt?: number;
     theme: ThemeConfig | null;
     themeUpdatedAt?: number;
     profile: UserProfile | null;
     profileUpdatedAt?: number;
+    aiProfile?: UserAiProfile | null;
+    aiProfileUpdatedAt?: number;
     lastActiveSession?: ActiveReadingSession | null;
     deletedBookIds?: string[];
     deletedBookmarkIds?: string[];
@@ -536,14 +542,19 @@ function mergeSyncStatesClientSide(
     chatSessions: [],
     customBookmarkDesigns: [],
     customStationery: null,
+    customStationeryUpdatedAt: 0,
     categories: null,
+    categoriesUpdatedAt: 0,
     collections: null,
+    collectionsUpdatedAt: 0,
     readerSettings: null,
     readerSettingsUpdatedAt: 0,
     theme: null,
     themeUpdatedAt: 0,
     profile: null,
     profileUpdatedAt: 0,
+    aiProfile: null,
+    aiProfileUpdatedAt: 0,
     lastActiveSession: null,
     deletedBookIds: [],
     deletedBookmarkIds: [],
@@ -700,6 +711,38 @@ function mergeSyncStatesClientSide(
       (!current.readerSettings || (incomingReaderTs > 0 && incomingReaderTs >= currentReaderTs))
   );
 
+  const incomingStationeryTs = Number(localData.customStationeryUpdatedAt || 0);
+  const currentStationeryTs = Number(current.customStationeryUpdatedAt || 0);
+  const useIncomingStationery = Boolean(
+    localData.customStationery &&
+      (!current.customStationery ||
+        (incomingStationeryTs > 0 && incomingStationeryTs >= currentStationeryTs))
+  );
+
+  const incomingCategoriesTs = Number(localData.categoriesUpdatedAt || 0);
+  const currentCategoriesTs = Number(current.categoriesUpdatedAt || 0);
+  const useIncomingCategories = Boolean(
+    localData.categories?.length &&
+      (!current.categories?.length ||
+        (incomingCategoriesTs > 0 && incomingCategoriesTs >= currentCategoriesTs))
+  );
+
+  const incomingCollectionsTs = Number(localData.collectionsUpdatedAt || 0);
+  const currentCollectionsTs = Number(current.collectionsUpdatedAt || 0);
+  const useIncomingCollections = Boolean(
+    localData.collections?.length &&
+      (!current.collections?.length ||
+        (incomingCollectionsTs > 0 && incomingCollectionsTs >= currentCollectionsTs))
+  );
+
+  const incomingAiProfileTs = Number(localData.aiProfileUpdatedAt || 0);
+  const currentAiProfileTs = Number(current.aiProfileUpdatedAt || 0);
+  const useIncomingAiProfile = Boolean(
+    localData.aiProfile &&
+      (!current.aiProfile ||
+        (incomingAiProfileTs > 0 && incomingAiProfileTs >= currentAiProfileTs))
+  );
+
   const incomingSession = localData.lastActiveSession;
   const currentSession = current.lastActiveSession;
   const mergedSession =
@@ -786,15 +829,22 @@ function mergeSyncStatesClientSide(
       localData.customBookmarkDesigns,
       deletedDesignsSet
     ),
-    customStationery: localData.customStationery || current.customStationery || null,
-    categories: localData.categories || current.categories || null,
-    collections: localData.collections || current.collections || null,
+    customStationery: useIncomingStationery
+      ? localData.customStationery || null
+      : current.customStationery || null,
+    customStationeryUpdatedAt: useIncomingStationery ? incomingStationeryTs : currentStationeryTs,
+    categories: useIncomingCategories ? localData.categories || null : current.categories || null,
+    categoriesUpdatedAt: useIncomingCategories ? incomingCategoriesTs : currentCategoriesTs,
+    collections: useIncomingCollections ? localData.collections || null : current.collections || null,
+    collectionsUpdatedAt: useIncomingCollections ? incomingCollectionsTs : currentCollectionsTs,
     readerSettings: useIncomingReaderSettings ? localData.readerSettings : current.readerSettings || null,
     readerSettingsUpdatedAt: useIncomingReaderSettings ? incomingReaderTs : currentReaderTs,
     theme: resolvedTheme,
     themeUpdatedAt: useIncomingTheme ? incomingThemeTs : currentThemeTs,
     profile: useIncomingProfile ? localData.profile : current.profile,
     profileUpdatedAt: useIncomingProfile ? incomingProfileTs : currentProfileTs,
+    aiProfile: useIncomingAiProfile ? localData.aiProfile || null : current.aiProfile || null,
+    aiProfileUpdatedAt: useIncomingAiProfile ? incomingAiProfileTs : currentAiProfileTs,
     lastActiveSession: mergedSession,
     deletedBookIds,
     deletedBookmarkIds,

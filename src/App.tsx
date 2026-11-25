@@ -177,7 +177,7 @@ const AppWorkspace: React.FC = () => {
   const isFullView = theme.fullView !== false;
   const hasWallpaper = Boolean(theme.customWallpaperUrl);
 
-  // Auto-detect low-end phones/tablets (<= 4 GB RAM or <= 4 CPU cores or mobile Android WebView)
+  // Auto-detect low-end PCs, phones/tablets, reduced-motion preference, or large libraries
   const autoLowEnd = React.useMemo(() => {
     if (typeof navigator === 'undefined') return false;
     const nav = navigator as Navigator & { deviceMemory?: number };
@@ -187,12 +187,16 @@ const AppWorkspace: React.FC = () => {
       /Android/i.test(nav.userAgent || '') &&
       typeof window !== 'undefined' &&
       window.innerWidth <= 1024;
-    return lowMem || lowCpu || isAndroidMobile;
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return lowMem || lowCpu || isAndroidMobile || prefersReducedMotion;
   }, []);
 
   const isPerfLite =
     theme.lowPerformanceMode === 'on' ||
-    (theme.lowPerformanceMode !== 'off' && autoLowEnd);
+    (theme.lowPerformanceMode !== 'off' && (autoLowEnd || books.length >= 120));
 
   const backdropClasses = [
     'app-backdrop',

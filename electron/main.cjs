@@ -3,14 +3,12 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-// GPU & Wayland hardware-acceleration tuning for smooth 60-144 FPS on Linux (Wayland/X11) & Windows
+// GPU & Wayland tuning optimized for smooth scrolling across both modern & low-end PCs
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('enable-zero-copy');
-app.commandLine.appendSwitch('ignore-gpu-blocklist');
 app.commandLine.appendSwitch(
   'enable-features',
-  'WaylandWindowDecorations,CanvasOopRasterization,VaapiVideoDecoder'
+  'WaylandWindowDecorations,CanvasOopRasterization'
 );
 
 // Pin userData to a single stable lowercase directory across Linux (case-sensitive!) and Windows
@@ -236,6 +234,7 @@ async function createWindow(port) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      spellcheck: false,
       backgroundThrottling: false,
     },
   });
