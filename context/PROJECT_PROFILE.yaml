@@ -1,5 +1,8 @@
 name: komolib
 display_name: KomoLib
+version: 1.12.1
+package_version: 1.12.1
+android_version_code: 14
 aief:
   level: L3
   locale: en
@@ -7,26 +10,44 @@ aief:
   entry: AGENTS.md
   context_index: context/INDEX.md
   validator: scripts/aief.mjs
+  mandatory_post_change_memory_sync: true
 architecture:
   type: fullstack-local-first-hybrid
   pieces:
     - name: frontend
       path: src
-      stack: [React 19, TypeScript 5.8, Vite 6, IndexedDB (idb), epubjs, pdfjs-dist, jszip, node-unrar-js, marked]
-      deploy_target: Desktop PC App + Android APK (Capacitor)
-    - name: sync-server
-      path: server
-      stack: [Node.js 22, Express 5, Multer 2, CORS, SSE, Gemini API]
-      deploy_target: Render / Railway / Fly.io / VPS (persistent disk)
+      stack: [React 19, TypeScript 5.8, Vite 6, IndexedDB (idb), epubjs, pdfjs-dist, jszip, node-unrar-js, marked, sql.js, lucide-react]
+      deploy_target: Electron Desktop PC App + Capacitor Android APK
+    - name: desktop-app
+      path: electron
+      stack: [Electron 45, electron-builder 26, Node.js HTTP local origin server, Wayland/GPU acceleration]
+      deploy_target: Linux AppImage (Komolib-<version>.AppImage) + Windows NSIS installer
     - name: android-app
       path: android
-      stack: [Capacitor 7, Android Gradle]
+      stack: [Capacitor 7, Android Gradle, Native SAF/MediaStore/OAuth Bridge (KomoAndroid)]
       app_id: com.komolib.reader
+      apk_output: android/app/build/outputs/apk/debug/Komolib.apk
+    - name: cloud-api
+      path: cloudflare
+      stack: [Cloudflare Workers, Cloudflare D1 (SQLite), Wrangler 4, Google OAuth 2.0, Gemini API]
+      deploy_target: Cloudflare Workers (primary production API: https://komolib-api.komolib.workers.dev)
+    - name: sync-server
+      path: server
+      stack: [Node.js 22, Express 5, Multer 2, CORS, SSE, Google OAuth 2.0, Gemini API]
+      deploy_target: Self-hosted LAN / VPS / Render / Railway / Fly.io (persistent disk via KOMOLIB_STORAGE_DIR)
 commands:
   dev_web: npm run dev
+  dev_desktop: npm run desktop
+  run_desktop: npm run desktop:run
+  build_desktop_linux: npm run desktop:build:linux
+  build_desktop_win: npm run desktop:build:win
   dev_server: npm run dev:server
+  cloudflare_dev: cd cloudflare && npm run dev
+  cloudflare_db_init: cd cloudflare && npm run db:init
+  cloudflare_deploy: cd cloudflare && npm run deploy
   build: npm run build
   cap_sync: npm run cap:sync
+  android_apk_debug: JAVA_HOME=/home/phame/.jdks/jdk-17.0.20.1+1 ./android/gradlew -p android assembleDebug
   aief_doctor: npm run aief:doctor
   aief_validate: npm run aief:validate
 adapters:

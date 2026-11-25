@@ -4,7 +4,7 @@ function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
-function rgbToHex(r: number, g: number, b: number): string {
+export function rgbToHex(r: number, g: number, b: number): string {
   const h = (n: number) => Math.round(clamp(n, 0, 255)).toString(16).padStart(2, '0');
   return `#${h(r)}${h(g)}${h(b)}`;
 }

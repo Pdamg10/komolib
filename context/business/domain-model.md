@@ -1,28 +1,32 @@
 # Domain Model — KomoLib
 
-Source of truth: `src/types/library.ts`, `src/db/localDb.ts`, `src/parsers/index.ts`, `src/services/sharedReadingService.ts`.
+Source of truth: `src/types/library.ts`, `src/db/localDb.ts`, `src/parsers/index.ts`, `src/parsers/externalBackupParser.ts`, `src/services/sharedReadingService.ts`, `src/services/googleDriveService.ts`.
 
 ## Core Entities
-- **`BookItem`**: Primary catalog item with metadata (`title`, `author`, `description`, `format`, `kind`, `categories`, `tags`, `seriesName`, `seriesOrder`), visual styling (`coverDataUrl`, `spineColor`, `ribbonColor`, `activeBookmarkDesignId`), reading progress (`progress`, `currentPage`, `currentCfi`, `currentChapter`, `scrollRatio`, `audioTime`, `readingStatus`, `rating`, `review`), and sync metadata (`hasLocalFile`, `hasRemoteFile`, `remoteFileName`, `addedAt`, `lastReadAt`, `updatedAt`).
-- **Binary File Store (`files` store in IndexedDB)**: Stores `{ id, blob, extraImages? }` keyed by `BookItem.id`. Image-folder manga/manhwa bundles store page blobs in `extraImages`.
+- **`BookItem`**: Primary catalog item with metadata (`title`, `author`, `description`, `format`, `kind`, `categories`, `tags`, `seriesName`, `seriesOrder`), visual styling (`coverDataUrl`, `hasOriginalCover`, `spineColor`, `ribbonColor`, `activeBookmarkDesignId`), reading progress (`progress`, `currentPage`, `currentCfi`, `currentChapter`, `scrollRatio`, `audioTime`, `readingStatus`, `rating`, `review`, `startedAt`, `finishedAt`), and storage/sync metadata (`hasLocalFile`, `nativeFileUri` for Android SAF zero-duplication reads, `hasRemoteFile`, `remoteFileName`, `driveFileId`, `folderPath`, `addedAt`, `lastReadAt`, `updatedAt`).
+- **Binary File Store (`files` store in IndexedDB)**: Stores `{ id, blob, extraImages? }` keyed by `BookItem.id`. Image-folder manga/manhwa bundles store page blobs in `extraImages`. On Android SAF folder imports, files can stream on demand via `nativeFileUri` without duplicating gigabytes into IndexedDB.
 - **Reading Marks**:
-  - `BookmarkItem` & `BookmarkDesign`: Visual bookmarks clipped inside a book (builtin presets in `public/bookmarks/*.webp` + user-uploaded compressed designs).
-  - `BookAnnotation`: Reader marks across 6 tools (`highlighter`, `pencil`, `pen`, `postit`, `sticker`, `emoji`) anchored by `cfi`, `page`, `chapterHref`, `scrollRatio`, and `progress`.
+  - `BookmarkItem` & `BookmarkDesign`: Visual bookmarks clipped inside a book (builtin presets in `public/bookmarks/*.webp` + user-uploaded compressed designs; default design persisted in `ReaderSettings.defaultBookmarkDesignId`).
+  - `BookAnnotation`: Reader marks across 6 tools (`highlighter`, `pencil`, `pen`, `postit`, `sticker`, `emoji`) with `styleVariant`, anchored by `cfi`, `page`, `chapterHref`, `scrollRatio`, `pageX`/`pageY` (PDF pin/text coordinates), and `progress`.
   - `NoteItem` & `CustomStationeryKit`: Notebook notes and custom swatches/stickers/emojis.
-- **Organization & Preferences**: `CategoryItem`, `CollectionCard`, `ThemeConfig`, `ReaderSettings`, `UserProfile`, `SyncConfig`, `ActiveReadingSession`.
+- **Organization, Identity & Preferences**: `CategoryItem`, `CollectionCard`, `ThemeConfig` (including wallpaper opacity/blur, low-performance mode, full view), `ReaderSettings` (with `readerSettingsUpdatedAt` LWW sync, `pdfFlow`, `pdfFit`, `epubFlow`, `defaultBookmarkDesignId`), `UserProfile` (with monthly/yearly book & page goals), `GoogleDriveAuth`, `SyncConfig`, `ActiveReadingSession`, `ChatSession`.
 - **Collaborative Reading**:
-  - `SharedRoom` (`KOMO-XXXX`): Buddy Read session bound to a single book with live participant progress, optional shared marks, and spoiler-protected comments (locked until the reader reaches the comment's progress percentage).
-  - `SharedShelf` (`SHELF-XXXX`): Mutual bookshelf where participants upload, download, and manage shared books in real time.
-- **Transfer Inbox (`InboxItem`)**: Files uploaded via the server's `/upload` or `/send` LAN web portal awaiting import into a client library.
+  - `SharedRoom` (`KOMO-XXXX`): Buddy Read session bound to a single book with live participant progress, optional shared marks (`sharedAnnotations`, `sharedBookmarks`), host moderation (`kickedIds`), and spoiler-protected comments (locked until the reader reaches `progressAt`).
+  - `SharedShelf` (`SHELF-XXXX`): Mutual bookshelf where members upload, download, and manage shared books in real time with `kickedIds` moderation.
+  - **Live Profile Sync:** Updating `UserProfile` (name, avatar image/emoji/background) broadcasts via `PATCH /api/shared/profile` across all active rooms and shelves.
+- **External Backup Migration (`ParsedExternalBackup`)**: Normalized import structure (`books`, `bookmarks`, `annotations`, `notes`, `nativeKomoLibData`) supporting KomoLib JSON, Moon+ Reader (`.mrpro`, `.po`, `.mrexpt`, `mrbooks.db`), ReadEra, Tachiyomi/Mihon/Aniyomi, Kotatsu, KOReader, Goodreads/StoryGraph/Calibre CSV, and Kindle `My Clippings.txt`.
+- **Transfer Inbox (`InboxItem`)**: Files uploaded via the self-hosted Express server's `/upload` or `/send` LAN web portal awaiting import into a client library.
 
 ## Supported Formats & Content Kinds
-- **ContentKind:** `book`, `manga`, `manhwa`, `comic`, `audiobook`.
+- **ContentKind (5):** `book`, `manga`, `manhwa`, `comic`, `audiobook`.
 - **BookFormat (13):** `epub`, `pdf`, `cbz`, `cbr`, `images`, `txt`, `md`, `html`, `fb2`, `mobi`, `azw3`, `docx`, `audio`.
 - **ComicReadMode (5):** `manhwa-strip` (seamless vertical), `manga-rtl`, `manga-rtl-double`, `comic-ltr`, `comic-ltr-double`.
+- **ReaderViewportMode (3):** `phone` (<= 640px), `tablet` (641–1024px), `desktop` (> 1024px) — auto-adapts reader chrome and controls without overlap.
 
 ## Key Relationships & Business Rules
-1. **Local-first ownership:** Clients can import, read, annotate, and organize books completely offline in IndexedDB (`komolib-db` v2).
-2. **Deterministic cloud vault ID (`spaceId`):** `deriveEmailSpaceId(email, pin)` computes `acct_<prefix>_<hex>` deterministically using dual 32-bit FNV-1a/cyrb hashes so it behaves identically on HTTP LAN, HTTPS web, and Capacitor APK without WebCrypto HTTPS restrictions.
-3. **Tombstone-safe sync:** Deletions of books, bookmarks, annotations, notes, and custom bookmark designs propagate via `deleted*Ids` arrays in `RemoteSyncPayload` to avoid resurrecting deleted items across devices.
-4. **Access separation:** `KOMOLIB_TOKEN` protects private personal library sync and uploads, while invited guests can join specific `KOMO-XXXX` rooms or `SHELF-XXXX` shelves without knowing the owner's token.
-5. **Cover extraction & palette fallback:** `src/parsers/index.ts` extracts embedded covers when available and derives `spineColor`/`ribbonColor` from the cover palette, falling back to `generateCozyCover`.
+1. **Local-first ownership:** Clients can import, read, annotate, and organize books completely offline in IndexedDB (`komolib-db` v2) or via Android SAF `nativeFileUri`.
+2. **PIN-less deterministic cloud vault ID (`spaceId`):** PIN authentication was removed in v1.11. `deriveEmailSpaceId(email, '')` (and `deriveEmailSpaceId(email, 'komo_shared')` for Drive-linked shared identity) computes `acct_<prefix>_<hex>` deterministically using dual 32-bit FNV-1a/cyrb hashes so it behaves identically on HTTP LAN, Electron `127.0.0.1`, HTTPS web, and Capacitor APK without WebCrypto HTTPS restrictions.
+3. **Google Drive primary personal vault + server token persistence:** Users store personal library state & binaries in their own Google Drive (`Komolib/Libros`). Per-email Google `refresh_token` is stored in Cloudflare D1 (`google_tokens`) or Express (`google_tokens.json`) so secondary devices silently refresh without losing session after 1 hour.
+4. **Tombstone-safe & LWW sync:** Deletions of books, bookmarks, annotations, notes, custom bookmark designs, rooms (`410 Gone`), and shelves (`410 Gone`) propagate via tombstones (`deleted*Ids`, `deleted_rooms`, `deleted_shelves`) to avoid resurrecting deleted items; `readerSettings` merges via `readerSettingsUpdatedAt`.
+5. **Access separation:** `KOMOLIB_TOKEN` optionally protects private self-hosted sync, while invited guests can join specific `KOMO-XXXX` rooms or `SHELF-XXXX` shelves without knowing the owner's token.
+6. **Cover extraction & palette fallback:** `src/parsers/index.ts` extracts embedded covers when available and derives `spineColor`/`ribbonColor` from the cover palette, falling back to `generateCozyCover`.

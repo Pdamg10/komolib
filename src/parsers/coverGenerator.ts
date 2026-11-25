@@ -1,4 +1,5 @@
 import type { ContentKind } from '../types/library';
+import { rgbToHex } from '../utils/wallpaperTheme';
 
 const PALETTES: Array<{ bg1: string; bg2: string; spine: string; ribbon: string; ink: string }> = [
   { bg1: '#233b4d', bg2: '#3d637d', spine: '#22384a', ribbon: '#f0b85c', ink: '#f8f5ef' },
@@ -107,16 +108,6 @@ export function generateCozyCover(
     spineColor: pal.spine,
     ribbonColor: pal.ribbon,
   };
-}
-
-function toHexChannel(n: number): string {
-  return Math.max(0, Math.min(255, Math.round(n)))
-    .toString(16)
-    .padStart(2, '0');
-}
-
-function rgbToHex(r: number, g: number, b: number): string {
-  return `#${toHexChannel(r)}${toHexChannel(g)}${toHexChannel(b)}`;
 }
 
 export async function extractCoverPaletteFromDataUrl(
