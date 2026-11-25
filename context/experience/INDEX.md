@@ -14,6 +14,7 @@
 | cloudflare, workers, d1, electron, desktop, userdata, origin, oauth-bridge, wayland, gpu | lessons/cloudflare-workers-d1-and-electron-desktop.md | Migrate primary API to Cloudflare Workers + D1 (512 KB chunked files, 0 ms cold start) and pin Electron `userData` (`komolib`), port `41735` origin retries, storage flush, Wayland/GPU flags, and `/oauth-bridge` OAuth flow. |
 | reader, responsive, phone, tablet, desktop, rooms, shelves, profile-sync | lessons/adaptive-reader-and-shared-profile-sync.md | Auto-adapt reader chrome via `ReaderViewportMode` (`phone`/`tablet`/`desktop`) and broadcast user name/avatar updates across active rooms and shelves via `PATCH /api/shared/profile`. |
 | performance, electron, low-end, gpu, backdrop-filter, ai-chat, markdown, sync, lww | lessons/perf-ai-chat-and-lww-sync.md | Memoize `LibraryContext` value, strip per-card GPU blur/drop-shadow, render zero-`*` adaptive AI chat (`UserAiProfile`), and close LWW/synchronous-`stateRef` sync gaps across Drive, Cloudflare, and Express. |
+| manga, manhwa, comic, series, chapters, deduplication, telegram, grouping | lessons/manga-series-grouping-and-chapters.md | Group split Manga/Manhwa/Comic chapter packs (`0-10`, `11-21`) into unified ordered deduplicated series with structured ficha, Telegram `NFKD` parser, and in-reader prev/next switching while leaving books untouched. |
 
 ## Recent Reports
 

@@ -104,8 +104,22 @@ function useBookLongPress(book: BookItem, onOpen: (b: BookItem) => void) {
   };
 }
 
+export interface SeriesCardMeta {
+  seriesKey: string;
+  title: string;
+  subtitle: string;
+  chapterBadge: string;
+  kindBadge: string;
+  progress: number;
+  favorite: boolean;
+  wishlist: boolean;
+  packCount: number;
+  lastActivityAt?: number;
+}
+
 interface BookCardProps {
   book: BookItem;
+  seriesMeta?: SeriesCardMeta;
   onOpen: (book: BookItem) => void;
   onToggleFavorite: (book: BookItem) => void;
   onToggleWishlist?: (book: BookItem) => void;
@@ -116,6 +130,7 @@ interface BookCardProps {
 
 const BookCardInner: React.FC<BookCardProps> = ({
   book,
+  seriesMeta,
   onOpen,
   onToggleFavorite,
   onToggleWishlist,
@@ -126,25 +141,31 @@ const BookCardInner: React.FC<BookCardProps> = ({
   const { isPressing, handlers } = useBookLongPress(book, onOpen);
 
   const hasOriginal = hasDisplayableOriginalCover(book);
+  const displayTitle = seriesMeta ? seriesMeta.title : book.title;
+  const displayAuthor = seriesMeta ? seriesMeta.subtitle : book.author;
+  const displayProgress = seriesMeta ? seriesMeta.progress : book.progress;
+  const displayFavorite = seriesMeta ? seriesMeta.favorite : book.favorite;
+  const displayWishlist = seriesMeta ? seriesMeta.wishlist : book.wishlist;
 
-  const adaptiveSeed = `${book.id}:${book.title}`;
+  const adaptiveSeed = `${book.id}:${displayTitle}`;
   const effectiveSpineColor = hasOriginal ? book.spineColor : getAdaptiveSpineCss(adaptiveSeed);
   const effectiveRibbonColor = hasOriginal
     ? book.ribbonColor || '#f2ba59'
     : getAdaptiveRibbonCss(adaptiveSeed);
 
-  const badgeLabel =
-    book.kind === 'manhwa'
-      ? 'MANHWA'
-      : book.kind === 'manga'
-      ? 'MANGA'
-      : book.kind === 'audiobook'
-      ? 'AUDIO'
-      : book.format.toUpperCase();
+  const badgeLabel = seriesMeta
+    ? seriesMeta.kindBadge
+    : book.kind === 'manhwa'
+    ? 'MANHWA'
+    : book.kind === 'manga'
+    ? 'MANGA'
+    : book.kind === 'audiobook'
+    ? 'AUDIO'
+    : book.format.toUpperCase();
 
   return (
     <article
-      className={`book-card ${isPressing ? 'pressing' : ''}`}
+      className={`book-card ${isPressing ? 'pressing' : ''} ${seriesMeta ? 'is-series-card' : ''}`}
       {...handlers}
       role="button"
       tabIndex={0}
@@ -161,7 +182,9 @@ const BookCardInner: React.FC<BookCardProps> = ({
           style={{ backgroundColor: effectiveSpineColor }}
         >
           <div className="book-cover-img-box">
-            <BookCoverVisual book={book} />
+            <BookCoverVisual
+              book={seriesMeta ? { ...book, title: displayTitle } : book}
+            />
 
             <span className="book-format-pill">
               {book.format === 'audio' ? (
@@ -173,7 +196,16 @@ const BookCardInner: React.FC<BookCardProps> = ({
               )}
             </span>
 
-            {!book.hasLocalFile && (
+            {seriesMeta && (
+              <span
+                className="series-chapter-pill"
+                title={`${seriesMeta.chapterBadge} (${seriesMeta.packCount} ${seriesMeta.packCount === 1 ? 'paquete' : 'paquetes'})`}
+              >
+                {seriesMeta.chapterBadge}
+              </span>
+            )}
+
+            {!seriesMeta && !book.hasLocalFile && (
               <span
                 className="book-format-pill"
                 style={{
@@ -202,35 +234,35 @@ const BookCardInner: React.FC<BookCardProps> = ({
               onContextMenu={(e) => e.stopPropagation()}
             >
               <button
-                className={`book-mini-btn ${book.favorite ? 'fav-active' : ''}`}
+                className={`book-mini-btn ${displayFavorite ? 'fav-active' : ''}`}
                 onClick={() => onToggleFavorite(book)}
-                title={book.favorite ? 'Quitar de favoritos' : 'Añadir a favoritos'}
+                title={displayFavorite ? 'Quitar de favoritos' : 'Añadir a favoritos'}
               >
-                <Star size={13} fill={book.favorite ? 'currentColor' : 'none'} />
+                <Star size={13} fill={displayFavorite ? 'currentColor' : 'none'} />
               </button>
               {onToggleWishlist && (
                 <button
-                  className={`book-mini-btn ${book.wishlist ? 'fav-active' : ''}`}
+                  className={`book-mini-btn ${displayWishlist ? 'fav-active' : ''}`}
                   onClick={() => onToggleWishlist(book)}
-                  title={book.wishlist ? 'Quitar de Por leer' : 'Guardar en Por leer'}
+                  title={displayWishlist ? 'Quitar de Por leer' : 'Guardar en Por leer'}
                 >
-                  <BookMarked size={13} fill={book.wishlist ? 'currentColor' : 'none'} />
+                  <BookMarked size={13} fill={displayWishlist ? 'currentColor' : 'none'} />
                 </button>
               )}
               <button
                 className="book-mini-btn"
                 onClick={() => onEdit(book)}
-                title="Personalizar portada, título, categorías..."
+                title={seriesMeta ? 'Ver ficha y capítulos de la serie' : 'Personalizar portada, título, categorías...'}
               >
                 <Edit3 size={12} />
               </button>
             </div>
 
-            {book.progress > 0 && (
-              <div className="book-progress-track" title={`Progreso: ${Math.round(book.progress)}%`}>
+            {displayProgress > 0 && (
+              <div className="book-progress-track" title={`Progreso: ${Math.round(displayProgress)}%`}>
                 <div
                   className="book-progress-fill"
-                  style={{ width: `${Math.min(100, Math.max(4, book.progress))}%` }}
+                  style={{ width: `${Math.min(100, Math.max(4, displayProgress))}%` }}
                 />
               </div>
             )}
@@ -247,41 +279,52 @@ const BookCardInner: React.FC<BookCardProps> = ({
       </div>
 
       <div className="book-meta">
-        <div className="book-title" title={book.title}>
-          {book.title}
+        <div className="book-title" title={displayTitle}>
+          {displayTitle}
         </div>
-        <div className="book-author" title={book.author}>
-          {book.author}
+        <div className="book-author" title={displayAuthor}>
+          {displayAuthor}
         </div>
-        {(book.progress > 0 || book.lastReadAt || book.finishedAt || book.lastChapterFinishedAt) && (
-          <div
-            className="book-time-meta"
-            title={[
-              `Progreso: ${Math.round(book.progress || 0)}%`,
-              book.lastReadAt ? `Última lectura: ${formatDateTime(book.lastReadAt)}` : '',
-              book.lastChapterFinishedAt
-                ? `Últ. cap. terminado${book.lastChapterFinishedTitle ? ` (${book.lastChapterFinishedTitle})` : ''}: ${formatDateTime(book.lastChapterFinishedAt)}`
-                : '',
-              book.finishedAt ? `Libro terminado: ${formatDateTime(book.finishedAt)}` : '',
-            ]
-              .filter(Boolean)
-              .join('\n')}
-          >
-            <span className="book-time-pct">{Math.round(book.progress || 0)}%</span>
-            {book.finishedAt ? (
-              <span className="book-time-stamp done">
-                <CheckCircle2 size={9} /> {formatCompactDateTime(book.finishedAt)}
-              </span>
-            ) : book.lastChapterFinishedAt ? (
-              <span className="book-time-stamp done">
-                <CheckCircle2 size={9} /> Cap. {formatCompactDateTime(book.lastChapterFinishedAt)}
-              </span>
-            ) : book.lastReadAt ? (
+        {seriesMeta ? (
+          <div className="book-time-meta">
+            <span className="book-time-pct">{Math.round(displayProgress || 0)}%</span>
+            {seriesMeta.lastActivityAt ? (
               <span className="book-time-stamp">
-                <Clock size={9} /> {formatCompactDateTime(book.lastReadAt)}
+                <Clock size={9} /> {formatCompactDateTime(seriesMeta.lastActivityAt)}
               </span>
             ) : null}
           </div>
+        ) : (
+          (book.progress > 0 || book.lastReadAt || book.finishedAt || book.lastChapterFinishedAt) && (
+            <div
+              className="book-time-meta"
+              title={[
+                `Progreso: ${Math.round(book.progress || 0)}%`,
+                book.lastReadAt ? `Última lectura: ${formatDateTime(book.lastReadAt)}` : '',
+                book.lastChapterFinishedAt
+                  ? `Últ. cap. terminado${book.lastChapterFinishedTitle ? ` (${book.lastChapterFinishedTitle})` : ''}: ${formatDateTime(book.lastChapterFinishedAt)}`
+                  : '',
+                book.finishedAt ? `Libro terminado: ${formatDateTime(book.finishedAt)}` : '',
+              ]
+                .filter(Boolean)
+                .join('\n')}
+            >
+              <span className="book-time-pct">{Math.round(book.progress || 0)}%</span>
+              {book.finishedAt ? (
+                <span className="book-time-stamp done">
+                  <CheckCircle2 size={9} /> {formatCompactDateTime(book.finishedAt)}
+                </span>
+              ) : book.lastChapterFinishedAt ? (
+                <span className="book-time-stamp done">
+                  <CheckCircle2 size={9} /> Cap. {formatCompactDateTime(book.lastChapterFinishedAt)}
+                </span>
+              ) : book.lastReadAt ? (
+                <span className="book-time-stamp">
+                  <Clock size={9} /> {formatCompactDateTime(book.lastReadAt)}
+                </span>
+              ) : null}
+            </div>
+          )
         )}
       </div>
     </article>
@@ -292,6 +335,7 @@ export const BookCard = React.memo(BookCardInner);
 
 const BookListRowInner: React.FC<BookCardProps> = ({
   book,
+  seriesMeta,
   onOpen,
   onToggleFavorite,
   onEdit,
@@ -299,22 +343,26 @@ const BookListRowInner: React.FC<BookCardProps> = ({
   const { isPressing, handlers } = useBookLongPress(book, onOpen);
 
   const hasOriginal = hasDisplayableOriginalCover(book);
+  const displayTitle = seriesMeta ? seriesMeta.title : book.title;
+  const displayAuthor = seriesMeta ? seriesMeta.subtitle : book.author;
+  const displayFavorite = seriesMeta ? seriesMeta.favorite : book.favorite;
 
-  const adaptiveSeed = `${book.id}:${book.title}`;
+  const adaptiveSeed = `${book.id}:${displayTitle}`;
   const effectiveSpineColor = hasOriginal ? book.spineColor : getAdaptiveSpineCss(adaptiveSeed);
-  const pct = Math.round(book.progress || 0);
-  const badgeLabel =
-    book.kind === 'manhwa'
-      ? 'MANHWA'
-      : book.kind === 'manga'
-      ? 'MANGA'
-      : book.kind === 'audiobook'
-      ? 'AUDIO'
-      : book.format.toUpperCase();
+  const pct = Math.round((seriesMeta ? seriesMeta.progress : book.progress) || 0);
+  const badgeLabel = seriesMeta
+    ? seriesMeta.kindBadge
+    : book.kind === 'manhwa'
+    ? 'MANHWA'
+    : book.kind === 'manga'
+    ? 'MANGA'
+    : book.kind === 'audiobook'
+    ? 'AUDIO'
+    : book.format.toUpperCase();
 
   return (
     <article
-      className={`book-list-row ${isPressing ? 'pressing' : ''}`}
+      className={`book-list-row ${isPressing ? 'pressing' : ''} ${seriesMeta ? 'is-series-row' : ''}`}
       {...handlers}
       role="button"
       tabIndex={0}
@@ -327,23 +375,26 @@ const BookListRowInner: React.FC<BookCardProps> = ({
     >
       <div className="book-list-thumb" style={{ backgroundColor: effectiveSpineColor }}>
         <div className="book-cover-img-box" style={{ borderRadius: 6 }}>
-          <BookCoverVisual book={book} compact />
+          <BookCoverVisual book={seriesMeta ? { ...book, title: displayTitle } : book} compact />
         </div>
       </div>
 
       <div className="book-list-info">
         <div className="book-list-top">
-          <div className="book-list-title" title={book.title}>
-            {book.title}
+          <div className="book-list-title" title={displayTitle}>
+            {displayTitle}
           </div>
+          {seriesMeta && (
+            <span className="book-list-fmt series-cap-chip">{seriesMeta.chapterBadge}</span>
+          )}
           <span className="book-list-fmt">{badgeLabel}</span>
         </div>
 
         <div className="book-list-sub">
-          <span className="book-list-author" title={book.author}>
-            {book.author}
+          <span className="book-list-author" title={displayAuthor}>
+            {displayAuthor}
           </span>
-          {book.folderPath && (
+          {!seriesMeta && book.folderPath && (
             <span className="book-list-folder" title={`Carpeta: ${book.folderPath}`}>
               <Folder size={10} /> {book.folderPath}
             </span>
@@ -361,12 +412,17 @@ const BookListRowInner: React.FC<BookCardProps> = ({
         </div>
 
         <div className="book-list-dates">
-          {book.lastReadAt && (
+          {seriesMeta ? (
+            <span>
+              {seriesMeta.packCount} {seriesMeta.packCount === 1 ? 'paquete' : 'paquetes'}
+              {seriesMeta.lastActivityAt ? ` · ${formatCompactDateTime(seriesMeta.lastActivityAt)}` : ''}
+            </span>
+          ) : book.lastReadAt ? (
             <span title={`Última lectura: ${formatDateTime(book.lastReadAt)}`}>
               <Clock size={10} /> Leído: {formatCompactDateTime(book.lastReadAt)}
             </span>
-          )}
-          {book.finishedAt ? (
+          ) : null}
+          {!seriesMeta && (book.finishedAt ? (
             <span className="done" title={`Libro terminado: ${formatDateTime(book.finishedAt)}`}>
               <CheckCircle2 size={10} /> Fin: {formatCompactDateTime(book.finishedAt)}
             </span>
@@ -381,7 +437,7 @@ const BookListRowInner: React.FC<BookCardProps> = ({
             <span title={`Importado: ${formatDateTime(book.addedAt)}`}>
               Importado: {formatCompactDateTime(book.addedAt)}
             </span>
-          ) : null}
+          ) : null)}
         </div>
       </div>
 
@@ -393,19 +449,19 @@ const BookListRowInner: React.FC<BookCardProps> = ({
       >
         <button
           type="button"
-          className={`circle-arrow-btn ${book.favorite ? 'active-fav' : ''}`}
+          className={`circle-arrow-btn ${displayFavorite ? 'active-fav' : ''}`}
           style={{ width: 30, height: 30 }}
           onClick={() => onToggleFavorite(book)}
-          title={book.favorite ? 'Quitar de favoritos' : 'Añadir a favoritos'}
+          title={displayFavorite ? 'Quitar de favoritos' : 'Añadir a favoritos'}
         >
-          <Star size={13} fill={book.favorite ? 'currentColor' : 'none'} />
+          <Star size={13} fill={displayFavorite ? 'currentColor' : 'none'} />
         </button>
         <button
           type="button"
           className="circle-arrow-btn"
           style={{ width: 30, height: 30 }}
           onClick={() => onEdit(book)}
-          title="Editar título, portada o detalles"
+          title={seriesMeta ? 'Ver ficha y capítulos' : 'Editar título, portada o detalles'}
         >
           <Edit3 size={13} />
         </button>

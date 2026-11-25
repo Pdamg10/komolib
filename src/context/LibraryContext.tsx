@@ -158,6 +158,11 @@ import {
   learnFromInteraction,
   sanitizeAiReplyText,
 } from '../utils/aiAssistantUtils';
+import {
+  isVisualSeriesKind,
+  normalizeSeriesKey,
+  parseChapterPackInfo,
+} from '../utils/mangaSeriesUtils';
 
 export type RightPanelTab = 'chat' | 'notes';
 
@@ -217,6 +222,8 @@ interface LibraryContextValue {
   closeAudioPlayer: () => void;
   editingBook: BookItem | null;
   setEditingBook: (book: BookItem | null) => void;
+  activeSeriesKey: string | null;
+  setActiveSeriesKey: (key: string | null) => void;
   missingFileBook: BookItem | null;
   setMissingFileBook: (book: BookItem | null) => void;
   importModalOpen: boolean;
@@ -246,6 +253,7 @@ interface LibraryContextValue {
   removeDuplicateBooks: () => Promise<number>;
   attachLocalFileToBook: (bookId: string, file: File) => Promise<BookItem | null>;
   updateBook: (id: string, patch: Partial<BookItem>) => Promise<void>;
+  updateSeriesBooks: (bookIds: string[], patch: Partial<BookItem>) => Promise<void>;
   reExtractBookCover: (id: string) => Promise<boolean>;
   identifyBookWithAI: (
     id: string,
@@ -785,6 +793,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [audioBook, setAudioBook] = useState<BookItem | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [editingBook, setEditingBook] = useState<BookItem | null>(null);
+  const [activeSeriesKey, setActiveSeriesKey] = useState<string | null>(null);
   const [missingFileBook, setMissingFileBook] = useState<BookItem | null>(null);
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [studioModalOpen, setStudioModalOpen] = useState(false);
@@ -2878,13 +2887,58 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const existingWithoutFile = stateRef.current.books.filter((b) => !b.hasLocalFile && !b.isDemo);
       const existingFileNameKeys = new Set<string>();
       const existingTitleKeys = new Set<string>();
+      const existingSeriesRangeKeys = new Set<string>();
+      const makeSeriesRangeKey = (b: BookItem) => {
+        if (!isVisualSeriesKind(b.kind)) return '';
+        const p = parseChapterPackInfo(b.seriesName || b.title, b.fileName, b.folderPath || '', b.kind);
+        const start = b.chapterStart ?? p.chapterStart;
+        const end = b.chapterEnd ?? p.chapterEnd ?? start;
+        if (start === undefined) return '';
+        const sKey = normalizeSeriesKey(b.seriesName?.trim() || p.seriesName);
+        return sKey ? `${sKey}::${start}::${end}` : '';
+      };
       for (const b of stateRef.current.books) {
         if (b.isDemo || !b.hasLocalFile) continue;
         const fk = normalizeMatch(b.fileName || '');
         const tk = normalizeMatch(b.title || '');
+        const srk = makeSeriesRangeKey(b);
         if (fk) existingFileNameKeys.add(fk);
         if (tk) existingTitleKeys.add(tk);
+        if (srk) existingSeriesRangeKeys.add(srk);
       }
+
+      const enrichVisualSeriesBook = (book: BookItem, folderPathStr: string) => {
+        const canAutoSeries =
+          isVisualSeriesKind(book.kind) ||
+          ((book.format === 'pdf' || book.format === 'cbz' || book.format === 'cbr' || book.format === 'images') &&
+            (/manhwa|manhua|webtoon|manga|c[oó]mic/i.test(`${folderPathStr} ${book.fileName}`) ||
+              parseChapterPackInfo(book.title, book.fileName, folderPathStr, book.kind).hasChapterPattern));
+        if (!canAutoSeries) return;
+        const parsed = parseChapterPackInfo(book.title, book.fileName, folderPathStr, book.kind);
+        if (!isVisualSeriesKind(book.kind)) {
+          book.kind = parsed.originTag === 'comic' ? 'comic' : parsed.originTag === 'manga' ? 'manga' : 'manhwa';
+        }
+        book.seriesName = book.seriesName?.trim() || parsed.seriesName;
+        if (book.chapterStart === undefined && parsed.chapterStart !== undefined) {
+          book.chapterStart = parsed.chapterStart;
+        }
+        if (book.chapterEnd === undefined && parsed.chapterEnd !== undefined) {
+          book.chapterEnd = parsed.chapterEnd;
+        }
+        if (book.seriesOrder === undefined && parsed.chapterStart !== undefined) {
+          book.seriesOrder = parsed.chapterStart;
+        }
+        book.originTag = book.originTag || parsed.originTag;
+        if (parsed.fansubs.length > 0) {
+          book.fansubs = Array.from(new Set([...(book.fansubs || []), ...parsed.fansubs]));
+        }
+        const catSet = new Set(book.categories || []);
+        if (book.kind === 'manhwa' || book.kind === 'manga' || book.kind === 'comic') {
+          catSet.delete('ebooks');
+          catSet.add(book.kind);
+          book.categories = Array.from(catSet);
+        }
+      };
 
       const linkedExistingIds = new Set<string>();
       let linkedCount = 0;
@@ -2944,8 +2998,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             categories: opts?.categories,
           });
           if (folder) bundle.book.folderPath = folder;
+          enrichVisualSeriesBook(bundle.book, folder || '');
 
           const titleKey = normalizeMatch(bundle.book.title);
+          const seriesRangeKey = makeSeriesRangeKey(bundle.book);
           const existingMatch =
             catalogMatchByName ||
             existingWithoutFile.find(
@@ -3005,7 +3061,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             if (allowAutoUpload) uploadQueue.push(mergedExisting);
           } else if (
             skipDups &&
-            ((fnKey && existingFileNameKeys.has(fnKey)) || (titleKey && existingTitleKeys.has(titleKey)))
+            ((fnKey && existingFileNameKeys.has(fnKey)) ||
+              (titleKey && existingTitleKeys.has(titleKey)) ||
+              (seriesRangeKey && existingSeriesRangeKeys.has(seriesRangeKey)))
           ) {
             recordDuplicate(bundle.book.title || f.name);
           } else {
@@ -3015,6 +3073,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             pendingNewBatch.push(bundle.book);
             if (fnKey) existingFileNameKeys.add(fnKey);
             if (titleKey) existingTitleKeys.add(titleKey);
+            if (seriesRangeKey) existingSeriesRangeKeys.add(seriesRangeKey);
             if (allowAutoUpload) uploadQueue.push(bundle.book);
           }
         } catch (err) {
@@ -3222,6 +3281,16 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const byUri = new Map<string, BookItem>();
       const byFileKey = new Map<string, BookItem>();
       const byTitleKey = new Map<string, BookItem>();
+      const bySeriesRangeKey = new Map<string, BookItem>();
+      const makeNativeSeriesRangeKey = (b: BookItem) => {
+        if (!isVisualSeriesKind(b.kind)) return '';
+        const p = parseChapterPackInfo(b.seriesName || b.title, b.fileName, b.folderPath || '', b.kind);
+        const start = b.chapterStart ?? p.chapterStart;
+        const end = b.chapterEnd ?? p.chapterEnd ?? start;
+        if (start === undefined) return '';
+        const sKey = normalizeSeriesKey(b.seriesName?.trim() || p.seriesName);
+        return sKey ? `${sKey}::${start}::${end}` : '';
+      };
       for (const b of currentBooks) {
         if (b.isDemo) continue;
         if (b.nativeFileUri) byUri.set(b.nativeFileUri, b);
@@ -3229,6 +3298,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (fk && !byFileKey.has(fk)) byFileKey.set(fk, b);
         const tk = normalizeMatch(b.title || '');
         if (tk && !byTitleKey.has(tk)) byTitleKey.set(tk, b);
+        const srk = makeNativeSeriesRangeKey(b);
+        if (srk && !bySeriesRangeKey.has(srk)) bySeriesRangeKey.set(srk, b);
       }
 
       const newlyCreated: BookItem[] = [];
@@ -3249,6 +3320,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         });
         const title = resolvedMeta.title;
         const author = opts?.author?.trim() || resolvedMeta.author;
+        const rawParsedPack =
+          fmt === 'pdf' || fmt === 'cbz' || fmt === 'cbr' || fmt === 'images'
+            ? parseChapterPackInfo(title, it.fileName, it.folderPath || '', opts?.kind || 'manhwa')
+            : null;
         const kind: ContentKind =
           opts?.kind ||
           (fmt === 'audio'
@@ -3257,7 +3332,21 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             ? 'manhwa'
             : fmt === 'cbz' || fmt === 'cbr' || /manga/i.test(`${it.folderPath || ''} ${it.fileName}`)
             ? 'manga'
+            : rawParsedPack?.hasChapterPattern
+            ? rawParsedPack.originTag === 'comic'
+              ? 'comic'
+              : rawParsedPack.originTag === 'manga'
+              ? 'manga'
+              : 'manhwa'
             : 'book');
+
+        const visualPack = isVisualSeriesKind(kind)
+          ? parseChapterPackInfo(title, it.fileName, it.folderPath || '', kind)
+          : null;
+        const nativeSeriesRangeKey =
+          visualPack && visualPack.chapterStart !== undefined && visualPack.seriesKey
+            ? `${visualPack.seriesKey}::${visualPack.chapterStart}::${visualPack.chapterEnd ?? visualPack.chapterStart}`
+            : '';
 
         const realCoverUrl = it.coverBase64 ? `data:image/jpeg;base64,${it.coverBase64}` : undefined;
         const fnKey = normalizeMatch(it.fileName);
@@ -3266,7 +3355,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const existing =
           byUri.get(it.uri) ||
           (fnKey ? byFileKey.get(fnKey) : undefined) ||
-          (titleKey ? byTitleKey.get(titleKey) : undefined);
+          (titleKey ? byTitleKey.get(titleKey) : undefined) ||
+          (nativeSeriesRangeKey ? bySeriesRangeKey.get(nativeSeriesRangeKey) : undefined);
 
         if (existing) {
           const wasMissingFile = !existing.hasLocalFile;
@@ -3351,6 +3441,16 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           wishlist: false,
           hasLocalFile: true,
           nativeFileUri: it.uri,
+          ...(visualPack
+            ? {
+                seriesName: visualPack.seriesName,
+                chapterStart: visualPack.chapterStart,
+                chapterEnd: visualPack.chapterEnd,
+                seriesOrder: visualPack.chapterStart,
+                originTag: visualPack.originTag,
+                fansubs: visualPack.fansubs.length > 0 ? visualPack.fansubs : undefined,
+              }
+            : {}),
           addedAt: now + i,
           updatedAt: now + i,
         };
@@ -3359,6 +3459,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         byUri.set(it.uri, created);
         if (fnKey) byFileKey.set(fnKey, created);
         if (titleKey) byTitleKey.set(titleKey, created);
+        if (nativeSeriesRangeKey) bySeriesRangeKey.set(nativeSeriesRangeKey, created);
       }
 
       if (newlyCreated.length > 0 || updatedMap.size > 0) {
@@ -3656,6 +3757,45 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
+      scheduleAutoSync(false, 'books');
+    },
+    [scheduleAutoSync]
+  );
+
+  const updateSeriesBooks = useCallback(
+    async (bookIds: string[], patch: Partial<BookItem>) => {
+      const idSet = new Set(bookIds);
+      if (idSet.size === 0) return;
+      const now = Date.now();
+      const updatedList: BookItem[] = [];
+      const nextBooks = stateRef.current.books.map((b) => {
+        if (!idSet.has(b.id)) return b;
+        const nextCats =
+          patch.kind && isVisualSeriesKind(patch.kind)
+            ? Array.from(
+                new Set([
+                  ...(b.categories || []).filter((c) => c !== 'ebooks' && c !== 'manga' && c !== 'manhwa' && c !== 'comic'),
+                  patch.kind,
+                ])
+              )
+            : b.categories;
+        const updated: BookItem = {
+          ...b,
+          ...patch,
+          categories: patch.categories ?? nextCats,
+          updatedAt: now,
+        };
+        updatedList.push(updated);
+        return updated;
+      });
+      if (updatedList.length === 0) return;
+      stateRef.current.books = nextBooks;
+      setBooks(nextBooks);
+      setActiveBook((curr) => {
+        if (!curr || !idSet.has(curr.id)) return curr;
+        return updatedList.find((u) => u.id === curr.id) || curr;
+      });
+      await Promise.all(updatedList.map((u) => dbPutBook(u).catch(() => undefined)));
       scheduleAutoSync(false, 'books');
     },
     [scheduleAutoSync]
@@ -7680,6 +7820,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       closeAudioPlayer,
       editingBook,
       setEditingBook,
+      activeSeriesKey,
+      setActiveSeriesKey,
       missingFileBook,
       setMissingFileBook,
       importModalOpen,
@@ -7694,6 +7836,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       removeDuplicateBooks,
       attachLocalFileToBook,
       updateBook,
+      updateSeriesBooks,
       reExtractBookCover,
       identifyBookWithAI,
       deleteBook,
@@ -7820,6 +7963,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       audioUrl,
       closeAudioPlayer,
       editingBook,
+      activeSeriesKey,
       missingFileBook,
       importModalOpen,
       studioModalOpen,
@@ -7830,6 +7974,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       removeDuplicateBooks,
       attachLocalFileToBook,
       updateBook,
+      updateSeriesBooks,
       reExtractBookCover,
       identifyBookWithAI,
       deleteBook,

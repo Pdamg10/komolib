@@ -12,6 +12,7 @@ import { BookShelf } from './components/BookShelf';
 import { CategoryStrip } from './components/CategoryStrip';
 import { DashboardView } from './components/DashboardView';
 import { ImportModal } from './components/ImportModal';
+import { MangaSeriesModal } from './components/MangaSeriesModal';
 import { MissingFileModal } from './components/MissingFileModal';
 import { ProfileModal } from './components/ProfileModal';
 import { ReadingLogView } from './components/ReadingLogView';
@@ -43,6 +44,8 @@ const AppWorkspace: React.FC = () => {
     setProfileModalOpen,
     editingBook,
     setEditingBook,
+    activeSeriesKey,
+    setActiveSeriesKey,
     missingFileBook,
     setMissingFileBook,
     remoteActiveSession,
@@ -97,6 +100,10 @@ const AppWorkspace: React.FC = () => {
       setEditingBook(null);
       return true;
     }
+    if (activeSeriesKey) {
+      setActiveSeriesKey(null);
+      return true;
+    }
     if (studioModalOpen) {
       setStudioModalOpen(false);
       return true;
@@ -124,12 +131,14 @@ const AppWorkspace: React.FC = () => {
     return false;
   }, [
     activeBook,
+    activeSeriesKey,
     closeReader,
     editingBook,
     importModalOpen,
     missingFileBook,
     navSection,
     profileModalOpen,
+    setActiveSeriesKey,
     setEditingBook,
     setImportModalOpen,
     setMissingFileBook,
@@ -373,6 +382,7 @@ const AppWorkspace: React.FC = () => {
       {importModalOpen && <ImportModal />}
       {studioModalOpen && <StudioModal />}
       <BookOptionsSheet />
+      {activeSeriesKey && <MangaSeriesModal />}
       {editingBook && <BookDetailModal />}
       {missingFileBook && <MissingFileModal />}
       {profileModalOpen && <ProfileModal />}

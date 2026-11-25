@@ -4,6 +4,7 @@ import {
   Bookmark,
   BookmarkPlus,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Edit3,
   Eye,
@@ -37,6 +38,7 @@ import {
 } from '../../data/bookmarksCatalog';
 import { dbGetBookFile } from '../../db/localDb';
 import { readNativeUriAsBlob } from '../../utils/nativeBridge';
+import { getSeriesNavigationForBook } from '../../utils/mangaSeriesUtils';
 import { subscribeToRoomStream } from '../../services/sharedReadingService';
 import type {
   AnnotationTool,
@@ -70,7 +72,10 @@ const TOOL_LIST: AnnotationTool[] = [
 
 export const ReaderShell: React.FC = () => {
   const {
+    books,
     activeBook,
+    openBook,
+    setActiveSeriesKey,
     readerJumpTarget,
     clearReaderJumpTarget,
     closeReader,
@@ -164,6 +169,11 @@ export const ReaderShell: React.FC = () => {
   const activeRoom = activeBook
     ? sharedRooms.find((r) => r.bookId === activeBook.id)
     : undefined;
+
+  const seriesNav = useMemo(
+    () => getSeriesNavigationForBook(books, activeBook),
+    [books, activeBook]
+  );
 
   const bookAnnotations = useMemo(
     () => (activeBook ? annotations.filter((a) => a.bookId === activeBook.id) : []),
@@ -599,9 +609,15 @@ export const ReaderShell: React.FC = () => {
             <ArrowLeft size={isPhone ? 16 : 17} />
           </button>
           <div className="reader-topbar-meta">
-            <div className="reader-topbar-title">{activeBook.title}</div>
+            <div className="reader-topbar-title">
+              {seriesNav ? seriesNav.series.seriesName : activeBook.title}
+            </div>
             <div className="reader-topbar-sub" style={{ color: pal.muted }}>
-              {livePos.chapter ? `${livePos.chapter} · ` : `${activeBook.author} · `}
+              {seriesNav
+                ? `${seriesNav.series.chapters[seriesNav.currentIndex]?.label || activeBook.title} · `
+                : livePos.chapter
+                ? `${livePos.chapter} · `
+                : `${activeBook.author} · `}
               {livePos.page ? `Pág. ${livePos.page} · ` : ''}
               {livePos.pct}%
             </div>
@@ -609,6 +625,75 @@ export const ReaderShell: React.FC = () => {
         </div>
 
         <div className="reader-topbar-actions">
+          {!isPhone && seriesNav && (
+            <div className="reader-series-nav" role="group" aria-label="Cambiar capítulo de la serie">
+              <button
+                type="button"
+                className="pill-btn reader-bar-pill"
+                disabled={!seriesNav.prevEntry}
+                style={{
+                  background: 'rgba(128,128,128,0.16)',
+                  color: pal.fg,
+                  borderColor: 'transparent',
+                  opacity: seriesNav.prevEntry ? 1 : 0.4,
+                }}
+                onClick={() => {
+                  if (seriesNav.prevEntry) void openBook(seriesNav.prevEntry.book);
+                }}
+                title={
+                  seriesNav.prevEntry
+                    ? `Ir a ${seriesNav.prevEntry.label}`
+                    : 'Primer paquete de la serie'
+                }
+              >
+                <ChevronLeft size={13} />
+                {!isTablet && <span>Ant.</span>}
+              </button>
+              <button
+                type="button"
+                className="pill-btn reader-bar-pill"
+                style={{
+                  background: 'rgba(128,128,128,0.16)',
+                  color: pal.fg,
+                  borderColor: 'transparent',
+                }}
+                onClick={() => {
+                  const key = seriesNav.series.seriesKey;
+                  closeReader();
+                  setActiveSeriesKey(key);
+                }}
+                title="Ver todos los capítulos de esta serie"
+              >
+                <span>
+                  {seriesNav.currentIndex + 1}/{seriesNav.series.chapters.length}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="pill-btn reader-bar-pill"
+                disabled={!seriesNav.nextEntry}
+                style={{
+                  background: seriesNav.nextEntry
+                    ? 'var(--accent-primary)'
+                    : 'rgba(128,128,128,0.16)',
+                  color: seriesNav.nextEntry ? 'var(--accent-contrast)' : pal.fg,
+                  borderColor: 'transparent',
+                  opacity: seriesNav.nextEntry ? 1 : 0.4,
+                }}
+                onClick={() => {
+                  if (seriesNav.nextEntry) void openBook(seriesNav.nextEntry.book);
+                }}
+                title={
+                  seriesNav.nextEntry
+                    ? `Siguiente: ${seriesNav.nextEntry.label}`
+                    : 'Último paquete disponible'
+                }
+              >
+                {!isTablet && <span>Sig.</span>}
+                <ChevronRight size={13} />
+              </button>
+            </div>
+          )}
           {isPhone ? (
             <>
               <button
@@ -869,6 +954,54 @@ export const ReaderShell: React.FC = () => {
           >
             <BookmarkPlus size={13} /> Separador
           </button>
+
+          {seriesNav && (
+            <>
+              {seriesNav.prevEntry && (
+                <button
+                  type="button"
+                  className="pill-btn reader-sub-btn"
+                  style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg, borderColor: 'transparent' }}
+                  onClick={() => {
+                    setMobileToolsOpen(false);
+                    if (seriesNav.prevEntry) void openBook(seriesNav.prevEntry.book);
+                  }}
+                >
+                  <ChevronLeft size={13} /> {seriesNav.prevEntry.label}
+                </button>
+              )}
+              {seriesNav.nextEntry && (
+                <button
+                  type="button"
+                  className="pill-btn reader-sub-btn"
+                  style={{
+                    background: 'var(--accent-primary)',
+                    color: 'var(--accent-contrast)',
+                    borderColor: 'transparent',
+                  }}
+                  onClick={() => {
+                    setMobileToolsOpen(false);
+                    if (seriesNav.nextEntry) void openBook(seriesNav.nextEntry.book);
+                  }}
+                >
+                  {seriesNav.nextEntry.label} <ChevronRight size={13} />
+                </button>
+              )}
+              <button
+                type="button"
+                className="pill-btn reader-sub-btn"
+                style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg, borderColor: 'transparent' }}
+                onClick={() => {
+                  const key = seriesNav.series.seriesKey;
+                  setMobileToolsOpen(false);
+                  closeReader();
+                  setActiveSeriesKey(key);
+                }}
+              >
+                <List size={13} /> Capítulos ({seriesNav.series.chapters.length})
+              </button>
+            </>
+          )}
         </div>
       )}
 

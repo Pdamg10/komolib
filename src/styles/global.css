@@ -5925,3 +5925,379 @@ select.studio-input {
   border-radius: 10px;
   padding: 7px 10px;
 }
+
+/* =========================================================
+   Unified Manga / Manhwa / Comic Series Cards & Modal
+   (Lightweight, zero backdrop-filter blur for 60 FPS)
+   ========================================================= */
+.series-chapter-pill {
+  position: absolute;
+  left: 7px;
+  bottom: 14px;
+  max-width: calc(100% - 14px);
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  background: rgba(24, 19, 16, 0.86);
+  color: #fff8ee;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.series-cap-chip {
+  background: color-mix(in srgb, var(--accent-primary) 16%, var(--banner-bg));
+  color: var(--accent-primary);
+}
+
+.series-modal-card {
+  width: min(760px, calc(100vw - 24px));
+  max-height: min(90vh, 880px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.series-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.series-modal-kicker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--accent-primary);
+  margin-bottom: 3px;
+}
+
+.series-modal-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 900;
+  line-height: 1.22;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.series-hero-grid {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.series-cover-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.series-progress-box {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.series-progress-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.series-progress-top strong {
+  color: var(--accent-primary);
+}
+
+.series-quick-icons {
+  width: 100%;
+  display: flex;
+  gap: 6px;
+}
+
+.series-ficha-card {
+  background: var(--banner-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.series-ficha-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.series-ficha-label {
+  font-weight: 800;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.series-ficha-value {
+  color: var(--text-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.series-ficha-value.strong {
+  font-weight: 800;
+}
+
+.series-ficha-value.muted {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.series-missing-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #b86214;
+  background: rgba(235, 168, 52, 0.14);
+  border: 1px solid rgba(235, 168, 52, 0.32);
+  border-radius: 10px;
+  padding: 5px 9px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.series-ficha-synopsis {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.series-ficha-synopsis p {
+  margin: 0;
+  font-size: 12.2px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-line;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.series-ficha-synopsis p.muted {
+  color: var(--text-muted);
+}
+
+.series-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.series-editor-box {
+  background: var(--banner-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.series-telegram-paste {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+
+.series-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+
+.series-field-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 3px;
+  color: var(--text-primary);
+}
+
+.series-chapters-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.series-chapters-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.series-chapters-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 310px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.series-chapter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: var(--banner-bg);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  contain: layout style;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.series-chapter-row:hover {
+  border-color: var(--accent-primary);
+}
+
+.series-chapter-row.is-continue {
+  border-color: var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-primary) 8%, var(--banner-bg));
+}
+
+.series-chapter-row.is-done {
+  opacity: 0.86;
+}
+
+.series-chapter-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.series-chapter-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.series-chapter-label {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.series-chapter-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
+.series-chapter-tag.current {
+  background: var(--accent-primary);
+  color: var(--accent-contrast);
+}
+
+.series-chapter-tag.done {
+  background: rgba(45, 147, 108, 0.16);
+  color: #2d936c;
+}
+
+.series-chapter-tag.cloud {
+  background: rgba(128, 128, 128, 0.16);
+  color: var(--text-muted);
+}
+
+.series-chapter-tag.dup {
+  background: rgba(200, 75, 78, 0.14);
+  color: #c84b4e;
+}
+
+.series-chapter-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.series-chapter-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.series-chapter-pct-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.series-chapter-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.reader-series-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+@media (max-width: 640px) {
+  .series-hero-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .series-cover-col {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .series-editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .series-chapter-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .series-chapter-right {
+    justify-content: space-between;
+  }
+}

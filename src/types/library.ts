@@ -78,6 +78,14 @@ export interface BookItem {
   lastChapterFinishedTitle?: string;
   seriesName?: string;
   seriesOrder?: number;
+  // Manga / Manhwa / Comic chapter-pack & series metadata (unused for standard books)
+  chapterStart?: number;
+  chapterEnd?: number;
+  seriesStatus?: 'ongoing' | 'completed' | 'hiatus' | 'cancelled';
+  fansubs?: string[];
+  genres?: string[];
+  totalChaptersExpected?: number;
+  originTag?: 'manga' | 'manhwa' | 'manhua' | 'comic';
   // Sync metadata
   hasLocalFile: boolean;
   nativeFileUri?: string; // Persistent Android SAF content:// URI for zero-duplication folder imports

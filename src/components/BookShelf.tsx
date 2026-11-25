@@ -18,8 +18,14 @@ import { useLibrary } from '../context/LibraryContext';
 import { ACCEPTED_AUDIO_EXTENSIONS } from '../parsers';
 import type { BookItem, ThemeConfig } from '../types/library';
 import { bookNeedsMetadataEnrichment } from '../utils/bookMetadata';
+import {
+  formatOriginBadge,
+  groupLibraryForDisplay,
+  type MangaSeriesGroup,
+  type ShelfDisplayItem,
+} from '../utils/mangaSeriesUtils';
 import { getEffectiveStatus } from '../utils/readingStats';
-import { BookCard, BookListRow } from './BookCard';
+import { BookCard, BookListRow, type SeriesCardMeta } from './BookCard';
 
 type SortKey = NonNullable<ThemeConfig['sortBy']>;
 type ReadingFilterKey = NonNullable<ThemeConfig['readingFilter']>;
@@ -50,6 +56,41 @@ function getReadingBucket(book: BookItem): Exclude<ReadingFilterKey, 'all'> {
   return 'unread';
 }
 
+function getDisplayItemBucket(item: ShelfDisplayItem): Exclude<ReadingFilterKey, 'all'> {
+  if (item.type === 'book') return getReadingBucket(item.book);
+  if (item.series.overallProgress >= 98) return 'completed';
+  if (item.series.overallProgress > 0) return 'reading';
+  return 'unread';
+}
+
+function buildSeriesCardMeta(series: MangaSeriesGroup): SeriesCardMeta {
+  const kindBadge =
+    series.originTag === 'manhua'
+      ? 'MANHUA'
+      : series.originTag === 'manhwa'
+      ? 'MANHWA'
+      : series.originTag === 'comic'
+      ? 'CÓMIC'
+      : 'MANGA';
+
+  const capShort = series.totalChaptersExpected
+    ? `${series.availableChaptersCount}/${series.totalChaptersExpected} caps`
+    : series.rangeLabel;
+
+  return {
+    seriesKey: series.seriesKey,
+    title: series.seriesName,
+    subtitle: `${formatOriginBadge(series.originTag)} · ${series.chapters.length} ${series.chapters.length === 1 ? 'archivo' : 'paquetes'}`,
+    chapterBadge: capShort,
+    kindBadge,
+    progress: series.overallProgress,
+    favorite: series.favorite,
+    wishlist: series.wishlist,
+    packCount: series.chapters.length,
+    lastActivityAt: series.lastActivityAt,
+  };
+}
+
 function isLowEndBatchSize(): number {
   if (typeof navigator === 'undefined') return 28;
   const nav = navigator as Navigator & { deviceMemory?: number };
@@ -71,7 +112,9 @@ const BookShelfInner: React.FC = () => {
     updateTheme,
     openBook,
     updateBook,
+    updateSeriesBooks,
     setEditingBook,
+    setActiveSeriesKey,
     importFiles,
     identifyBookWithAI,
     setImportModalOpen,
@@ -117,7 +160,7 @@ const BookShelfInner: React.FC = () => {
     for (const b of books) {
       map.set(
         b.id,
-        `${b.title} ${b.author} ${b.format} ${b.kind} ${b.folderPath || ''} ${b.tags.join(' ')} ${b.categories.join(' ')}`.toLowerCase()
+        `${b.title} ${b.seriesName || ''} ${b.author} ${b.format} ${b.kind} ${b.folderPath || ''} ${(b.genres || []).join(' ')} ${(b.fansubs || []).join(' ')} ${b.tags.join(' ')} ${b.categories.join(' ')}`.toLowerCase()
       );
     }
     return map;
@@ -131,7 +174,6 @@ const BookShelfInner: React.FC = () => {
     return books.filter((b) => {
       if (navSection === 'favorites' && !b.favorite) return false;
       if (navSection === 'wishlist' && !b.wishlist) return false;
-      if (navSection === 'reading' && getReadingBucket(b) !== 'completed') return false;
       if (navSection === 'audiobooks' && b.format !== 'audio' && b.kind !== 'audiobook') return false;
 
       if (activeCategory !== 'all' && navSection !== 'audiobooks') {
@@ -148,38 +190,55 @@ const BookShelfInner: React.FC = () => {
     });
   }, [activeCategory, books, categories, deferredSearch, navSection, searchIndexMap]);
 
+  // Group Manga/Manhwa/Comic chapter packs into unified series (Books & Audiobooks remain 100% untouched)
+  const groupedBaseItems = useMemo(() => {
+    const grouped = groupLibraryForDisplay(baseFiltered);
+    if (navSection === 'reading') {
+      return grouped.filter((it) => getDisplayItemBucket(it) === 'completed');
+    }
+    return grouped;
+  }, [baseFiltered, navSection]);
+
   // Reading filter counts
   const filterCounts = useMemo(() => {
     let unread = 0;
     let reading = 0;
     let completed = 0;
-    for (const b of baseFiltered) {
-      const bucket = getReadingBucket(b);
+    for (const item of groupedBaseItems) {
+      const bucket = getDisplayItemBucket(item);
       if (bucket === 'completed') completed++;
       else if (bucket === 'reading') reading++;
       else unread++;
     }
-    return { all: baseFiltered.length, unread, reading, completed };
-  }, [baseFiltered]);
+    return { all: groupedBaseItems.length, unread, reading, completed };
+  }, [groupedBaseItems]);
 
   const effectiveReadingFilter: ReadingFilterKey = navSection === 'reading' ? 'all' : readingFilter;
 
-  // Apply reading status filter + sorting
-  const sortedBooks = useMemo(() => {
+  // Apply reading status filter + sorting across unified display items
+  const sortedItems = useMemo(() => {
     const list =
       effectiveReadingFilter === 'all'
-        ? [...baseFiltered]
-        : baseFiltered.filter((b) => getReadingBucket(b) === effectiveReadingFilter);
+        ? [...groupedBaseItems]
+        : groupedBaseItems.filter((it) => getDisplayItemBucket(it) === effectiveReadingFilter);
 
     const dir = sortDir === 'asc' ? 1 : -1;
     const isUnknown = (a: string) => {
       const low = (a || '').trim().toLowerCase();
       return !low || low === 'autor desconocido' || low === 'unknown' || low === 'biblioteca personal';
     };
+    const itemTitle = (it: ShelfDisplayItem) =>
+      it.type === 'series' ? it.series.seriesName : it.book.title;
+    const itemBook = (it: ShelfDisplayItem) =>
+      it.type === 'series' ? it.series.primaryBook : it.book;
 
-    list.sort((a, b) => {
+    list.sort((ia, ib) => {
+      const a = itemBook(ia);
+      const b = itemBook(ib);
+      const taTitle = itemTitle(ia);
+      const tbTitle = itemTitle(ib);
       if (sortBy === 'title') {
-        return a.title.localeCompare(b.title, 'es', { numeric: true, sensitivity: 'base' }) * dir;
+        return taTitle.localeCompare(tbTitle, 'es', { numeric: true, sensitivity: 'base' }) * dir;
       }
       if (sortBy === 'author') {
         const aUnk = isUnknown(a.author);
@@ -187,10 +246,12 @@ const BookShelfInner: React.FC = () => {
         if (aUnk !== bUnk) return aUnk ? 1 : -1;
         const cmp = (a.author || '').localeCompare(b.author || '', 'es', { sensitivity: 'base' });
         if (cmp !== 0) return cmp * dir;
-        return a.title.localeCompare(b.title, 'es', { numeric: true, sensitivity: 'base' });
+        return taTitle.localeCompare(tbTitle, 'es', { numeric: true, sensitivity: 'base' });
       }
       if (sortBy === 'imported') {
-        return ((a.addedAt || 0) - (b.addedAt || 0)) * dir;
+        const aa = ia.type === 'series' ? Math.max(...ia.series.allBooks.map((x) => x.addedAt || 0)) : a.addedAt || 0;
+        const bb = ib.type === 'series' ? Math.max(...ib.series.allBooks.map((x) => x.addedAt || 0)) : b.addedAt || 0;
+        return (aa - bb) * dir;
       }
       if (sortBy === 'folder') {
         const fa = getBookFolderLabel(a);
@@ -200,20 +261,29 @@ const BookShelfInner: React.FC = () => {
         if (aNone !== bNone) return aNone ? 1 : -1;
         const cmp = fa.localeCompare(fb, 'es', { numeric: true, sensitivity: 'base' });
         if (cmp !== 0) return cmp * dir;
-        return a.title.localeCompare(b.title, 'es', { numeric: true, sensitivity: 'base' });
+        return taTitle.localeCompare(tbTitle, 'es', { numeric: true, sensitivity: 'base' });
       }
-      const ta = Math.max(a.lastReadAt || 0, a.finishedAt || 0, a.lastChapterFinishedAt || 0, a.addedAt || 0);
-      const tb = Math.max(b.lastReadAt || 0, b.finishedAt || 0, b.lastChapterFinishedAt || 0, b.addedAt || 0);
+      const ta =
+        ia.type === 'series'
+          ? ia.series.lastActivityAt
+          : Math.max(a.lastReadAt || 0, a.finishedAt || 0, a.lastChapterFinishedAt || 0, a.addedAt || 0);
+      const tb =
+        ib.type === 'series'
+          ? ib.series.lastActivityAt
+          : Math.max(b.lastReadAt || 0, b.finishedAt || 0, b.lastChapterFinishedAt || 0, b.addedAt || 0);
       return (ta - tb) * dir;
     });
 
     return list;
-  }, [baseFiltered, effectiveReadingFilter, sortBy, sortDir]);
+  }, [groupedBaseItems, effectiveReadingFilter, sortBy, sortDir]);
 
   // Count books in current view that are missing title, author, or clean synopsis
   const incompleteBooks = useMemo(
-    () => sortedBooks.filter((b) => bookNeedsMetadataEnrichment(b)),
-    [sortedBooks]
+    () =>
+      sortedItems
+        .map((it) => (it.type === 'series' ? it.series.primaryBook : it.book))
+        .filter((b) => bookNeedsMetadataEnrichment(b)),
+    [sortedItems]
   );
 
   // Reset progressive render window whenever filters/sorting/view change
@@ -221,12 +291,12 @@ const BookShelfInner: React.FC = () => {
     setVisibleCount(renderBatch);
   }, [activeCategory, navSection, deferredSearch, effectiveReadingFilter, sortBy, sortDir, viewMode, renderBatch]);
 
-  const visibleBooks = useMemo(
-    () => sortedBooks.slice(0, visibleCount),
-    [sortedBooks, visibleCount]
+  const visibleItems = useMemo(
+    () => sortedItems.slice(0, visibleCount),
+    [sortedItems, visibleCount]
   );
 
-  const hasMore = visibleCount < sortedBooks.length;
+  const hasMore = visibleCount < sortedItems.length;
 
   // Progressive infinite loading via IntersectionObserver (keeps low-end Android phones 60 FPS)
   useEffect(() => {
@@ -234,27 +304,101 @@ const BookShelfInner: React.FC = () => {
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) {
-          setVisibleCount((c) => Math.min(sortedBooks.length, c + renderBatch));
+          setVisibleCount((c) => Math.min(sortedItems.length, c + renderBatch));
         }
       },
       { rootMargin: '320px' }
     );
     observer.observe(sentinelRef.current);
     return () => observer.disconnect();
-  }, [hasMore, sortedBooks.length, visibleCount, renderBatch]);
+  }, [hasMore, sortedItems.length, visibleCount, renderBatch]);
 
   // Folder grouping when sorted by 'folder' in grid/list mode
   const folderGroups = useMemo(() => {
     if (sortBy !== 'folder' || viewMode === 'shelf') return null;
-    const map = new Map<string, BookItem[]>();
-    for (const b of visibleBooks) {
-      const folder = getBookFolderLabel(b);
+    const map = new Map<string, ShelfDisplayItem[]>();
+    for (const item of visibleItems) {
+      const targetBook = item.type === 'series' ? item.series.primaryBook : item.book;
+      const folder = getBookFolderLabel(targetBook);
       const arr = map.get(folder) || [];
-      arr.push(b);
+      arr.push(item);
       map.set(folder, arr);
     }
     return Array.from(map.entries());
-  }, [sortBy, viewMode, visibleBooks]);
+  }, [sortBy, viewMode, visibleItems]);
+
+  const renderDisplayCard = (item: ShelfDisplayItem) => {
+    if (item.type === 'book') {
+      return (
+        <BookCard
+          key={item.book.id}
+          book={item.book}
+          onOpen={openBook}
+          onToggleFavorite={handleToggleFavorite}
+          onToggleWishlist={handleToggleWishlist}
+          onEdit={setEditingBook}
+          showBookPages3D={theme.showBookPages3D}
+          showBookRibbons={theme.showBookRibbons}
+        />
+      );
+    }
+    const { series } = item;
+    const meta = buildSeriesCardMeta(series);
+    return (
+      <BookCard
+        key={`series_${series.seriesKey}`}
+        book={series.primaryBook}
+        seriesMeta={meta}
+        onOpen={() => setActiveSeriesKey(series.seriesKey)}
+        onToggleFavorite={() =>
+          void updateSeriesBooks(
+            series.allBooks.map((b) => b.id),
+            { favorite: !series.favorite }
+          )
+        }
+        onToggleWishlist={() =>
+          void updateSeriesBooks(
+            series.allBooks.map((b) => b.id),
+            { wishlist: !series.wishlist }
+          )
+        }
+        onEdit={() => setActiveSeriesKey(series.seriesKey)}
+        showBookPages3D={theme.showBookPages3D}
+        showBookRibbons={theme.showBookRibbons}
+      />
+    );
+  };
+
+  const renderDisplayRow = (item: ShelfDisplayItem) => {
+    if (item.type === 'book') {
+      return (
+        <BookListRow
+          key={item.book.id}
+          book={item.book}
+          onOpen={openBook}
+          onToggleFavorite={handleToggleFavorite}
+          onEdit={setEditingBook}
+        />
+      );
+    }
+    const { series } = item;
+    const meta = buildSeriesCardMeta(series);
+    return (
+      <BookListRow
+        key={`series_${series.seriesKey}`}
+        book={series.primaryBook}
+        seriesMeta={meta}
+        onOpen={() => setActiveSeriesKey(series.seriesKey)}
+        onToggleFavorite={() =>
+          void updateSeriesBooks(
+            series.allBooks.map((b) => b.id),
+            { favorite: !series.favorite }
+          )
+        }
+        onEdit={() => setActiveSeriesKey(series.seriesKey)}
+      />
+    );
+  };
 
   const sectionLabel =
     navSection === 'favorites'
@@ -327,7 +471,7 @@ const BookShelfInner: React.FC = () => {
       <div className="section-header">
         <h2 className="section-title">
           {sectionLabel}
-          <span className="section-count">{sortedBooks.length}</span>
+          <span className="section-count">{sortedItems.length}</span>
         </h2>
 
         <div className="section-controls">
@@ -483,7 +627,7 @@ const BookShelfInner: React.FC = () => {
       </div>
 
       {/* Books Container */}
-      {sortedBooks.length === 0 ? (
+      {sortedItems.length === 0 ? (
         <div
           style={{
             background: 'var(--banner-bg)',
@@ -541,86 +685,29 @@ const BookShelfInner: React.FC = () => {
         </div>
       ) : folderGroups ? (
         <div className="folder-groups-wrap">
-          {folderGroups.map(([folderName, groupBooks]) => (
+          {folderGroups.map(([folderName, groupItems]) => (
             <div key={folderName} className="folder-group-section">
               <div className="folder-group-head">
                 <Folder size={14} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />
                 <span>{folderName}</span>
-                <span className="section-count">{groupBooks.length}</span>
+                <span className="section-count">{groupItems.length}</span>
               </div>
               {viewMode === 'list' ? (
-                <div className="books-list">
-                  {groupBooks.map((book) => (
-                    <BookListRow
-                      key={book.id}
-                      book={book}
-                      onOpen={openBook}
-                      onToggleFavorite={handleToggleFavorite}
-                      onEdit={setEditingBook}
-                    />
-                  ))}
-                </div>
+                <div className="books-list">{groupItems.map(renderDisplayRow)}</div>
               ) : (
-                <div className="books-grid">
-                  {groupBooks.map((book) => (
-                    <BookCard
-                      key={book.id}
-                      book={book}
-                      onOpen={openBook}
-                      onToggleFavorite={handleToggleFavorite}
-                      onToggleWishlist={handleToggleWishlist}
-                      onEdit={setEditingBook}
-                      showBookPages3D={theme.showBookPages3D}
-                      showBookRibbons={theme.showBookRibbons}
-                    />
-                  ))}
-                </div>
+                <div className="books-grid">{groupItems.map(renderDisplayCard)}</div>
               )}
             </div>
           ))}
         </div>
       ) : viewMode === 'list' ? (
-        <div className="books-list">
-          {visibleBooks.map((book) => (
-            <BookListRow
-              key={book.id}
-              book={book}
-              onOpen={openBook}
-              onToggleFavorite={handleToggleFavorite}
-              onEdit={setEditingBook}
-            />
-          ))}
-        </div>
+        <div className="books-list">{visibleItems.map(renderDisplayRow)}</div>
       ) : viewMode === 'grid' ? (
-        <div className="books-grid">
-          {visibleBooks.map((book) => (
-            <BookCard
-              key={book.id}
-              book={book}
-              onOpen={openBook}
-              onToggleFavorite={handleToggleFavorite}
-              onToggleWishlist={handleToggleWishlist}
-              onEdit={setEditingBook}
-              showBookPages3D={theme.showBookPages3D}
-              showBookRibbons={theme.showBookRibbons}
-            />
-          ))}
-        </div>
+        <div className="books-grid">{visibleItems.map(renderDisplayCard)}</div>
       ) : (
         <div className="books-shelf-wrap">
           <div className="books-shelf" ref={shelfRef}>
-            {visibleBooks.map((book) => (
-              <BookCard
-                key={book.id}
-                book={book}
-                onOpen={openBook}
-                onToggleFavorite={handleToggleFavorite}
-                onToggleWishlist={handleToggleWishlist}
-                onEdit={setEditingBook}
-                showBookPages3D={theme.showBookPages3D}
-                showBookRibbons={theme.showBookRibbons}
-              />
-            ))}
+            {visibleItems.map(renderDisplayCard)}
           </div>
           <div className="books-shelf-ledge" aria-hidden="true" />
         </div>
@@ -631,9 +718,9 @@ const BookShelfInner: React.FC = () => {
           <button
             type="button"
             className="pill-btn"
-            onClick={() => setVisibleCount((c) => Math.min(sortedBooks.length, c + renderBatch))}
+            onClick={() => setVisibleCount((c) => Math.min(sortedItems.length, c + renderBatch))}
           >
-            Mostrar más ({visibleBooks.length} de {sortedBooks.length})
+            Mostrar más ({visibleItems.length} de {sortedItems.length})
           </button>
         </div>
       )}

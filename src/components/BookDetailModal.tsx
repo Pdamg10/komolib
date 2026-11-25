@@ -6,6 +6,11 @@ import {
   optimizeCoverDataUrl,
 } from '../parsers/coverGenerator';
 import type { ContentKind } from '../types/library';
+import {
+  isVisualSeriesKind,
+  type OriginTag,
+  type SeriesStatus,
+} from '../utils/mangaSeriesUtils';
 import { formatDateTime } from '../utils/readingStats';
 import { hasDisplayableOriginalCover } from '../utils/coverHelpers';
 import {
@@ -35,6 +40,14 @@ export const BookDetailModal: React.FC = () => {
   const [coverDataUrl, setCoverDataUrl] = useState('');
   const [hasOriginalCover, setHasOriginalCover] = useState(true);
   const [cats, setCats] = useState<string[]>([]);
+  const [seriesName, setSeriesName] = useState('');
+  const [chapterStart, setChapterStart] = useState('');
+  const [chapterEnd, setChapterEnd] = useState('');
+  const [originTag, setOriginTag] = useState<OriginTag>('manhwa');
+  const [seriesStatus, setSeriesStatus] = useState<SeriesStatus | ''>('');
+  const [fansubsText, setFansubsText] = useState('');
+  const [genresText, setGenresText] = useState('');
+  const [totalCaps, setTotalCaps] = useState('');
   const [extracting, setExtracting] = useState(false);
   const [identifyingAi, setIdentifyingAi] = useState(false);
   const coverRef = useRef<HTMLInputElement>(null);
@@ -50,6 +63,14 @@ export const BookDetailModal: React.FC = () => {
     setCoverDataUrl(editingBook.coverDataUrl);
     setHasOriginalCover(hasDisplayableOriginalCover(editingBook));
     setCats(editingBook.categories || []);
+    setSeriesName(editingBook.seriesName || '');
+    setChapterStart(editingBook.chapterStart !== undefined ? String(editingBook.chapterStart) : '');
+    setChapterEnd(editingBook.chapterEnd !== undefined ? String(editingBook.chapterEnd) : '');
+    setOriginTag(editingBook.originTag || (editingBook.kind === 'manga' ? 'manga' : editingBook.kind === 'comic' ? 'comic' : 'manhwa'));
+    setSeriesStatus(editingBook.seriesStatus || '');
+    setFansubsText((editingBook.fansubs || []).join(', '));
+    setGenresText((editingBook.genres || []).join(', '));
+    setTotalCaps(editingBook.totalChaptersExpected ? String(editingBook.totalChaptersExpected) : '');
   }, [editingBook]);
 
   if (!editingBook) return null;
@@ -106,6 +127,10 @@ export const BookDetailModal: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    const isVisual = isVisualSeriesKind(kind);
+    const parsedStart = chapterStart.trim() !== '' ? Number(chapterStart.trim()) : undefined;
+    const parsedEnd = chapterEnd.trim() !== '' ? Number(chapterEnd.trim()) : undefined;
+    const parsedTotal = totalCaps.trim() !== '' ? Number(totalCaps.trim()) : undefined;
     await updateBook(editingBook.id, {
       title: title.trim() || editingBook.title,
       author: author.trim() || editingBook.author,
@@ -118,6 +143,28 @@ export const BookDetailModal: React.FC = () => {
       coverCheckedV2: true,
       coverCheckedV3: true,
       categories: cats,
+      ...(isVisual
+        ? {
+            seriesName: seriesName.trim() || undefined,
+            chapterStart: parsedStart !== undefined && Number.isFinite(parsedStart) ? parsedStart : undefined,
+            chapterEnd: parsedEnd !== undefined && Number.isFinite(parsedEnd) ? parsedEnd : undefined,
+            seriesOrder: parsedStart !== undefined && Number.isFinite(parsedStart) ? parsedStart : editingBook.seriesOrder,
+            originTag,
+            seriesStatus: seriesStatus || undefined,
+            fansubs: fansubsText
+              .split(/[,/|·]+/)
+              .map((x) => x.trim())
+              .filter(Boolean),
+            genres: genresText
+              .split(/[,/|·]+/)
+              .map((x) => x.replace(/^#/, '').trim())
+              .filter(Boolean),
+            totalChaptersExpected:
+              parsedTotal !== undefined && Number.isFinite(parsedTotal) && parsedTotal > 0
+                ? Math.floor(parsedTotal)
+                : undefined,
+          }
+        : {}),
     });
     setEditingBook(null);
   };
@@ -290,6 +337,103 @@ export const BookDetailModal: React.FC = () => {
             </span>
           </div>
         </div>
+
+        {isVisualSeriesKind(kind) && (
+          <div className="series-editor-box">
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--accent-primary)' }}>
+              🎴 Datos de Serie y Capítulos (solo Manga / Manhwa / Cómic)
+            </div>
+            <div className="series-editor-grid">
+              <div>
+                <label className="series-field-label">Nombre de serie</label>
+                <input
+                  className="studio-input"
+                  value={seriesName}
+                  onChange={(e) => setSeriesName(e.target.value)}
+                  placeholder="Ej. El Mejor Ingeniero Del Mundo"
+                />
+              </div>
+              <div>
+                <label className="series-field-label">Tipo</label>
+                <select
+                  className="studio-input"
+                  value={originTag}
+                  onChange={(e) => setOriginTag(e.target.value as OriginTag)}
+                >
+                  <option value="manhwa">#Manhwa 🇰🇷</option>
+                  <option value="manga">#Manga 🇯🇵</option>
+                  <option value="manhua">#Manhua 🇨🇳</option>
+                  <option value="comic">#Cómic</option>
+                </select>
+              </div>
+              <div>
+                <label className="series-field-label">Cap. inicio (este archivo)</label>
+                <input
+                  type="number"
+                  step="any"
+                  className="studio-input"
+                  value={chapterStart}
+                  onChange={(e) => setChapterStart(e.target.value)}
+                  placeholder="Ej. 0"
+                />
+              </div>
+              <div>
+                <label className="series-field-label">Cap. fin (este archivo)</label>
+                <input
+                  type="number"
+                  step="any"
+                  className="studio-input"
+                  value={chapterEnd}
+                  onChange={(e) => setChapterEnd(e.target.value)}
+                  placeholder="Ej. 10"
+                />
+              </div>
+              <div>
+                <label className="series-field-label">Estado de serie</label>
+                <select
+                  className="studio-input"
+                  value={seriesStatus}
+                  onChange={(e) => setSeriesStatus(e.target.value as SeriesStatus | '')}
+                >
+                  <option value="">En Biblioteca</option>
+                  <option value="ongoing">#En Emisión</option>
+                  <option value="completed">#Finalizado</option>
+                  <option value="hiatus">#En Pausa</option>
+                  <option value="cancelled">#Cancelado</option>
+                </select>
+              </div>
+              <div>
+                <label className="series-field-label">Capítulos totales</label>
+                <input
+                  type="number"
+                  min={1}
+                  className="studio-input"
+                  value={totalCaps}
+                  onChange={(e) => setTotalCaps(e.target.value)}
+                  placeholder="Ej. 210"
+                />
+              </div>
+              <div>
+                <label className="series-field-label">Géneros (coma)</label>
+                <input
+                  className="studio-input"
+                  value={genresText}
+                  onChange={(e) => setGenresText(e.target.value)}
+                  placeholder="Acción, Aventura, Comedia"
+                />
+              </div>
+              <div>
+                <label className="series-field-label">Fansubs (coma)</label>
+                <input
+                  className="studio-input"
+                  value={fansubsText}
+                  onChange={(e) => setFansubsText(e.target.value)}
+                  placeholder="Meian Scans, Olympus Scan"
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
         <div>
           <label style={{ fontSize: 11, fontWeight: 700 }}>Sinopsis / Notas</label>

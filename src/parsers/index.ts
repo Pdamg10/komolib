@@ -58,8 +58,23 @@ export function guessContentKind(fileName: string, format: BookFormat): ContentK
   if (/manhwa|webtoon|solo\s*level|tower\s*of\s*god|omniscient|manhua/i.test(lower)) {
     return 'manhwa';
   }
-  if (/manga|vol\.?\s*\d|tomo|ch\.?\s*\d|cap\.?\s*\d|shonen|seinen|shojo/i.test(lower)) {
+  if (/manga|vol\.?\s*\d|tomo|ch\.?\s*\d|caps?\.?\s*\d|cap[ií]tulos?\s*\d|shonen|seinen|shojo/i.test(lower)) {
     return 'manga';
+  }
+  if (format === 'pdf') {
+    const base = lower.replace(/\.pdf$/i, '').trim();
+    const rangeMatch = base.match(/(?:^|[\s\-–—_:|(\[])(\d{1,4})\s*(?:[-–—~]|al)\s*(\d{1,4})\s*[\])]*$/i);
+    if (rangeMatch) {
+      const a = Number(rangeMatch[1]);
+      const b = Number(rangeMatch[2]);
+      const looksLikeYears = a >= 1950 && a <= 2099 && b >= 1950 && b <= 2099;
+      if (!looksLikeYears && b >= a && b - a <= 500) {
+        return 'manhwa';
+      }
+    }
+    if (/scans?|fansub|olympus|meian|ikigai|tmo/i.test(base)) {
+      return 'manhwa';
+    }
   }
   if (format === 'cbz' || format === 'cbr' || format === 'images') {
     return 'manga';
