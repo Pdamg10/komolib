@@ -64,6 +64,7 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
 
   const stripRef = useRef<HTMLDivElement>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const lastTouchHandledAtRef = useRef<number>(0);
   const scrollTimerRef = useRef<number | null>(null);
   const lastReportedPageRef = useRef<number>(Math.max(1, book.currentPage || 1));
   const didInitialStripScrollRef = useRef<boolean>(false);
@@ -505,6 +506,35 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
         <div
           ref={stripRef}
           onScroll={handleStripScroll}
+          onTouchStart={(e) => {
+            if (e.touches.length === 1) {
+              touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            } else {
+              touchStartRef.current = null;
+            }
+          }}
+          onTouchEnd={(e) => {
+            if (!touchStartRef.current || pinMode || zoom > 1.05) {
+              touchStartRef.current = null;
+              return;
+            }
+            const t = e.changedTouches[0];
+            const dx = t.clientX - touchStartRef.current.x;
+            const dy = t.clientY - touchStartRef.current.y;
+            touchStartRef.current = null;
+            const targetEl = e.target as HTMLElement | null;
+            if (targetEl?.closest('button, a, .page-pin-badge')) return;
+            if (Math.hypot(dx, dy) <= 14 && stripRef.current) {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const ratio = (t.clientX - rect.left) / Math.max(1, rect.width);
+              const stepPx = Math.max(200, Math.round(stripRef.current.clientHeight * 0.82));
+              if (ratio >= 0.68) {
+                stripRef.current.scrollBy({ top: stepPx, behavior: 'smooth' });
+              } else if (ratio <= 0.32) {
+                stripRef.current.scrollBy({ top: -stepPx, behavior: 'smooth' });
+              }
+            }
+          }}
           style={{
             flex: 1,
             minHeight: 0,
@@ -657,12 +687,16 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
           }
         }}
         onTouchEnd={(e) => {
-          if (!touchStartRef.current || pinMode || zoom > 1.05) return;
+          if (!touchStartRef.current || pinMode || zoom > 1.05) {
+            touchStartRef.current = null;
+            return;
+          }
           const t = e.changedTouches[0];
           const dx = t.clientX - touchStartRef.current.x;
           const dy = t.clientY - touchStartRef.current.y;
           touchStartRef.current = null;
           if (Math.abs(dx) > 54 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+            lastTouchHandledAtRef.current = Date.now();
             if (dx < 0) {
               if (isRtl) goPrev();
               else goNext();
@@ -670,9 +704,13 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
               if (isRtl) goNext();
               else goPrev();
             }
+          } else if (Math.hypot(dx, dy) > 14) {
+            // Suppress synthetic click after a scroll/drag gesture
+            lastTouchHandledAtRef.current = Date.now();
           }
         }}
         onClick={(e) => {
+          if (Date.now() - lastTouchHandledAtRef.current < 450) return;
           if (pinMode && onTextSelect) {
             const rect = e.currentTarget.getBoundingClientRect();
             const pageX = Math.round(((e.clientX - rect.left) / Math.max(1, rect.width)) * 100);
@@ -688,9 +726,13 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
             });
             return;
           }
+          if (zoom > 1.05) return;
+          const targetEl = e.target as HTMLElement | null;
+          if (targetEl?.closest('button, a, .page-pin-badge')) return;
           const rect = e.currentTarget.getBoundingClientRect();
-          const clickLeft = e.clientX - rect.left < rect.width * 0.4;
-          const clickRight = e.clientX - rect.left > rect.width * 0.6;
+          const ratio = (e.clientX - rect.left) / Math.max(1, rect.width);
+          const clickLeft = ratio <= 0.35;
+          const clickRight = ratio >= 0.65;
           if (!clickLeft && !clickRight) return;
           if (isRtl) {
             if (clickLeft) goNext();

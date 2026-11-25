@@ -17,10 +17,10 @@ import { BookCoverVisual } from './BookCoverVisual';
 
 const FormattedChatMessage: React.FC<{ text: string; isAssistant: boolean }> = React.memo(
   ({ text, isAssistant }) => {
+    const blocks = useMemo(() => (isAssistant ? parseCleanAiBlocks(text) : []), [text, isAssistant]);
     if (!isAssistant) {
       return <div className="chat-msg-p">{text}</div>;
     }
-    const blocks = parseCleanAiBlocks(text);
     if (blocks.length === 0) return null;
     return (
       <div className="chat-msg-blocks">
@@ -82,7 +82,7 @@ function formatSessionDate(ts: number): string {
   return d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
 }
 
-export const ChatTab: React.FC = () => {
+const ChatTabInner: React.FC = () => {
   const {
     chatMessages,
     chatSessions,
@@ -128,6 +128,12 @@ export const ChatTab: React.FC = () => {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [chatMessages, historyOpen]);
+
+  const booksById = useMemo(() => {
+    const map = new Map<string, (typeof books)[number]>();
+    for (const b of books) map.set(b.id, b);
+    return map;
+  }, [books]);
 
   const savedSessions = useMemo(
     () =>
@@ -387,7 +393,7 @@ export const ChatTab: React.FC = () => {
 
           {chatMessages.map((msg) => {
             const attachedBooks = (msg.bookIds || [])
-              .map((id) => books.find((b) => b.id === id))
+              .map((id) => booksById.get(id))
               .filter(Boolean);
             const showFeedback =
               msg.sender === 'assistant' &&
@@ -518,3 +524,5 @@ export const ChatTab: React.FC = () => {
     </div>
   );
 };
+
+export const ChatTab = React.memo(ChatTabInner);

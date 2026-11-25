@@ -64,11 +64,27 @@ body,
   align-items: center;
   justify-content: center;
   background-color: var(--outer-bg);
+  transition: background-color 0.25s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Pre-blurred static GPU wallpaper layer: blurred ONCE instead of re-blurring on every mouse hover! */
+.app-wallpaper-bg {
+  position: fixed;
+  inset: -24px;
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  transition: background-color 0.25s ease;
-  position: relative;
+  filter: blur(var(--glass-blur, 12px));
+  transform: translateZ(0);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.perf-lite .app-wallpaper-bg {
+  filter: none;
+  inset: 0;
 }
 
 .app-backdrop.full-view {
@@ -86,6 +102,7 @@ body,
   grid-template-columns: 76px minmax(0, 1fr) 338px;
   overflow: hidden;
   position: relative;
+  z-index: 1;
   transition: background-color 0.2s ease;
   font-size: calc(14px * var(--ui-scale));
 }
@@ -96,11 +113,9 @@ body,
   box-shadow: none;
 }
 
-/* Custom Wallpaper Glass Mode: single top-level GPU blur pass (avoids nested backdrop-filter lag!) */
+/* Custom Wallpaper Glass Mode: zero live backdrop-filter re-blur on mousemove/hover! */
 .app-shell.has-wallpaper {
-  background: color-mix(in srgb, var(--shell-bg) calc(var(--glass-opacity, 0.78) * 76%), transparent);
-  backdrop-filter: blur(var(--glass-blur, 12px));
-  -webkit-backdrop-filter: blur(var(--glass-blur, 12px));
+  background: color-mix(in srgb, var(--shell-bg) calc(var(--glass-opacity, 0.78) * 82%), transparent);
 }
 
 .app-shell.has-wallpaper .main-canvas {
@@ -1046,10 +1061,26 @@ body,
   overflow: hidden;
   border-left: 1px solid var(--border-subtle);
   position: relative;
+  contain: layout style paint;
+  isolation: isolate;
 }
 
-.right-panel.with-doodle {
-  background-image: url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='%23888888' stroke-opacity='0.13' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='14' y='16' width='16' height='20' rx='2'/%3E%3Cpath d='M18 22h8M18 27h6'/%3E%3Ccircle cx='84' cy='26' r='8'/%3E%3Cpath d='M84 18v-4M84 38v-4M76 26h-4M96 26h-4'/%3E%3Cpath d='M22 86l8-14 8 14z'/%3E%3Cpath d='M74 78c6-5 16-5 22 0v14c-6-5-16-5-22 0z'/%3E%3Cpath d='M85 75v14'/%3E%3Cpath d='M50 50l4-4 4 4-4 4z'/%3E%3C/g%3E%3C/svg%3E");
+.right-panel.with-doodle::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='%23888888' stroke-opacity='0.11' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='14' y='16' width='16' height='20' rx='2'/%3E%3Cpath d='M18 22h8M18 27h6'/%3E%3Ccircle cx='84' cy='26' r='8'/%3E%3Cpath d='M84 18v-4M84 38v-4M76 26h-4M96 26h-4'/%3E%3Cpath d='M22 86l8-14 8 14z'/%3E%3Cpath d='M74 78c6-5 16-5 22 0v14c-6-5-16-5-22 0z'/%3E%3Cpath d='M85 75v14'/%3E%3Cpath d='M50 50l4-4 4 4-4 4z'/%3E%3C/g%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+}
+
+.perf-lite .right-panel.with-doodle::before {
+  display: none;
+}
+
+.right-panel > * {
+  position: relative;
+  z-index: 1;
 }
 
 .right-panel-header {
@@ -1094,13 +1125,13 @@ body,
   align-items: center;
   justify-content: center;
   gap: 5px;
-  transition: all 0.16s ease;
+  transition: background-color 0.12s ease, color 0.12s ease;
 }
 
 .panel-tab-btn.active {
   background: var(--card-bg);
   color: var(--text-primary);
-  box-shadow: var(--shadow-soft);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
 }
 
 .right-panel-body {
@@ -1110,13 +1141,13 @@ body,
   display: flex;
   flex-direction: column;
   gap: 12px;
+  contain: layout style;
 }
 
 /* Chat Tab */
 .chat-info-card {
-  background: color-mix(in srgb, var(--card-bg) 88%, transparent);
+  background: color-mix(in srgb, var(--card-bg) 95%, transparent);
   border: 1px solid var(--border-subtle);
-  backdrop-filter: blur(8px);
   border-radius: 16px;
   padding: 12px 14px;
   color: var(--text-primary);

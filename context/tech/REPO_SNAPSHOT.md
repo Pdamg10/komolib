@@ -1,6 +1,6 @@
 # Repo Snapshot — KomoLib
 
-Snapshot maintained under AIEF L3 (updated for v1.12.2).
+Snapshot maintained under AIEF L3 (updated for v1.12.3).
 
 ## Tech Stack
 - **Language:** TypeScript 5.8 (frontend, `strict: true`), JavaScript ESM (`cloudflare/`, `server/`), CommonJS (`electron/`)
@@ -8,7 +8,7 @@ Snapshot maintained under AIEF L3 (updated for v1.12.2).
 - **Local Storage:** IndexedDB (`idb`) + `localStorage` fast-paint caches + Android SAF zero-duplication URIs
 - **Readers & Parsers:** `epubjs`, `pdfjs-dist`, `jszip`, `node-unrar-js` (WASM), `marked`, `sql.js` (SQLite backup parsing)
 - **Desktop Packaging:** Electron 45 + `electron-builder` 26 (Linux AppImage + Windows NSIS)
-- **Mobile Wrapper:** Capacitor 7 (`android/`, `com.komolib.reader`, `versionName 1.12.2`, `versionCode 15`)
+- **Mobile Wrapper:** Capacitor 7 (`android/`, `com.komolib.reader`, `versionName 1.12.3`, `versionCode 16`)
 - **Primary Cloud Backend:** Cloudflare Workers + D1 SQLite (`cloudflare/`, Wrangler 4)
 - **Self-Hosted / LAN Backend:** Node.js 22 + Express 5 + Multer 2 + CORS + SSE (`server/`)
 - **Package Manager:** npm

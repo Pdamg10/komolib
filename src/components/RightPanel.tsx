@@ -4,7 +4,7 @@ import { useLibrary } from '../context/LibraryContext';
 import { ChatTab } from './ChatTab';
 import { NotesSyncTab } from './NotesSyncTab';
 
-export const RightPanel: React.FC = () => {
+const RightPanelInner: React.FC = () => {
   const { theme, updateTheme, rightTab, setRightTab, mobilePanelOpen, setMobilePanelOpen } =
     useLibrary();
 
@@ -74,3 +74,5 @@ export const RightPanel: React.FC = () => {
     </>
   );
 };
+
+export const RightPanel = React.memo(RightPanelInner);

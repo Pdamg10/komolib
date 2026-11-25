@@ -165,9 +165,119 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
       renditionRef.current = rendition;
 
       // Inject KomoLib reading marks styles & DOM marks into every rendered EPUB section
+      // + native left/right screen tap-to-turn & horizontal swipe paging for phones/tablets
       rendition.hooks.content.register((contents: Contents) => {
         if (!mounted) return;
         applyMarksToContents(contents, false);
+
+        const doc = contents?.document;
+        const win = contents?.window;
+        if (!doc || !win) return;
+
+        let touchStart: { x: number; y: number; t: number } | null = null;
+        let lastTouchTurnAt = 0;
+
+        const isInteractiveTarget = (target: EventTarget | null): boolean => {
+          const el = target as HTMLElement | null;
+          if (!el || typeof el.closest !== 'function') return false;
+          return Boolean(
+            el.closest(
+              'a, button, input, textarea, select, summary, details, mark.komo-inline-mark, .komo-inline-badge'
+            )
+          );
+        };
+
+        const turnPage = (dir: 'next' | 'prev') => {
+          if (settings.epubFlow === 'scrolled') {
+            const scrollHost = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+            if (scrollHost) {
+              const step = Math.max(180, Math.round(scrollHost.clientHeight * 0.85));
+              scrollHost.scrollBy({ top: dir === 'next' ? step : -step, behavior: 'smooth' });
+              return;
+            }
+          }
+          if (dir === 'next') {
+            rendition.next().catch(() => undefined);
+          } else {
+            rendition.prev().catch(() => undefined);
+          }
+        };
+
+        const resolveTapZone = (clientX: number): 'prev' | 'next' | 'center' => {
+          const viewerRect = viewerRef.current?.getBoundingClientRect();
+          const frameRect = win.frameElement?.getBoundingClientRect?.();
+          const screenX = frameRect ? frameRect.left + clientX : clientX;
+          const width = viewerRect?.width || window.innerWidth || 1;
+          const leftEdge = viewerRect?.left || 0;
+          const ratio = (screenX - leftEdge) / Math.max(1, width);
+          if (ratio >= 0.65) return 'next';
+          if (ratio <= 0.35) return 'prev';
+          return 'center';
+        };
+
+        doc.addEventListener(
+          'touchstart',
+          (ev: TouchEvent) => {
+            if (ev.touches.length === 1) {
+              touchStart = {
+                x: ev.touches[0].clientX,
+                y: ev.touches[0].clientY,
+                t: Date.now(),
+              };
+            } else {
+              touchStart = null;
+            }
+          },
+          { passive: true }
+        );
+
+        doc.addEventListener(
+          'touchend',
+          (ev: TouchEvent) => {
+            if (!touchStart || ev.changedTouches.length === 0) return;
+            const start = touchStart;
+            touchStart = null;
+            const t = ev.changedTouches[0];
+            const dx = t.clientX - start.x;
+            const dy = t.clientY - start.y;
+            const dt = Date.now() - start.t;
+
+            // Ignore if user selected text or tapped a link/button/annotation
+            const selText = (win.getSelection?.()?.toString() || '').trim();
+            if (selText.length > 0 || isInteractiveTarget(ev.target)) return;
+
+            // 1. Horizontal swipe turn
+            if (Math.abs(dx) > 54 && Math.abs(dx) > Math.abs(dy) * 1.4 && dt < 700) {
+              lastTouchTurnAt = Date.now();
+              turnPage(dx < 0 ? 'next' : 'prev');
+              return;
+            }
+
+            // 2. Clean tap on left (prev) or right (next) edge of screen
+            if (Math.hypot(dx, dy) <= 14 && dt < 450) {
+              const zone = resolveTapZone(t.clientX);
+              if (zone !== 'center') {
+                lastTouchTurnAt = Date.now();
+                turnPage(zone);
+              }
+            }
+          },
+          { passive: true }
+        );
+
+        // Fallback click handler for touch/pen pointers that emit click without triggering touchend turn
+        doc.addEventListener('click', (ev: MouseEvent) => {
+          if (Date.now() - lastTouchTurnAt < 450) return;
+          if (ev.button !== 0 || isInteractiveTarget(ev.target)) return;
+          const selText = (win.getSelection?.()?.toString() || '').trim();
+          if (selText.length > 0) return;
+          // Only tap-turn on click for touch/compact viewports so desktop mouse clicks for text selection stay effortless
+          if (window.innerWidth > 1024) return;
+          const zone = resolveTapZone(ev.clientX);
+          if (zone !== 'center') {
+            turnPage(zone);
+          }
+        });
       });
 
       rendition.on('rendered', (_section: unknown, view: { contents?: Contents }) => {

@@ -1,8 +1,8 @@
 name: komolib
 display_name: KomoLib
-version: 1.12.2
-package_version: 1.12.2
-android_version_code: 15
+version: 1.12.3
+package_version: 1.12.3
+android_version_code: 16
 aief:
   level: L3
   locale: en

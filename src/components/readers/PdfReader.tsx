@@ -667,7 +667,50 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
           ref={stageRef}
           onScroll={handleContinuousScroll}
           onMouseUp={capturePdfTextSelection}
-          onTouchEnd={() => window.setTimeout(capturePdfTextSelection, 220)}
+          onTouchStart={(e) => {
+            if (e.touches.length === 1) {
+              touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            } else {
+              touchStartRef.current = null;
+            }
+          }}
+          onTouchEnd={(e) => {
+            window.setTimeout(capturePdfTextSelection, 220);
+            const activeSel = window.getSelection();
+            if (activeSel && !activeSel.isCollapsed) {
+              touchStartRef.current = null;
+              return;
+            }
+            if (!touchStartRef.current || pinMode || zoom > 1.05) {
+              touchStartRef.current = null;
+              return;
+            }
+            const t = e.changedTouches[0];
+            const dx = t.clientX - touchStartRef.current.x;
+            const dy = t.clientY - touchStartRef.current.y;
+            touchStartRef.current = null;
+            const targetEl = e.target as HTMLElement | null;
+            if (
+              targetEl?.closest(
+                'button, a, input, .page-pin-badge, mark.komo-inline-mark, .komo-inline-badge'
+              )
+            ) {
+              return;
+            }
+            if (Math.hypot(dx, dy) <= 14) {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const ratio = (t.clientX - rect.left) / Math.max(1, rect.width);
+              if (ratio >= 0.68) {
+                const nextP = Math.min(numPages, pageNum + 1);
+                setPageNum(nextP);
+                scrollToPdfPage(nextP, true);
+              } else if (ratio <= 0.32) {
+                const prevP = Math.max(1, pageNum - 1);
+                setPageNum(prevP);
+                scrollToPdfPage(prevP, true);
+              }
+            }
+          }}
           style={{
             flex: 1,
             minHeight: 0,
@@ -732,14 +775,33 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
               touchStartRef.current = null;
               return;
             }
-            if (!touchStartRef.current || pinMode || zoom > 1.05) return;
+            if (!touchStartRef.current || pinMode || zoom > 1.05) {
+              touchStartRef.current = null;
+              return;
+            }
             const t = e.changedTouches[0];
             const dx = t.clientX - touchStartRef.current.x;
             const dy = t.clientY - touchStartRef.current.y;
             touchStartRef.current = null;
+            const targetEl = e.target as HTMLElement | null;
+            if (
+              targetEl?.closest(
+                'button, a, input, .page-pin-badge, mark.komo-inline-mark, .komo-inline-badge'
+              )
+            ) {
+              return;
+            }
             if (Math.abs(dx) > 54 && Math.abs(dx) > Math.abs(dy) * 1.4) {
               if (dx < 0) setPageNum((p) => Math.min(numPages, p + 1));
               else setPageNum((p) => Math.max(1, p - 1));
+            } else if (Math.hypot(dx, dy) <= 14) {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const ratio = (t.clientX - rect.left) / Math.max(1, rect.width);
+              if (ratio >= 0.65) {
+                setPageNum((p) => Math.min(numPages, p + 1));
+              } else if (ratio <= 0.35) {
+                setPageNum((p) => Math.max(1, p - 1));
+              }
             }
           }}
         >

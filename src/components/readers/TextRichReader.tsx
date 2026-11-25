@@ -55,6 +55,7 @@ export const TextRichReader: React.FC<TextRichReaderProps> = ({
   const [chapterLabel, setChapterLabel] = useState(book.currentChapter || '');
   const containerRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const chaptersRef = useRef<Array<{ id: string; title: string }>>([]);
   const memoHtml = useMemo(() => ({ __html: html }), [html]);
 
@@ -210,7 +211,47 @@ export const TextRichReader: React.FC<TextRichReaderProps> = ({
         ref={containerRef}
         onScroll={handleScroll}
         onMouseUp={handleSelectionCapture}
-        onTouchEnd={() => window.setTimeout(handleSelectionCapture, 160)}
+        onTouchStart={(e) => {
+          if (e.touches.length === 1) {
+            touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+          } else {
+            touchStartRef.current = null;
+          }
+        }}
+        onTouchEnd={(e) => {
+          window.setTimeout(handleSelectionCapture, 160);
+          const sel = window.getSelection();
+          if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+            touchStartRef.current = null;
+            return;
+          }
+          if (!touchStartRef.current || !containerRef.current) {
+            touchStartRef.current = null;
+            return;
+          }
+          const t = e.changedTouches[0];
+          const dx = t.clientX - touchStartRef.current.x;
+          const dy = t.clientY - touchStartRef.current.y;
+          touchStartRef.current = null;
+          const targetEl = e.target as HTMLElement | null;
+          if (
+            targetEl?.closest(
+              'a, button, input, mark.komo-inline-mark, .komo-inline-badge'
+            )
+          ) {
+            return;
+          }
+          if (Math.hypot(dx, dy) <= 14) {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ratio = (t.clientX - rect.left) / Math.max(1, rect.width);
+            const stepPx = Math.max(180, Math.round(containerRef.current.clientHeight * 0.85));
+            if (ratio >= 0.68) {
+              containerRef.current.scrollBy({ top: stepPx, behavior: 'smooth' });
+            } else if (ratio <= 0.32) {
+              containerRef.current.scrollBy({ top: -stepPx, behavior: 'smooth' });
+            }
+          }
+        }}
         style={{
           flex: 1,
           overflowY: 'auto',

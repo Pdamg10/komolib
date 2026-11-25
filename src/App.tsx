@@ -221,11 +221,6 @@ const AppWorkspace: React.FC = () => {
   return (
     <div
       className={backdropClasses}
-      style={
-        hasWallpaper
-          ? { backgroundImage: `url(${theme.customWallpaperUrl})` }
-          : undefined
-      }
       onDragOver={(e) => {
         e.preventDefault();
         if (!globalDragging) setGlobalDragging(true);
@@ -243,6 +238,13 @@ const AppWorkspace: React.FC = () => {
         }
       }}
     >
+      {hasWallpaper && (
+        <div
+          className="app-wallpaper-bg"
+          style={{ backgroundImage: `url(${theme.customWallpaperUrl})` }}
+          aria-hidden="true"
+        />
+      )}
       <div className={shellClasses}>
         <Sidebar />
 
