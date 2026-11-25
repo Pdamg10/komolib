@@ -1142,25 +1142,28 @@ export const SharedReadingView: React.FC = () => {
                   </div>
                   <div className="shared-members-list">
                     {Object.values(activeShelf.members || {}).map((m) => {
-                      const isMe = isMyId(m.id);
-                      const memberPhoto = m.avatarImageUrl || (isMe ? profile.avatarImageUrl : undefined);
-                      const isMemberAdmin = m.id === activeShelf.hostId;
-                      const iAmAdmin = isMyId(activeShelf.hostId);
-                      return (
-                        <div key={m.id} className="shared-member-chip">
-                          <span
-                            className="participant-avatar"
-                            style={{ width: 26, height: 26, fontSize: 14, background: m.avatarBg || '#f6d8ae' }}
-                          >
-                            {memberPhoto ? (
-                              <img src={memberPhoto} alt={m.name} />
-                            ) : (
-                              m.avatarEmoji || '🦊'
-                            )}
-                          </span>
-                          <span style={{ fontSize: 11.5, fontWeight: 800, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {m.name} {isMe ? '(Tú)' : ''}
-                          </span>
+                    const isMe = isMyId(m.id);
+                    const memberName = isMe ? profile.name || m.name : m.name;
+                    const memberEmoji = isMe ? profile.avatarEmoji || m.avatarEmoji : m.avatarEmoji;
+                    const memberBg = isMe ? profile.avatarBg || m.avatarBg : m.avatarBg;
+                    const memberPhoto = isMe ? profile.avatarImageUrl : m.avatarImageUrl;
+                    const isMemberAdmin = m.id === activeShelf.hostId;
+                    const iAmAdmin = isMyId(activeShelf.hostId);
+                    return (
+                      <div key={m.id} className="shared-member-chip">
+                        <span
+                          className="participant-avatar"
+                          style={{ width: 26, height: 26, fontSize: 14, background: memberBg || '#f6d8ae' }}
+                        >
+                          {memberPhoto ? (
+                            <img src={memberPhoto} alt={memberName} />
+                          ) : (
+                            memberEmoji || '🦊'
+                          )}
+                        </span>
+                        <span style={{ fontSize: 11.5, fontWeight: 800, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {memberName} {isMe ? '(Tú)' : ''}
+                        </span>
                           {isMemberAdmin && (
                             <span className="admin-role-pill">Admin</span>
                           )}
@@ -1551,23 +1554,26 @@ export const SharedReadingView: React.FC = () => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
                   {participants.map((p) => {
                     const isMe = isMyId(p.id);
-                    const participantPhoto = p.avatarImageUrl || (isMe ? profile.avatarImageUrl : undefined);
+                    const participantName = isMe ? profile.name || p.name : p.name;
+                    const participantEmoji = isMe ? profile.avatarEmoji || p.avatarEmoji : p.avatarEmoji;
+                    const participantBg = isMe ? profile.avatarBg || p.avatarBg : p.avatarBg;
+                    const participantPhoto = isMe ? profile.avatarImageUrl : p.avatarImageUrl;
                     const isPartAdmin = p.id === activeRoom.hostId;
                     const iAmAdmin = isMyId(activeRoom.hostId);
                     const st = p.readingStatus || (p.progress >= 98 ? 'completed' : 'reading');
                     return (
                       <div key={p.id} className="participant-progress-row">
-                        <div className="participant-avatar" style={{ background: p.avatarBg || '#f6d8ae' }}>
+                        <div className="participant-avatar" style={{ background: participantBg || '#f6d8ae' }}>
                           {participantPhoto ? (
-                            <img src={participantPhoto} alt={p.name} />
+                            <img src={participantPhoto} alt={participantName} />
                           ) : (
-                            p.avatarEmoji || '🦊'
+                            participantEmoji || '🦊'
                           )}
                         </div>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
                             <span style={{ fontSize: 12.5, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
-                              <span>{p.name} {isMe ? '(Tú)' : ''}</span>
+                              <span>{participantName} {isMe ? '(Tú)' : ''}</span>
                               {isPartAdmin && <span className="admin-role-pill">Admin</span>}
                               {p.lastSeenAt ? (
                                 <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)' }}>
@@ -1639,24 +1645,35 @@ export const SharedReadingView: React.FC = () => {
                     </div>
                   ) : (
                     [...(activeRoom.comments || [])].reverse().map((c) => {
+                      const commentAuthorId =
+                        c.participantId || (c as unknown as { authorId?: string }).authorId || '';
+                      const isMyComment = isMyId(commentAuthorId);
+                      const liveAuthor = activeRoom.participants?.[commentAuthorId];
+                      const displayAuthorName = isMyComment
+                        ? profile.name || liveAuthor?.name || c.authorName
+                        : liveAuthor?.name || c.authorName;
+                      const displayAuthorEmoji = isMyComment
+                        ? profile.avatarEmoji || liveAuthor?.avatarEmoji || c.avatarEmoji
+                        : liveAuthor?.avatarEmoji || c.avatarEmoji;
                       const isSpoiler =
-                        c.participantId !== deviceId &&
+                        !isMyComment &&
                         c.progressAt > myProgress + 2 &&
                         !revealedSpoilers[c.id];
-                      const commentPhoto =
-                        c.avatarImageUrl ||
-                        activeRoom.participants?.[c.participantId]?.avatarImageUrl ||
-                        (c.participantId === deviceId ? profile.avatarImageUrl : undefined);
+                      const commentPhoto = isMyComment
+                        ? profile.avatarImageUrl
+                        : liveAuthor
+                        ? liveAuthor.avatarImageUrl
+                        : c.avatarImageUrl;
                       return (
                         <div key={c.id} className="shared-comment-card">
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                             <span style={{ fontSize: 11.5, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                               {commentPhoto ? (
-                                <img src={commentPhoto} alt={c.authorName} className="participant-mini-avatar" />
+                                <img src={commentPhoto} alt={displayAuthorName} className="participant-mini-avatar" />
                               ) : (
-                                <span>{c.avatarEmoji}</span>
+                                <span>{displayAuthorEmoji}</span>
                               )}
-                              <span>{c.authorName}</span>
+                              <span>{displayAuthorName}</span>
                             </span>
                             <span className="log-genre-pill" style={{ fontSize: 10 }}>
                               {c.pageAt ? `Pág. ${c.pageAt} · ` : ''}

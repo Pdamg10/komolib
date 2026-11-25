@@ -253,6 +253,31 @@ export async function deleteSharedRoom(config: SyncConfig, code: string): Promis
   }).catch(() => undefined);
 }
 
+export async function syncProfileAcrossSharedSpaces(
+  config: SyncConfig,
+  payload: {
+    participantIds: string[];
+    name?: string;
+    avatarEmoji?: string;
+    avatarBg?: string;
+    avatarImageUrl?: string;
+  }
+): Promise<{ rooms: SharedRoom[]; shelves: SharedShelf[] }> {
+  const base = resolveServerUrl(config.serverUrl);
+  if (!base || payload.participantIds.length === 0) return { rooms: [], shelves: [] };
+  const url = `${base}/api/shared/profile`;
+  const res = await fetchApi(url, {
+    method: 'PATCH',
+    headers: buildAuthHeaders(config, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ rooms?: SharedRoom[]; shelves?: SharedShelf[] }>(res, url);
+  return {
+    rooms: Array.isArray(data?.rooms) ? data.rooms : [],
+    shelves: Array.isArray(data?.shelves) ? data.shelves : [],
+  };
+}
+
 export function subscribeToRoomStream(
   config: SyncConfig,
   code: string,
@@ -288,7 +313,8 @@ export function subscribeToRoomStream(
         }
       }
     };
-    pollTimer = window.setInterval(() => void tick(), 4500);
+    void tick();
+    pollTimer = window.setInterval(() => void tick(), 4000);
   };
 
   if (preferPolling) {
@@ -573,7 +599,8 @@ export function subscribeToShelfStream(
         }
       }
     };
-    pollTimer = window.setInterval(() => void tick(), 5000);
+    void tick();
+    pollTimer = window.setInterval(() => void tick(), 4500);
   };
 
   if (preferPolling) {

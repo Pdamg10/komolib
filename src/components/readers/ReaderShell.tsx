@@ -13,6 +13,7 @@ import {
   Lock,
   LogOut,
   MapPin,
+  MoreHorizontal,
   PenTool,
   Send,
   Settings2,
@@ -49,6 +50,14 @@ import { EpubReader } from './EpubReader';
 import { PdfReader } from './PdfReader';
 import { READER_PALETTES } from './readerThemes';
 import { TextRichReader, type ReaderSelectionPayload } from './TextRichReader';
+
+export type ReaderViewportMode = 'phone' | 'tablet' | 'desktop';
+
+function detectReaderViewportMode(width: number): ReaderViewportMode {
+  if (width <= 640) return 'phone';
+  if (width <= 1024) return 'tablet';
+  return 'desktop';
+}
 
 const TOOL_LIST: AnnotationTool[] = [
   'highlighter',
@@ -99,6 +108,10 @@ export const ReaderShell: React.FC = () => {
   const [jumpHref, setJumpHref] = useState<string | null>(null);
   const [localJumpTarget, setLocalJumpTarget] = useState<ReaderJumpTarget | null>(null);
   const [drawer, setDrawer] = useState<'none' | 'settings' | 'toc' | 'marks' | 'room'>('none');
+  const [viewportMode, setViewportMode] = useState<ReaderViewportMode>(() =>
+    detectReaderViewportMode(typeof window !== 'undefined' ? window.innerWidth : 1280)
+  );
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
   const [marksTab, setMarksTab] = useState<'separadores' | 'anotaciones' | 'marcadores'>('anotaciones');
   const [annFilter, setAnnFilter] = useState<AnnotationTool | 'all'>('all');
   const [showHangingBookmark, setShowHangingBookmark] = useState(true);
@@ -215,6 +228,22 @@ export const ReaderShell: React.FC = () => {
 
   const effectiveJumpTarget = localJumpTarget || (readerJumpTarget?.bookId === activeBook?.id ? readerJumpTarget : null);
 
+  // Automatically detect & adapt reader chrome whenever viewport/orientation changes (phone / tablet / desktop)
+  useEffect(() => {
+    const updateMode = () => {
+      const next = detectReaderViewportMode(window.innerWidth);
+      setViewportMode((prev) => (prev === next ? prev : next));
+      if (next !== 'phone') setMobileToolsOpen(false);
+    };
+    updateMode();
+    window.addEventListener('resize', updateMode);
+    window.addEventListener('orientationchange', updateMode);
+    return () => {
+      window.removeEventListener('resize', updateMode);
+      window.removeEventListener('orientationchange', updateMode);
+    };
+  }, []);
+
   // Allow Android / PWA back gesture to close open reader drawers or annotation composer first
   useEffect(() => {
     const win = window as unknown as { __komoCloseReaderDrawer?: () => boolean };
@@ -231,12 +260,16 @@ export const ReaderShell: React.FC = () => {
         setDrawer('none');
         return true;
       }
+      if (mobileToolsOpen) {
+        setMobileToolsOpen(false);
+        return true;
+      }
       return false;
     };
     return () => {
       delete win.__komoCloseReaderDrawer;
     };
-  }, [activeBook, drawer, pendingSel]);
+  }, [activeBook, drawer, pendingSel, mobileToolsOpen]);
 
   useEffect(() => {
     if (!activeRoom?.code || !syncConfig.serverUrl.trim()) return;
@@ -509,9 +542,15 @@ export const ReaderShell: React.FC = () => {
     }
   };
 
+  const isPhone = viewportMode === 'phone';
+  const isTablet = viewportMode === 'tablet';
+  const totalMarksCount = bookAnnotations.length + bookBookmarks.length;
+  const roomParticipantsCount = activeRoom ? Object.keys(activeRoom.participants || {}).length : 0;
+
   return (
     <div
       className="reader-overlay"
+      data-reader-viewport={viewportMode}
       style={
         {
           background: pal.bg,
@@ -545,42 +584,23 @@ export const ReaderShell: React.FC = () => {
         />
       )}
 
-      {/* Top Bar */}
+      {/* Adaptive Top Bar (auto-compacts on phone/tablet/desktop with zero overlap) */}
       <header
-        className="reader-topbar"
+        className={`reader-topbar is-${viewportMode}`}
         style={{ background: pal.bar, borderBottom: `1px solid ${pal.border}` }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <div className="reader-topbar-left">
           <button
-            className="circle-arrow-btn"
+            className="circle-arrow-btn reader-icon-btn"
             style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
             onClick={closeReader}
             title="Volver a la biblioteca"
           >
-            <ArrowLeft size={17} />
+            <ArrowLeft size={isPhone ? 16 : 17} />
           </button>
-          <div style={{ minWidth: 0 }}>
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 800,
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-              }}
-            >
-              {activeBook.title}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: pal.muted,
-                fontWeight: 600,
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-              }}
-            >
+          <div className="reader-topbar-meta">
+            <div className="reader-topbar-title">{activeBook.title}</div>
+            <div className="reader-topbar-sub" style={{ color: pal.muted }}>
               {livePos.chapter ? `${livePos.chapter} · ` : `${activeBook.author} · `}
               {livePos.page ? `Pág. ${livePos.page} · ` : ''}
               {livePos.pct}%
@@ -588,104 +608,296 @@ export const ReaderShell: React.FC = () => {
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <div className="reader-topbar-actions">
+          {isPhone ? (
+            <>
+              <button
+                type="button"
+                className="circle-arrow-btn reader-icon-btn"
+                style={{
+                  background:
+                    mobileToolsOpen || pinMode
+                      ? 'var(--accent-primary)'
+                      : 'rgba(128,128,128,0.14)',
+                  color: mobileToolsOpen || pinMode ? 'var(--accent-contrast)' : pal.fg,
+                }}
+                onClick={() => {
+                  setDrawer('none');
+                  setMobileToolsOpen((v) => !v);
+                }}
+                title="Herramientas de lectura (Índice, Anotar, Nota rápida, Separador)"
+              >
+                <MoreHorizontal size={16} />
+              </button>
+
+              <button
+                type="button"
+                className="circle-arrow-btn reader-icon-btn"
+                style={{
+                  background: drawer === 'marks' ? 'var(--accent-primary)' : 'rgba(128,128,128,0.14)',
+                  color: drawer === 'marks' ? 'var(--accent-contrast)' : pal.fg,
+                }}
+                onClick={() => {
+                  setMobileToolsOpen(false);
+                  setDrawer(drawer === 'marks' ? 'none' : 'marks');
+                }}
+                title="Separadores, Resaltados, Post-its y Stickers"
+              >
+                <Bookmark size={15} />
+                {totalMarksCount > 0 && (
+                  <span className="reader-icon-badge">
+                    {totalMarksCount > 99 ? '99+' : totalMarksCount}
+                  </span>
+                )}
+              </button>
+
+              {activeRoom && (
+                <button
+                  type="button"
+                  className="circle-arrow-btn reader-icon-btn"
+                  style={{
+                    background:
+                      drawer === 'room' ? 'var(--accent-secondary)' : 'rgba(128,128,128,0.14)',
+                    color: drawer === 'room' ? 'var(--accent-secondary-contrast)' : pal.fg,
+                  }}
+                  onClick={() => {
+                    setMobileToolsOpen(false);
+                    setDrawer(drawer === 'room' ? 'none' : 'room');
+                  }}
+                  title={`Sala compartida ${activeRoom.code}`}
+                >
+                  <Users size={15} />
+                  <span className="reader-icon-badge">{roomParticipantsCount}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="circle-arrow-btn reader-icon-btn"
+                style={{
+                  background:
+                    drawer === 'settings' ? 'var(--accent-primary)' : 'rgba(128,128,128,0.14)',
+                  color: drawer === 'settings' ? 'var(--accent-contrast)' : pal.fg,
+                }}
+                onClick={() => {
+                  setMobileToolsOpen(false);
+                  setDrawer(drawer === 'settings' ? 'none' : 'settings');
+                }}
+                title="Ajustes del lector"
+              >
+                <Settings2 size={15} />
+              </button>
+            </>
+          ) : (
+            <>
+              {toc.length > 0 && (
+                <button
+                  type="button"
+                  className="circle-arrow-btn reader-icon-btn"
+                  style={{
+                    background:
+                      drawer === 'toc' ? 'var(--accent-secondary)' : 'rgba(128,128,128,0.14)',
+                    color: drawer === 'toc' ? 'var(--accent-secondary-contrast)' : pal.fg,
+                  }}
+                  onClick={() => setDrawer(drawer === 'toc' ? 'none' : 'toc')}
+                  title="Índice de capítulos"
+                >
+                  <List size={16} />
+                </button>
+              )}
+
+              {supportsPinMode && (
+                <button
+                  type="button"
+                  className="pill-btn reader-bar-pill"
+                  style={{
+                    background: pinMode ? 'var(--accent-primary)' : 'rgba(128,128,128,0.16)',
+                    color: pinMode ? 'var(--accent-contrast)' : pal.fg,
+                    borderColor: 'transparent',
+                  }}
+                  onClick={() => {
+                    setPinMode(!pinMode);
+                    if (!pinMode) showToast('Toca cualquier parte de la página para fijar un Post-it, sticker o marca');
+                  }}
+                  title="Activar modo anotar en página (Post-it, stickers, emojis)"
+                >
+                  <MapPin size={13} />
+                  <span>{pinMode ? (isTablet ? 'Tocando' : 'Tocando pág...') : isTablet ? 'Anotar' : 'Anotar pág.'}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="circle-arrow-btn reader-icon-btn"
+                style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
+                onClick={handleOpenQuickMarkAtCurrentPos}
+                title="Añadir Post-it, resaltado, sticker o emoji aquí"
+              >
+                <Highlighter size={15} />
+              </button>
+
+              <button
+                type="button"
+                className="circle-arrow-btn reader-icon-btn"
+                style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
+                onClick={() => handlePlaceVisualBookmark()}
+                title="Colocar separador de página aquí"
+              >
+                <BookmarkPlus size={16} />
+              </button>
+
+              <button
+                type="button"
+                className={isTablet ? 'circle-arrow-btn reader-icon-btn' : 'pill-btn reader-bar-pill'}
+                style={{
+                  background: drawer === 'marks' ? 'var(--accent-primary)' : 'rgba(128,128,128,0.16)',
+                  color: drawer === 'marks' ? 'var(--accent-contrast)' : pal.fg,
+                  borderColor: 'transparent',
+                }}
+                onClick={() => setDrawer(drawer === 'marks' ? 'none' : 'marks')}
+                title="Separadores, Resaltados, Post-its y Stickers"
+              >
+                <Bookmark size={isTablet ? 15 : 13} />
+                {!isTablet && <span>Marcas</span>}
+                {isTablet && totalMarksCount > 0 && (
+                  <span className="reader-icon-badge">
+                    {totalMarksCount > 99 ? '99+' : totalMarksCount}
+                  </span>
+                )}
+              </button>
+
+              {activeRoom && (
+                <button
+                  type="button"
+                  className="pill-btn reader-bar-pill"
+                  style={{
+                    background:
+                      drawer === 'room' ? 'var(--accent-secondary)' : 'rgba(128,128,128,0.16)',
+                    color: drawer === 'room' ? 'var(--accent-secondary-contrast)' : pal.fg,
+                    borderColor: 'transparent',
+                  }}
+                  onClick={() => setDrawer(drawer === 'room' ? 'none' : 'room')}
+                  title={`Sala compartida ${activeRoom.code}`}
+                >
+                  <Users size={13} />
+                  <span>{isTablet ? roomParticipantsCount : `Sala (${roomParticipantsCount})`}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="circle-arrow-btn reader-icon-btn"
+                style={{
+                  background:
+                    drawer === 'settings' ? 'var(--accent-primary)' : 'rgba(128,128,128,0.14)',
+                  color: drawer === 'settings' ? 'var(--accent-contrast)' : pal.fg,
+                }}
+                onClick={() => setDrawer(drawer === 'settings' ? 'none' : 'settings')}
+                title="Ajustes del lector"
+              >
+                <Settings2 size={16} />
+              </button>
+            </>
+          )}
+        </div>
+      </header>
+
+      {/* Compact Secondary Tools Strip on Phone (clean, spacious, zero overlapping) */}
+      {isPhone && mobileToolsOpen && (
+        <div
+          className="reader-subtoolbar"
+          style={{ background: pal.bar, borderBottom: `1px solid ${pal.border}` }}
+        >
           {toc.length > 0 && (
             <button
-              className="circle-arrow-btn"
+              type="button"
+              className="pill-btn reader-sub-btn"
               style={{
                 background: drawer === 'toc' ? 'var(--accent-secondary)' : 'rgba(128,128,128,0.14)',
                 color: drawer === 'toc' ? 'var(--accent-secondary-contrast)' : pal.fg,
+                borderColor: 'transparent',
               }}
-              onClick={() => setDrawer(drawer === 'toc' ? 'none' : 'toc')}
-              title="Índice de capítulos"
+              onClick={() => {
+                setMobileToolsOpen(false);
+                setDrawer(drawer === 'toc' ? 'none' : 'toc');
+              }}
             >
-              <List size={16} />
+              <List size={13} /> Índice
             </button>
           )}
 
           {supportsPinMode && (
             <button
-              className="pill-btn"
+              type="button"
+              className="pill-btn reader-sub-btn"
               style={{
-                background: pinMode ? 'var(--accent-primary)' : 'rgba(128,128,128,0.16)',
+                background: pinMode ? 'var(--accent-primary)' : 'rgba(128,128,128,0.14)',
                 color: pinMode ? 'var(--accent-contrast)' : pal.fg,
                 borderColor: 'transparent',
-                height: 32,
-                fontSize: 11.5,
               }}
               onClick={() => {
-                setPinMode(!pinMode);
-                if (!pinMode) showToast('Toca cualquier parte de la página para fijar un Post-it, sticker o marca');
+                const next = !pinMode;
+                setPinMode(next);
+                setMobileToolsOpen(false);
+                if (next) showToast('Toca cualquier parte de la página para fijar una marca');
               }}
-              title="Activar modo anotar en página (Post-it, stickers, emojis)"
             >
-              <MapPin size={13} /> {pinMode ? 'Tocando pág...' : 'Anotar pág.'}
+              <MapPin size={13} /> {pinMode ? 'Salir de anotar' : 'Anotar pág.'}
             </button>
           )}
 
           <button
-            className="circle-arrow-btn"
-            style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
-            onClick={handleOpenQuickMarkAtCurrentPos}
-            title="Añadir Post-it, resaltado, sticker o emoji aquí"
-          >
-            <Highlighter size={15} />
-          </button>
-
-          <button
-            className="circle-arrow-btn"
-            style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
-            onClick={() => handlePlaceVisualBookmark()}
-            title="Colocar separador de página aquí"
-          >
-            <BookmarkPlus size={16} />
-          </button>
-
-          <button
-            className="pill-btn"
-            style={{
-              background: drawer === 'marks' ? 'var(--accent-primary)' : 'rgba(128,128,128,0.16)',
-              color: drawer === 'marks' ? 'var(--accent-contrast)' : pal.fg,
-              borderColor: 'transparent',
-              height: 32,
-              fontSize: 11.5,
+            type="button"
+            className="pill-btn reader-sub-btn"
+            style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg, borderColor: 'transparent' }}
+            onClick={() => {
+              setMobileToolsOpen(false);
+              handleOpenQuickMarkAtCurrentPos();
             }}
-            onClick={() => setDrawer(drawer === 'marks' ? 'none' : 'marks')}
-            title="Separadores, Resaltados, Post-its y Stickers"
           >
-            <Bookmark size={13} /> Marcas
+            <Highlighter size={13} /> Nota rápida
           </button>
 
-          {activeRoom && (
-            <button
-              className="pill-btn"
-              style={{
-                background: drawer === 'room' ? 'var(--accent-secondary)' : 'rgba(128,128,128,0.16)',
-                color: drawer === 'room' ? 'var(--accent-secondary-contrast)' : pal.fg,
-                borderColor: 'transparent',
-                height: 32,
-                fontSize: 11.5,
-              }}
-              onClick={() => setDrawer(drawer === 'room' ? 'none' : 'room')}
-              title={`Sala compartida ${activeRoom.code}`}
-            >
-              <Users size={13} /> Sala ({Object.keys(activeRoom.participants || {}).length})
-            </button>
-          )}
-
           <button
-            className="circle-arrow-btn"
-            style={{
-              background: drawer === 'settings' ? 'var(--accent-primary)' : 'rgba(128,128,128,0.14)',
-              color: drawer === 'settings' ? 'var(--accent-contrast)' : pal.fg,
+            type="button"
+            className="pill-btn reader-sub-btn"
+            style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg, borderColor: 'transparent' }}
+            onClick={() => {
+              setMobileToolsOpen(false);
+              void handlePlaceVisualBookmark();
             }}
-            onClick={() => setDrawer(drawer === 'settings' ? 'none' : 'settings')}
-            title="Ajustes del lector"
           >
-            <Settings2 size={16} />
+            <BookmarkPlus size={13} /> Separador
           </button>
         </div>
-      </header>
+      )}
+
+      {/* Slim indicator when page-pin mode is active on phone */}
+      {isPhone && pinMode && !mobileToolsOpen && (
+        <div
+          className="reader-pin-banner"
+          style={{ background: pal.bar, borderBottom: `1px solid ${pal.border}` }}
+        >
+          <span>
+            <MapPin size={12} /> Toca en la página para fijar una marca
+          </span>
+          <button
+            type="button"
+            className="pill-btn"
+            style={{
+              height: 24,
+              padding: '0 10px',
+              fontSize: 10.5,
+              background: 'var(--accent-primary)',
+              color: 'var(--accent-contrast)',
+              borderColor: 'transparent',
+            }}
+            onClick={() => setPinMode(false)}
+          >
+            Listo
+          </button>
+        </div>
+      )}
 
       {/* Main Reader Stage */}
       <main
@@ -721,6 +933,7 @@ export const ReaderShell: React.FC = () => {
             annotations={bookAnnotations}
             jumpTarget={effectiveJumpTarget}
             pinMode={pinMode}
+            viewportMode={viewportMode}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
             onUpdateSettings={updateReaderSettings}
@@ -738,6 +951,7 @@ export const ReaderShell: React.FC = () => {
             annotations={bookAnnotations}
             jumpTarget={effectiveJumpTarget}
             pinMode={pinMode}
+            viewportMode={viewportMode}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
             onUpdateSettings={updateReaderSettings}
@@ -756,6 +970,7 @@ export const ReaderShell: React.FC = () => {
             onTocLoaded={setToc}
             jumpHref={jumpHref}
             jumpTarget={effectiveJumpTarget}
+            viewportMode={viewportMode}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
             onProgress={(pct, cfi, chapter, chapterHref, page) => {
@@ -1947,6 +2162,9 @@ export const ReaderShell: React.FC = () => {
               .sort((a, b) => (b.progress || 0) - (a.progress || 0))
               .map((p) => {
                 const isMe = p.id === sharedUserId || p.id === deviceId;
+                const displayName = isMe ? profile.name || p.name : p.name;
+                const displayEmoji = isMe ? profile.avatarEmoji || p.avatarEmoji : p.avatarEmoji;
+                const displayImg = isMe ? profile.avatarImageUrl : p.avatarImageUrl;
                 const isPartAdmin = p.id === activeRoom.hostId;
                 const iAmAdmin = activeRoom.hostId === sharedUserId || activeRoom.hostId === deviceId;
                 return (
@@ -1970,16 +2188,13 @@ export const ReaderShell: React.FC = () => {
                       }}
                     >
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
-                        {(() => {
-                          const pImg = p.avatarImageUrl || (isMe ? profile.avatarImageUrl : undefined);
-                          return pImg ? (
-                            <img src={pImg} alt={p.name} className="participant-mini-avatar" />
-                          ) : (
-                            <span>{p.avatarEmoji || '🦊'}</span>
-                          );
-                        })()}
+                        {displayImg ? (
+                          <img src={displayImg} alt={displayName} className="participant-mini-avatar" />
+                        ) : (
+                          <span>{displayEmoji || '🦊'}</span>
+                        )}
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {p.name} {isMe ? '(Tú)' : ''}
+                          {displayName} {isMe ? '(Tú)' : ''}
                         </span>
                         {isPartAdmin && <span className="admin-role-pill">Admin</span>}
                       </span>
@@ -2054,8 +2269,25 @@ export const ReaderShell: React.FC = () => {
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {[...(activeRoom.comments || [])].reverse().map((c) => {
+                const cAuthorId =
+                  c.participantId || (c as unknown as { authorId?: string }).authorId || '';
+                const isMyComment = Boolean(
+                  cAuthorId && (cAuthorId === sharedUserId || cAuthorId === deviceId)
+                );
+                const liveAuthor = activeRoom.participants?.[cAuthorId];
+                const cName = isMyComment
+                  ? profile.name || liveAuthor?.name || c.authorName
+                  : liveAuthor?.name || c.authorName;
+                const cEmoji = isMyComment
+                  ? profile.avatarEmoji || liveAuthor?.avatarEmoji || c.avatarEmoji
+                  : liveAuthor?.avatarEmoji || c.avatarEmoji;
+                const cImg = isMyComment
+                  ? profile.avatarImageUrl
+                  : liveAuthor
+                  ? liveAuthor.avatarImageUrl
+                  : c.avatarImageUrl;
                 const isSpoiler =
-                  c.participantId !== deviceId &&
+                  !isMyComment &&
                   c.progressAt > livePos.pct + 2 &&
                   !revealedSpoilers[c.id];
                 return (
@@ -2078,18 +2310,12 @@ export const ReaderShell: React.FC = () => {
                       }}
                     >
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                        {(() => {
-                          const cImg =
-                            c.avatarImageUrl ||
-                            activeRoom.participants?.[c.participantId]?.avatarImageUrl ||
-                            (c.participantId === deviceId ? profile.avatarImageUrl : undefined);
-                          return cImg ? (
-                            <img src={cImg} alt={c.authorName} className="participant-mini-avatar" />
-                          ) : (
-                            <span>{c.avatarEmoji}</span>
-                          );
-                        })()}
-                        <span>{c.authorName}</span>
+                        {cImg ? (
+                          <img src={cImg} alt={cName} className="participant-mini-avatar" />
+                        ) : (
+                          <span>{cEmoji}</span>
+                        )}
+                        <span>{cName}</span>
                       </span>
                       <span style={{ opacity: 0.7 }}>{Math.round(c.progressAt)}%</span>
                     </div>

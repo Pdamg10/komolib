@@ -27,6 +27,7 @@ interface ComicMangaReaderProps {
   annotations?: BookAnnotation[];
   jumpTarget?: ReaderJumpTarget | null;
   pinMode?: boolean;
+  viewportMode?: 'phone' | 'tablet' | 'desktop';
   onProgress: (page: number, total: number) => void;
   onTextSelect?: (sel: ReaderSelectionPayload) => void;
   onAnnotationClick?: (ann: BookAnnotation) => void;
@@ -49,6 +50,7 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
   annotations = [],
   jumpTarget,
   pinMode = false,
+  viewportMode = 'desktop',
   onProgress,
   onTextSelect,
   onAnnotationClick,
@@ -272,93 +274,167 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
     );
   }
 
-  // Shared Quick Controls Bottom Bar (Continuous <-> Paged, Fit Mode, Zoom, Scrubber)
-  const renderBottomBar = () => (
-    <div
-      className="reader-bottombar"
-      style={{
-        justifyContent: 'space-between',
-        gap: 6,
-        flexWrap: 'nowrap',
-        padding: '6px 10px',
-      }}
-    >
-      {onUpdateSettings && (
-        <button
-          type="button"
-          className={`pill-btn ${isStrip ? 'active' : ''}`}
-          style={{ height: 30, padding: '0 9px', fontSize: 11, flexShrink: 0 }}
-          onClick={toggleContinuousMode}
-          title={
-            isStrip
-              ? 'Modo lectura continua activo — toca para cambiar a página por página'
-              : 'Modo paginado activo — toca para cambiar a lectura continua vertical'
-          }
-        >
-          {isStrip ? <Rows3 size={13} /> : <BookOpen size={13} />}
-          <span>{isStrip ? 'Continuo' : isRtl ? 'Manga RTL' : 'Paginado'}</span>
-        </button>
-      )}
+  // Shared Quick Controls Bottom Bar (auto-adapts to phone 2-row compact vs tablet/desktop 1-row)
+  const renderBottomBar = () =>
+    viewportMode === 'phone' ? (
+      <div className="reader-bottombar is-compact">
+        <div className="reader-bottom-row">
+          {!isStrip && (
+            <button
+              type="button"
+              className="circle-arrow-btn reader-bottom-icon"
+              onClick={isRtl ? goNext : goPrev}
+              title={isRtl ? 'Página siguiente (RTL)' : 'Página anterior'}
+            >
+              <ChevronLeft size={15} />
+            </button>
+          )}
+          <input
+            type="range"
+            min={0}
+            max={Math.max(0, pages.length - 1)}
+            value={currentIdx}
+            onChange={(e) => {
+              const idx = Number(e.target.value);
+              setCurrentIdx(idx);
+              lastReportedPageRef.current = idx + 1;
+              onProgress(idx + 1, pages.length);
+              if (isStrip) scrollToStripPage(idx + 1, false);
+            }}
+            className="reader-bottom-slider"
+            style={{ direction: !isStrip && isRtl ? 'rtl' : 'ltr' }}
+          />
+          {!isStrip && (
+            <button
+              type="button"
+              className="circle-arrow-btn reader-bottom-icon"
+              onClick={isRtl ? goPrev : goNext}
+              title={isRtl ? 'Página anterior (RTL)' : 'Página siguiente'}
+            >
+              <ChevronRight size={15} />
+            </button>
+          )}
+          <span className="reader-page-counter">
+            {currentIdx + 1}/{pages.length}
+          </span>
+        </div>
 
-      <span style={{ fontSize: 11.5, fontWeight: 800, minWidth: 50, textAlign: 'center', flexShrink: 0 }}>
-        {currentIdx + 1} / {pages.length}
-      </span>
+        <div className="reader-bottom-row reader-bottom-controls">
+          {onUpdateSettings && (
+            <button
+              type="button"
+              className={`pill-btn reader-bottom-pill ${isStrip ? 'active' : ''}`}
+              onClick={toggleContinuousMode}
+            >
+              {isStrip ? <Rows3 size={12} /> : <BookOpen size={12} />}
+              <span>{isStrip ? 'Continuo' : isRtl ? 'Manga' : 'Paginado'}</span>
+            </button>
+          )}
 
-      <input
-        type="range"
-        min={0}
-        max={Math.max(0, pages.length - 1)}
-        value={currentIdx}
-        onChange={(e) => {
-          const idx = Number(e.target.value);
-          setCurrentIdx(idx);
-          lastReportedPageRef.current = idx + 1;
-          onProgress(idx + 1, pages.length);
-          if (isStrip) scrollToStripPage(idx + 1, false);
-        }}
-        style={{
-          flex: 1,
-          minWidth: 64,
-          maxWidth: 420,
-          direction: !isStrip && isRtl ? 'rtl' : 'ltr',
-        }}
-      />
+          {onUpdateSettings && (
+            <button
+              type="button"
+              className="pill-btn reader-bottom-pill"
+              onClick={cycleFitMode}
+              title={`Ajuste actual: ${FIT_LABELS[activeFit]}`}
+            >
+              <Maximize2 size={12} />
+              <span>{FIT_LABELS[activeFit]}</span>
+            </button>
+          )}
 
-      {onUpdateSettings && (
-        <button
-          type="button"
-          className="pill-btn"
-          style={{ height: 30, padding: '0 8px', fontSize: 11, flexShrink: 0 }}
-          onClick={cycleFitMode}
-          title={`Ajuste actual: ${FIT_LABELS[activeFit]} — toca para cambiar`}
-        >
-          <Maximize2 size={12} />
-          <span>{FIT_LABELS[activeFit]}</span>
-        </button>
-      )}
-
-      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0 }}>
-        <button
-          type="button"
-          className="circle-arrow-btn"
-          style={{ width: 28, height: 28 }}
-          onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.15).toFixed(2)))}
-          title="Alejar"
-        >
-          <ZoomOut size={13} />
-        </button>
-        <button
-          type="button"
-          className="circle-arrow-btn"
-          style={{ width: 28, height: 28 }}
-          onClick={() => setZoom((z) => Math.min(2.4, +(z + 0.15).toFixed(2)))}
-          title="Acercar"
-        >
-          <ZoomIn size={13} />
-        </button>
+          <div className="reader-zoom-group">
+            <button
+              type="button"
+              className="circle-arrow-btn reader-bottom-icon"
+              onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.15).toFixed(2)))}
+              title="Alejar"
+            >
+              <ZoomOut size={13} />
+            </button>
+            <span className="reader-zoom-label">{Math.round(zoom * 100)}%</span>
+            <button
+              type="button"
+              className="circle-arrow-btn reader-bottom-icon"
+              onClick={() => setZoom((z) => Math.min(2.4, +(z + 0.15).toFixed(2)))}
+              title="Acercar"
+            >
+              <ZoomIn size={13} />
+            </button>
+          </div>
+        </div>
       </div>
-    </div>
-  );
+    ) : (
+      <div className="reader-bottombar">
+        {onUpdateSettings && (
+          <button
+            type="button"
+            className={`pill-btn reader-bottom-pill ${isStrip ? 'active' : ''}`}
+            onClick={toggleContinuousMode}
+            title={
+              isStrip
+                ? 'Modo lectura continua activo — toca para cambiar a página por página'
+                : 'Modo paginado activo — toca para cambiar a lectura continua vertical'
+            }
+          >
+            {isStrip ? <Rows3 size={13} /> : <BookOpen size={13} />}
+            <span>{isStrip ? 'Continuo' : isRtl ? 'Manga RTL' : 'Paginado'}</span>
+          </button>
+        )}
+
+        <span className="reader-page-counter">
+          {currentIdx + 1} / {pages.length}
+        </span>
+
+        <input
+          type="range"
+          min={0}
+          max={Math.max(0, pages.length - 1)}
+          value={currentIdx}
+          onChange={(e) => {
+            const idx = Number(e.target.value);
+            setCurrentIdx(idx);
+            lastReportedPageRef.current = idx + 1;
+            onProgress(idx + 1, pages.length);
+            if (isStrip) scrollToStripPage(idx + 1, false);
+          }}
+          className="reader-bottom-slider"
+          style={{ direction: !isStrip && isRtl ? 'rtl' : 'ltr' }}
+        />
+
+        {onUpdateSettings && (
+          <button
+            type="button"
+            className="pill-btn reader-bottom-pill"
+            onClick={cycleFitMode}
+            title={`Ajuste actual: ${FIT_LABELS[activeFit]} — toca para cambiar`}
+          >
+            <Maximize2 size={12} />
+            <span>{FIT_LABELS[activeFit]}</span>
+          </button>
+        )}
+
+        <div className="reader-zoom-group">
+          <button
+            type="button"
+            className="circle-arrow-btn reader-bottom-icon"
+            onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.15).toFixed(2)))}
+            title="Alejar"
+          >
+            <ZoomOut size={13} />
+          </button>
+          <span className="reader-zoom-label">{Math.round(zoom * 100)}%</span>
+          <button
+            type="button"
+            className="circle-arrow-btn reader-bottom-icon"
+            onClick={() => setZoom((z) => Math.min(2.4, +(z + 0.15).toFixed(2)))}
+            title="Acercar"
+          >
+            <ZoomIn size={13} />
+          </button>
+        </div>
+      </div>
+    );
 
   // 1. Seamless Vertical Continuous Strip Mode (Works for Manhwa, Webtoon, Manga, Comics!)
   if (isStrip) {
@@ -665,41 +741,45 @@ export const ComicMangaReader: React.FC<ComicMangaReaderProps> = ({
         </div>
       </div>
 
-      {/* Subtle floating side arrows (compact & translucent so they never block artwork) */}
-      <button
-        type="button"
-        className="circle-arrow-btn"
-        style={{
-          position: 'absolute',
-          left: 8,
-          top: '50%',
-          transform: 'translateY(-50%)',
-          width: 34,
-          height: 34,
-          opacity: 0.72,
-        }}
-        onClick={isRtl ? goNext : goPrev}
-        title={isRtl ? 'Página siguiente (RTL)' : 'Página anterior'}
-      >
-        <ChevronLeft size={18} />
-      </button>
-      <button
-        type="button"
-        className="circle-arrow-btn"
-        style={{
-          position: 'absolute',
-          right: 8,
-          top: '50%',
-          transform: 'translateY(-50%)',
-          width: 34,
-          height: 34,
-          opacity: 0.72,
-        }}
-        onClick={isRtl ? goPrev : goNext}
-        title={isRtl ? 'Página anterior (RTL)' : 'Página siguiente'}
-      >
-        <ChevronRight size={18} />
-      </button>
+      {/* Subtle floating side arrows (only on tablet/desktop; on phone users swipe/tap or use compact bottom arrows) */}
+      {viewportMode !== 'phone' && (
+        <>
+          <button
+            type="button"
+            className="circle-arrow-btn"
+            style={{
+              position: 'absolute',
+              left: 8,
+              top: '50%',
+              transform: 'translateY(-50%)',
+              width: 34,
+              height: 34,
+              opacity: 0.72,
+            }}
+            onClick={isRtl ? goNext : goPrev}
+            title={isRtl ? 'Página siguiente (RTL)' : 'Página anterior'}
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <button
+            type="button"
+            className="circle-arrow-btn"
+            style={{
+              position: 'absolute',
+              right: 8,
+              top: '50%',
+              transform: 'translateY(-50%)',
+              width: 34,
+              height: 34,
+              opacity: 0.72,
+            }}
+            onClick={isRtl ? goPrev : goNext}
+            title={isRtl ? 'Página anterior (RTL)' : 'Página siguiente'}
+          >
+            <ChevronRight size={18} />
+          </button>
+        </>
+      )}
 
       {renderBottomBar()}
     </div>

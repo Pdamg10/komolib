@@ -121,6 +121,7 @@ import {
   restoreSharedShelf,
   shareBookToShelf,
   SharedSpaceHttpError,
+  syncProfileAcrossSharedSpaces,
   updateSharedRoomProgress,
 } from '../services/sharedReadingService';
 import type {
@@ -400,6 +401,63 @@ const SHELF_PREFS_STORAGE_KEY = 'komolib_shelf_prefs_v1';
 const THEME_CACHE_STORAGE_KEY = 'komolib_theme_cache_v1';
 const READER_SETTINGS_STORAGE_KEY = 'komolib_reader_settings_v1';
 const GDRIVE_AUTH_STORAGE_KEY = 'komolib_gdrive_auth_v1';
+const SYNC_CONFIG_STORAGE_KEY = 'komolib_sync_config_v1';
+const PROFILE_STORAGE_KEY = 'komolib_profile_v1';
+
+function readCachedSyncConfig(): Partial<SyncConfig> | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null;
+    const raw = window.localStorage.getItem(SYNC_CONFIG_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SyncConfig> | null;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedSyncConfig(cfg: SyncConfig | null): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    if (!cfg) {
+      window.localStorage.removeItem(SYNC_CONFIG_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(SYNC_CONFIG_STORAGE_KEY, JSON.stringify(cfg));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function readCachedProfile(): Partial<UserProfile> | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null;
+    const raw = window.localStorage.getItem(PROFILE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<UserProfile> | null;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedProfile(p: UserProfile | null): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    if (!p) {
+      window.localStorage.removeItem(PROFILE_STORAGE_KEY);
+      return;
+    }
+    const compact: UserProfile = {
+      ...p,
+      avatarImageUrl:
+        p.avatarImageUrl && p.avatarImageUrl.length <= 180_000 ? p.avatarImageUrl : undefined,
+    };
+    window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(compact));
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 function readCachedThemeForStartup(): ThemeConfig {
   try {
@@ -777,6 +835,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const suppressAutoSyncRef = useRef<boolean>(false);
   const autoSyncTimerRef = useRef<number | null>(null);
   const roomProgressTimersRef = useRef<Record<string, number>>({});
+  const profileSharedSyncTimerRef = useRef<number | null>(null);
 
   const persistPendingTombstones = useCallback(() => {
     dbSetKV('pendingTombstones', {
@@ -1046,7 +1105,14 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         themeUpdatedAtRef.current = 0;
       }
 
-      const effectiveStartupProfile = { ...DEFAULT_PROFILE, ...(savedProfile || {}) };
+      const cachedProfile = readCachedProfile();
+      const mergedSavedProfile = savedProfile
+        ? { ...cachedProfile, ...savedProfile }
+        : cachedProfile;
+      const effectiveStartupProfile = { ...DEFAULT_PROFILE, ...(mergedSavedProfile || {}) };
+      if (!savedProfile && cachedProfile) {
+        dbSetKV('profile', effectiveStartupProfile).catch(console.error);
+      }
       if (isProfileCustomized(effectiveStartupProfile)) {
         if (!profileUpdatedAtRef.current) {
           profileUpdatedAtRef.current = Date.now();
@@ -1156,11 +1222,20 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       setDeviceId(resolvedDeviceId);
 
-      // Every user gets their own private vault spaceId so two users NEVER see each other's library
+      // Every user gets their own private vault spaceId so two users NEVER see each other's library.
+      // Recover from synchronous localStorage mirror if IndexedDB missed a write on sudden desktop close.
+      const cachedSync = readCachedSyncConfig();
+      const restoredSyncSource =
+        savedSync?.accountEmail || !cachedSync?.accountEmail
+          ? { ...(cachedSync || {}), ...(savedSync || {}) }
+          : { ...(savedSync || {}), ...cachedSync };
       let initialSync: SyncConfig = {
         ...DEFAULT_SYNC_CONFIG,
-        ...(savedSync || {}),
+        ...restoredSyncSource,
       };
+      if (cachedSync?.accountEmail && !savedSync?.accountEmail) {
+        await dbSetKV('syncConfig', initialSync);
+      }
 
       // Production builds (Desktop PC / Android APK) receive the API URL via VITE_SYNC_SERVER_URL.
       // If this device still has an old localhost, LAN IP, HTTP URL on HTTPS, temporary tunnel,
@@ -1267,7 +1342,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       if (savedCats?.length) setCategories(savedCats);
       if (savedCols?.length) setCollections(savedCols);
-      if (savedProfile) setProfile({ ...DEFAULT_PROFILE, ...savedProfile });
+      if (mergedSavedProfile) {
+        setProfile(effectiveStartupProfile);
+        writeCachedProfile(effectiveStartupProfile);
+      }
       const effectiveStartupReader: ReaderSettings | null =
         cachedReader && cachedReader.updatedAt > dbReaderTs
           ? cachedReader.settings
@@ -1284,6 +1362,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
       setSyncConfig(initialSync);
+      writeCachedSyncConfig(initialSync);
       const pendingChatDel = new Set(deletedChatSessionIdsRef.current);
       let initialSessions: ChatSession[] = [];
       if (Array.isArray(savedChatSessions) && savedChatSessions.length > 0) {
@@ -1965,6 +2044,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const mergedProfile = { ...DEFAULT_PROFILE, ...merged.profile };
           if (JSON.stringify(mergedProfile) !== JSON.stringify(current.profile)) {
             setProfile(mergedProfile);
+            writeCachedProfile(mergedProfile);
             await dbSetKV('profile', mergedProfile);
           }
           await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
@@ -2378,24 +2458,185 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [scheduleAutoSync]
   );
 
+  const propagateProfileToSharedSpaces = useCallback(
+    (nextProfile: UserProfile, immediate = false) => {
+      const s = stateRef.current;
+      const myIds = Array.from(new Set([s.sharedUserId, s.deviceId].filter(Boolean)));
+      if (myIds.length === 0) return;
+      const idSet = new Set(myIds);
+      const nextName = nextProfile.name?.trim() || 'Lector Komo';
+      const nextEmoji = nextProfile.avatarEmoji || '🦊';
+      const nextBg = nextProfile.avatarBg || '#f6d8ae';
+      const nextAvatarUrl = nextProfile.avatarImageUrl || '';
+
+      // 1. Optimistically update local rooms & shelves immediately so UI reflects changes on Frame 0
+      if (s.sharedRooms.length > 0) {
+        let roomsChanged = false;
+        const nextRooms = s.sharedRooms.map((room) => {
+          let changed = false;
+          const nextParticipants = { ...(room.participants || {}) };
+          for (const pid of myIds) {
+            if (nextParticipants[pid]) {
+              nextParticipants[pid] = {
+                ...nextParticipants[pid],
+                name: nextName,
+                avatarEmoji: nextEmoji,
+                avatarBg: nextBg,
+                avatarImageUrl: nextAvatarUrl || undefined,
+              };
+              changed = true;
+            }
+          }
+          const nextHostName = idSet.has(room.hostId) ? nextName : room.hostName;
+          if (nextHostName !== room.hostName) changed = true;
+          const nextComments = (room.comments || []).map((c) => {
+            const cPid = c.participantId || (c as unknown as { authorId?: string }).authorId || '';
+            if (cPid && idSet.has(cPid)) {
+              changed = true;
+              return {
+                ...c,
+                participantId: cPid,
+                authorName: nextName,
+                avatarEmoji: nextEmoji,
+                avatarImageUrl: nextAvatarUrl || undefined,
+              };
+            }
+            return c;
+          });
+          if (!changed) return room;
+          roomsChanged = true;
+          return {
+            ...room,
+            hostName: nextHostName,
+            participants: nextParticipants,
+            comments: nextComments,
+            updatedAt: Date.now(),
+          };
+        });
+        if (roomsChanged) {
+          stateRef.current.sharedRooms = nextRooms;
+          setSharedRooms(nextRooms);
+          dbSetKV('cachedSharedRooms', nextRooms.slice(0, 40)).catch(() => undefined);
+        }
+      }
+
+      if (s.sharedShelves.length > 0) {
+        let shelvesChanged = false;
+        const nextShelves = s.sharedShelves.map((shelf) => {
+          let changed = false;
+          const nextMembers = { ...(shelf.members || {}) };
+          for (const mid of myIds) {
+            if (nextMembers[mid]) {
+              nextMembers[mid] = {
+                ...nextMembers[mid],
+                name: nextName,
+                avatarEmoji: nextEmoji,
+                avatarBg: nextBg,
+                avatarImageUrl: nextAvatarUrl || undefined,
+              };
+              changed = true;
+            }
+          }
+          const nextHostName = idSet.has(shelf.hostId) ? nextName : shelf.hostName;
+          if (nextHostName !== shelf.hostName) changed = true;
+          const nextBooks = { ...(shelf.books || {}) };
+          for (const key of Object.keys(nextBooks)) {
+            const entry = nextBooks[key];
+            if (entry && idSet.has(entry.ownerId) && entry.ownerName !== nextName) {
+              nextBooks[key] = { ...entry, ownerName: nextName };
+              changed = true;
+            }
+          }
+          if (!changed) return shelf;
+          shelvesChanged = true;
+          return {
+            ...shelf,
+            hostName: nextHostName,
+            members: nextMembers,
+            books: nextBooks,
+            updatedAt: Date.now(),
+          };
+        });
+        if (shelvesChanged) {
+          stateRef.current.sharedShelves = nextShelves;
+          setSharedShelves(nextShelves);
+          dbSetKV('cachedSharedShelves', nextShelves.slice(0, 40)).catch(() => undefined);
+        }
+      }
+
+      // 2. Push to remote API (debounced while typing name, nearly instant for photo/emoji swap)
+      if (!s.syncConfig.serverUrl.trim()) return;
+      if (profileSharedSyncTimerRef.current !== null) {
+        window.clearTimeout(profileSharedSyncTimerRef.current);
+      }
+      profileSharedSyncTimerRef.current = window.setTimeout(async () => {
+        profileSharedSyncTimerRef.current = null;
+        const latest = stateRef.current;
+        const latestIds = Array.from(new Set([latest.sharedUserId, latest.deviceId].filter(Boolean)));
+        if (!latest.syncConfig.serverUrl.trim() || latestIds.length === 0) return;
+        try {
+          const res = await syncProfileAcrossSharedSpaces(latest.syncConfig, {
+            participantIds: latestIds,
+            name: latest.profile.name?.trim() || 'Lector Komo',
+            avatarEmoji: latest.profile.avatarEmoji || '🦊',
+            avatarBg: latest.profile.avatarBg || '#f6d8ae',
+            avatarImageUrl: latest.profile.avatarImageUrl || '',
+          });
+          if (res.rooms.length > 0) {
+            const updatedByCode = new Map(res.rooms.map((r) => [r.code, r]));
+            setSharedRooms((prev) => {
+              const merged = prev.map((r) => updatedByCode.get(r.code) || r);
+              stateRef.current.sharedRooms = merged;
+              dbSetKV('cachedSharedRooms', merged.slice(0, 40)).catch(() => undefined);
+              return merged;
+            });
+          }
+          if (res.shelves.length > 0) {
+            const updatedByCode = new Map(res.shelves.map((sh) => [sh.code, sh]));
+            setSharedShelves((prev) => {
+              const merged = prev.map((sh) => updatedByCode.get(sh.code) || sh);
+              stateRef.current.sharedShelves = merged;
+              dbSetKV('cachedSharedShelves', merged.slice(0, 40)).catch(() => undefined);
+              return merged;
+            });
+          }
+        } catch {
+          // ignore transient network errors; next room/profile update will retry
+        }
+      }, immediate ? 80 : 480);
+    },
+    []
+  );
+
   const updateProfile = useCallback(
     (patch: Partial<UserProfile>) => {
       const ts = Date.now();
       profileUpdatedAtRef.current = ts;
       dbSetKV('profileUpdatedAt', ts).catch(console.error);
-      setProfile((prev) => {
-        const next = { ...prev, ...patch };
-        dbSetKV('profile', next).catch(console.error);
-        return next;
-      });
+      const next = { ...stateRef.current.profile, ...patch };
+      stateRef.current.profile = next;
+      setProfile(next);
+      writeCachedProfile(next);
+      dbSetKV('profile', next).catch(console.error);
+      const touchedPublicIdentity =
+        'name' in patch ||
+        'avatarImageUrl' in patch ||
+        'avatarEmoji' in patch ||
+        'avatarBg' in patch;
+      if (touchedPublicIdentity) {
+        const immediate = 'avatarImageUrl' in patch || 'avatarEmoji' in patch || 'avatarBg' in patch;
+        propagateProfileToSharedSpaces(next, immediate);
+      }
       scheduleAutoSync(false, 'personalization');
     },
-    [scheduleAutoSync]
+    [propagateProfileToSharedSpaces, scheduleAutoSync]
   );
 
   const updateSyncConfig = useCallback((patch: Partial<SyncConfig>) => {
     setSyncConfig((prev) => {
       const next = { ...prev, ...patch };
+      stateRef.current.syncConfig = next;
+      writeCachedSyncConfig(next);
       dbSetKV('syncConfig', next).catch(console.error);
       return next;
     });
@@ -4724,7 +4965,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           avatarImageUrl: s.profile.avatarImageUrl || initialized.picture || undefined,
         };
         setProfile(nextProfile);
+        writeCachedProfile(nextProfile);
         await dbSetKV('profile', nextProfile);
+        updateSyncConfig({ accountEmail: initialized.email });
 
         const pulled = await pullStateFromGoogleDrive(
           cfg,
@@ -4740,6 +4983,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           await applyRemotePayload(pulled.state, s.books.filter((b) => !b.isDemo).length === 0);
           updateSyncConfig({ accountEmail: initialized.email });
         }
+        propagateProfileToSharedSpaces(stateRef.current.profile, true);
         if (s.books.filter((b) => !b.isDemo).length > 0 || !pulled.state) {
           dirtyScopesRef.current.add('books');
           dirtyScopesRef.current.add('personalization');
@@ -4942,7 +5186,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         liveSync: true,
       };
       stateRef.current.syncConfig = nextCfg;
+      writeCachedSyncConfig(nextCfg);
       updateSyncConfig(nextCfg);
+      await dbSetKV('syncConfig', nextCfg);
 
       setSyncStatus('syncing');
       setSyncMessage(`Conectando cuenta ${cleanEmail}...`);
@@ -4978,7 +5224,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             email: cleanEmail,
           };
           setProfile(mergedProfile);
+          writeCachedProfile(mergedProfile);
           await dbSetKV('profile', mergedProfile);
+          propagateProfileToSharedSpaces(mergedProfile, true);
           const now = Date.now();
           updateSyncConfig({ lastSyncedAt: now });
           setServerOnline(true);
@@ -5018,7 +5266,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
         await dbSetKV('profileUpdatedAt', profileUpdatedAtRef.current);
         setProfile(updatedProfile);
+        writeCachedProfile(updatedProfile);
         await dbSetKV('profile', updatedProfile);
+        propagateProfileToSharedSpaces(updatedProfile, true);
 
         const pushTheme = localThemeCustom || themeUpdatedAtRef.current > 0;
         const pushProfile = !remoteProfileWins && (localProfileCustom || profileUpdatedAtRef.current > 0);
@@ -5175,6 +5425,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     persistGoogleDriveAuth(null);
     clearCachedTheme();
     clearCachedReaderSettings();
+    writeCachedSyncConfig(null);
+    writeCachedProfile(null);
 
     const newDeviceId = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const freshSpaceId = `vault_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;

@@ -22,6 +22,7 @@ interface EpubReaderProps {
   onTocLoaded: (items: Array<{ id: string; title: string; href: string }>) => void;
   jumpHref: string | null;
   jumpTarget?: ReaderJumpTarget | null;
+  viewportMode?: 'phone' | 'tablet' | 'desktop';
   onProgress: (
     percent: number,
     cfi: string,
@@ -41,6 +42,7 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
   onTocLoaded,
   jumpHref,
   jumpTarget,
+  viewportMode = 'desktop',
   onProgress,
   onTextSelect,
   onAnnotationClick,
@@ -399,26 +401,24 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
       <div ref={viewerRef} style={{ flex: 1, width: '100%', height: '100%' }} />
 
       <div className="reader-bottombar" style={{ justifyContent: 'space-between' }}>
-        <button className="pill-btn" onClick={() => renditionRef.current?.prev()}>
-          <ChevronLeft size={15} /> Anterior
-        </button>
-        <span
-          style={{
-            fontSize: 11.5,
-            fontWeight: 700,
-            textAlign: 'center',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            maxWidth: '52%',
-          }}
+        <button
+          type="button"
+          className="pill-btn reader-bottom-pill"
+          onClick={() => renditionRef.current?.prev()}
         >
+          <ChevronLeft size={15} /> {viewportMode === 'phone' ? 'Ant.' : 'Anterior'}
+        </button>
+        <span className="reader-bottom-center-label">
           {chapterLabel ? `${chapterLabel} · ` : ''}
           {pageNum ? `Pág. ${pageNum} · ` : ''}
           {pct}%
         </span>
-        <button className="pill-btn" onClick={() => renditionRef.current?.next()}>
-          Siguiente <ChevronRight size={15} />
+        <button
+          type="button"
+          className="pill-btn reader-bottom-pill"
+          onClick={() => renditionRef.current?.next()}
+        >
+          {viewportMode === 'phone' ? 'Sig.' : 'Siguiente'} <ChevronRight size={15} />
         </button>
       </div>
     </div>

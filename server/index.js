@@ -1910,6 +1910,125 @@ app.post('/api/rooms/:code/kick', (req, res) => {
   res.json({ ok: true, room });
 });
 
+app.patch('/api/shared/profile', (req, res) => {
+  const { participantIds, participantId, name, avatarEmoji, avatarBg, avatarImageUrl } = req.body || {};
+  const rawIds = Array.isArray(participantIds) ? participantIds : participantId ? [participantId] : [];
+  const idList = Array.from(
+    new Set(rawIds.map((id) => String(id || '').trim().slice(0, 64)).filter(Boolean))
+  );
+  if (idList.length === 0) {
+    return res.status(400).json({ error: 'participantIds requerido' });
+  }
+  const idSet = new Set(idList);
+  const nextName = typeof name === 'string' && name.trim() ? name.trim().slice(0, 40) : undefined;
+  const nextEmoji = typeof avatarEmoji === 'string' && avatarEmoji.trim() ? avatarEmoji.trim().slice(0, 12) : undefined;
+  const nextBg = typeof avatarBg === 'string' && avatarBg.trim() ? avatarBg.trim().slice(0, 32) : undefined;
+  const hasAvatarUrl = avatarImageUrl !== undefined;
+  const nextAvatarUrl = hasAvatarUrl ? sanitizeSharedAvatarUrl(avatarImageUrl) : undefined;
+  const now = Date.now();
+
+  const rooms = readRooms();
+  const updatedRooms = [];
+  let roomsDirty = false;
+  for (const code of Object.keys(rooms)) {
+    const room = rooms[code];
+    if (!room?.code) continue;
+    let changed = false;
+    room.participants = room.participants || {};
+    for (const pid of idList) {
+      const prev = room.participants[pid];
+      if (prev) {
+        room.participants[pid] = {
+          ...prev,
+          ...(nextName ? { name: nextName } : {}),
+          ...(nextEmoji ? { avatarEmoji: nextEmoji } : {}),
+          ...(nextBg ? { avatarBg: nextBg } : {}),
+          ...(hasAvatarUrl ? { avatarImageUrl: nextAvatarUrl } : {}),
+        };
+        changed = true;
+      }
+    }
+    if (idSet.has(room.hostId) && nextName && room.hostName !== nextName) {
+      room.hostName = nextName;
+      changed = true;
+    }
+    if (Array.isArray(room.comments)) {
+      for (let i = 0; i < room.comments.length; i++) {
+        const c = room.comments[i];
+        const cPid = c?.participantId || c?.authorId;
+        if (cPid && idSet.has(cPid)) {
+          room.comments[i] = {
+            ...c,
+            participantId: cPid,
+            ...(nextName ? { authorName: nextName } : {}),
+            ...(nextEmoji ? { avatarEmoji: nextEmoji } : {}),
+            ...(hasAvatarUrl ? { avatarImageUrl: nextAvatarUrl } : {}),
+          };
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      room.updatedAt = now;
+      rooms[code] = room;
+      roomsDirty = true;
+      updatedRooms.push(room);
+    }
+  }
+  if (roomsDirty) {
+    writeRooms(rooms);
+    for (const r of updatedRooms) broadcastRoomUpdate(r.code, r);
+  }
+
+  const shelves = readShelves();
+  const updatedShelves = [];
+  let shelvesDirty = false;
+  for (const code of Object.keys(shelves)) {
+    const shelf = shelves[code];
+    if (!shelf?.code) continue;
+    let changed = false;
+    shelf.members = shelf.members || {};
+    for (const mid of idList) {
+      const prev = shelf.members[mid];
+      if (prev) {
+        shelf.members[mid] = {
+          ...prev,
+          ...(nextName ? { name: nextName } : {}),
+          ...(nextEmoji ? { avatarEmoji: nextEmoji } : {}),
+          ...(nextBg ? { avatarBg: nextBg } : {}),
+          ...(hasAvatarUrl ? { avatarImageUrl: nextAvatarUrl } : {}),
+        };
+        changed = true;
+      }
+    }
+    if (idSet.has(shelf.hostId) && nextName && shelf.hostName !== nextName) {
+      shelf.hostName = nextName;
+      changed = true;
+    }
+    if (shelf.books && typeof shelf.books === 'object' && nextName) {
+      for (const key of Object.keys(shelf.books)) {
+        const entry = shelf.books[key];
+        if (entry && idSet.has(entry.ownerId) && entry.ownerName !== nextName) {
+          shelf.books[key] = { ...entry, ownerName: nextName };
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      shelf.updatedAt = now;
+      shelves[code] = shelf;
+      shelvesDirty = true;
+      updatedShelves.push(shelf);
+    }
+  }
+  if (shelvesDirty) {
+    writeShelves(shelves);
+    for (const sh of updatedShelves) broadcastShelfUpdate(sh.code, sh);
+  }
+
+  res.json({ ok: true, rooms: updatedRooms, shelves: updatedShelves });
+});
+
 app.delete('/api/rooms/:code', (req, res) => {
   const code = normalizeRoomCode(req.params.code);
   const rooms = readRooms();

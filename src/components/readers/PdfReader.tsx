@@ -30,6 +30,7 @@ interface PdfReaderProps {
   annotations?: BookAnnotation[];
   jumpTarget?: ReaderJumpTarget | null;
   pinMode?: boolean;
+  viewportMode?: 'phone' | 'tablet' | 'desktop';
   onProgress: (page: number, total: number) => void;
   onTextSelect?: (sel: ReaderSelectionPayload) => void;
   onAnnotationClick?: (ann: BookAnnotation) => void;
@@ -310,6 +311,7 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
   annotations = [],
   jumpTarget,
   pinMode = false,
+  viewportMode = 'desktop',
   onProgress,
   onTextSelect,
   onAnnotationClick,
@@ -811,110 +813,200 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
         </div>
       )}
 
-      <div
-        className="reader-bottombar"
-        style={{ justifyContent: 'space-between', gap: 6, flexWrap: 'nowrap', padding: '6px 10px' }}
-      >
-        {onUpdateSettings && (
-          <button
-            type="button"
-            className={`pill-btn ${isContinuous ? 'active' : ''}`}
-            style={{ height: 30, padding: '0 9px', fontSize: 11, flexShrink: 0 }}
-            onClick={() => {
-              didInitialScrollRef.current = false;
-              onUpdateSettings({ pdfFlow: isContinuous ? 'paginated' : 'continuous' });
-            }}
-            title={
-              isContinuous
-                ? 'Modo continuo vertical — toca para cambiar a página por página'
-                : 'Modo paginado — toca para cambiar a scroll continuo'
-            }
-          >
-            {isContinuous ? <Rows3 size={13} /> : <BookOpen size={13} />}
-            <span>{isContinuous ? 'Continuo' : 'Paginado'}</span>
-          </button>
-        )}
+      {viewportMode === 'phone' ? (
+        <div className="reader-bottombar is-compact">
+          <div className="reader-bottom-row">
+            {!isContinuous && (
+              <button
+                type="button"
+                className="circle-arrow-btn reader-bottom-icon"
+                onClick={() => setPageNum((p) => Math.max(1, p - 1))}
+                disabled={pageNum <= 1}
+                title="Página anterior"
+              >
+                <ChevronLeft size={15} />
+              </button>
+            )}
+            <input
+              type="range"
+              min={1}
+              max={Math.max(1, numPages)}
+              value={pageNum}
+              onChange={(e) => {
+                const p = Number(e.target.value);
+                setPageNum(p);
+                lastReportedPageRef.current = p;
+                onProgress(p, numPages);
+                if (isContinuous) scrollToPdfPage(p, false);
+              }}
+              className="reader-bottom-slider"
+            />
+            {!isContinuous && (
+              <button
+                type="button"
+                className="circle-arrow-btn reader-bottom-icon"
+                onClick={() => setPageNum((p) => Math.min(numPages, p + 1))}
+                disabled={pageNum >= numPages}
+                title="Página siguiente"
+              >
+                <ChevronRight size={15} />
+              </button>
+            )}
+            <span className="reader-page-counter">
+              {pageNum}/{numPages}
+            </span>
+          </div>
 
-        {!isContinuous && (
-          <button
-            type="button"
-            className="circle-arrow-btn"
-            style={{ width: 28, height: 28, flexShrink: 0 }}
-            onClick={() => setPageNum((p) => Math.max(1, p - 1))}
-            disabled={pageNum <= 1}
-          >
-            <ChevronLeft size={15} />
-          </button>
-        )}
+          <div className="reader-bottom-row reader-bottom-controls">
+            {onUpdateSettings && (
+              <button
+                type="button"
+                className={`pill-btn reader-bottom-pill ${isContinuous ? 'active' : ''}`}
+                onClick={() => {
+                  didInitialScrollRef.current = false;
+                  onUpdateSettings({ pdfFlow: isContinuous ? 'paginated' : 'continuous' });
+                }}
+              >
+                {isContinuous ? <Rows3 size={12} /> : <BookOpen size={12} />}
+                <span>{isContinuous ? 'Continuo' : 'Paginado'}</span>
+              </button>
+            )}
 
-        <span style={{ fontSize: 11.5, fontWeight: 800, minWidth: 50, textAlign: 'center', flexShrink: 0 }}>
-          {pageNum} / {numPages}
-        </span>
+            {onUpdateSettings && (
+              <button
+                type="button"
+                className="pill-btn reader-bottom-pill"
+                onClick={() => {
+                  setZoom(1);
+                  onUpdateSettings({ pdfFit: fitMode === 'width' ? 'contain' : 'width' });
+                }}
+              >
+                <Maximize2 size={12} />
+                <span>{fitMode === 'width' ? 'Ancho' : 'Pantalla'}</span>
+              </button>
+            )}
 
-        <input
-          type="range"
-          min={1}
-          max={Math.max(1, numPages)}
-          value={pageNum}
-          onChange={(e) => {
-            const p = Number(e.target.value);
-            setPageNum(p);
-            lastReportedPageRef.current = p;
-            onProgress(p, numPages);
-            if (isContinuous) scrollToPdfPage(p, false);
-          }}
-          style={{ flex: 1, minWidth: 56, maxWidth: 380 }}
-        />
-
-        {!isContinuous && (
-          <button
-            type="button"
-            className="circle-arrow-btn"
-            style={{ width: 28, height: 28, flexShrink: 0 }}
-            onClick={() => setPageNum((p) => Math.min(numPages, p + 1))}
-            disabled={pageNum >= numPages}
-          >
-            <ChevronRight size={15} />
-          </button>
-        )}
-
-        {onUpdateSettings && (
-          <button
-            type="button"
-            className="pill-btn"
-            style={{ height: 30, padding: '0 8px', fontSize: 11, flexShrink: 0 }}
-            onClick={() => {
-              setZoom(1);
-              onUpdateSettings({ pdfFit: fitMode === 'width' ? 'contain' : 'width' });
-            }}
-            title="Alternar entre ajustar al ancho o pantalla completa"
-          >
-            <Maximize2 size={12} />
-            <span>{fitMode === 'width' ? 'Ancho' : 'Pantalla'}</span>
-          </button>
-        )}
-
-        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0 }}>
-          <button
-            type="button"
-            className="circle-arrow-btn"
-            style={{ width: 28, height: 28 }}
-            onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.15).toFixed(2)))}
-            title="Alejar"
-          >
-            <ZoomOut size={13} />
-          </button>
-          <button
-            type="button"
-            className="circle-arrow-btn"
-            style={{ width: 28, height: 28 }}
-            onClick={() => setZoom((z) => Math.min(2.5, +(z + 0.15).toFixed(2)))}
-            title="Acercar"
-          >
-            <ZoomIn size={13} />
-          </button>
+            <div className="reader-zoom-group">
+              <button
+                type="button"
+                className="circle-arrow-btn reader-bottom-icon"
+                onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.15).toFixed(2)))}
+                title="Alejar"
+              >
+                <ZoomOut size={13} />
+              </button>
+              <span className="reader-zoom-label">{Math.round(zoom * 100)}%</span>
+              <button
+                type="button"
+                className="circle-arrow-btn reader-bottom-icon"
+                onClick={() => setZoom((z) => Math.min(2.5, +(z + 0.15).toFixed(2)))}
+                title="Acercar"
+              >
+                <ZoomIn size={13} />
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="reader-bottombar">
+          {onUpdateSettings && (
+            <button
+              type="button"
+              className={`pill-btn reader-bottom-pill ${isContinuous ? 'active' : ''}`}
+              onClick={() => {
+                didInitialScrollRef.current = false;
+                onUpdateSettings({ pdfFlow: isContinuous ? 'paginated' : 'continuous' });
+              }}
+              title={
+                isContinuous
+                  ? 'Modo continuo vertical — toca para cambiar a página por página'
+                  : 'Modo paginado — toca para cambiar a scroll continuo'
+              }
+            >
+              {isContinuous ? <Rows3 size={13} /> : <BookOpen size={13} />}
+              <span>{isContinuous ? 'Continuo' : 'Paginado'}</span>
+            </button>
+          )}
+
+          {!isContinuous && (
+            <button
+              type="button"
+              className="circle-arrow-btn reader-bottom-icon"
+              onClick={() => setPageNum((p) => Math.max(1, p - 1))}
+              disabled={pageNum <= 1}
+              title="Página anterior"
+            >
+              <ChevronLeft size={15} />
+            </button>
+          )}
+
+          <span className="reader-page-counter">
+            {pageNum} / {numPages}
+          </span>
+
+          <input
+            type="range"
+            min={1}
+            max={Math.max(1, numPages)}
+            value={pageNum}
+            onChange={(e) => {
+              const p = Number(e.target.value);
+              setPageNum(p);
+              lastReportedPageRef.current = p;
+              onProgress(p, numPages);
+              if (isContinuous) scrollToPdfPage(p, false);
+            }}
+            className="reader-bottom-slider"
+          />
+
+          {!isContinuous && (
+            <button
+              type="button"
+              className="circle-arrow-btn reader-bottom-icon"
+              onClick={() => setPageNum((p) => Math.min(numPages, p + 1))}
+              disabled={pageNum >= numPages}
+              title="Página siguiente"
+            >
+              <ChevronRight size={15} />
+            </button>
+          )}
+
+          {onUpdateSettings && (
+            <button
+              type="button"
+              className="pill-btn reader-bottom-pill"
+              onClick={() => {
+                setZoom(1);
+                onUpdateSettings({ pdfFit: fitMode === 'width' ? 'contain' : 'width' });
+              }}
+              title="Alternar entre ajustar al ancho o pantalla completa"
+            >
+              <Maximize2 size={12} />
+              <span>{fitMode === 'width' ? 'Ancho' : 'Pantalla'}</span>
+            </button>
+          )}
+
+          <div className="reader-zoom-group">
+            <button
+              type="button"
+              className="circle-arrow-btn reader-bottom-icon"
+              onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.15).toFixed(2)))}
+              title="Alejar"
+            >
+              <ZoomOut size={13} />
+            </button>
+            <span className="reader-zoom-label">{Math.round(zoom * 100)}%</span>
+            <button
+              type="button"
+              className="circle-arrow-btn reader-bottom-icon"
+              onClick={() => setZoom((z) => Math.min(2.5, +(z + 0.15).toFixed(2)))}
+              title="Acercar"
+            >
+              <ZoomIn size={13} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

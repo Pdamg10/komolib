@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, session, shell } = require('electron');
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -13,6 +13,15 @@ app.commandLine.appendSwitch(
   'WaylandWindowDecorations,CanvasOopRasterization,VaapiVideoDecoder'
 );
 
+// Pin userData to a single stable lowercase directory across Linux (case-sensitive!) and Windows
+// so app name / packaging changes NEVER split IndexedDB/localStorage into a fresh empty profile.
+try {
+  const stableUserData = path.join(app.getPath('appData'), 'komolib');
+  app.setPath('userData', stableUserData);
+} catch {
+  // ignore if appData unavailable
+}
+
 app.setName('Komolib');
 if (process.platform === 'win32') {
   app.setAppUserModelId('com.komolib.reader');
@@ -22,7 +31,7 @@ if (process.platform === 'linux' && typeof app.setDesktopName === 'function') {
 }
 
 const DIST_DIR = path.join(__dirname, '..', 'dist');
-const PREFERRED_PORT = 41735;
+const PREFERRED_PORTS = [41735, 41736, 41737];
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -176,21 +185,37 @@ function startStaticServer() {
       }
     });
 
+    let attempt = 0;
+    let portIdx = 0;
+
+    const tryListen = () => {
+      const targetPort = PREFERRED_PORTS[portIdx] ?? PREFERRED_PORTS[0];
+      server.listen(targetPort, '127.0.0.1', () => {
+        const addr = server.address();
+        resolve({ server, port: addr.port });
+      });
+    };
+
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
-        server.listen(0, '127.0.0.1', () => {
-          const addr = server.address();
-          resolve({ server, port: addr.port });
-        });
-      } else {
-        reject(err);
+        // Retry PREFERRED_PORTS[0] briefly in case a previous instance is still shutting down
+        // so the HTTP origin (and thus IndexedDB/localStorage) NEVER changes unexpectedly!
+        if (portIdx === 0 && attempt < 12) {
+          attempt += 1;
+          setTimeout(tryListen, 220);
+          return;
+        }
+        if (portIdx + 1 < PREFERRED_PORTS.length) {
+          portIdx += 1;
+          attempt = 0;
+          tryListen();
+          return;
+        }
       }
+      reject(err);
     });
 
-    server.listen(PREFERRED_PORT, '127.0.0.1', () => {
-      const addr = server.address();
-      resolve({ server, port: addr.port });
-    });
+    tryListen();
   });
 }
 
@@ -219,6 +244,14 @@ async function createWindow(port) {
 
   win.once('ready-to-show', () => {
     win.show();
+  });
+
+  win.on('close', () => {
+    try {
+      session.defaultSession.flushStorageData();
+    } catch {
+      // ignore flush errors
+    }
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -264,11 +297,22 @@ if (!gotLock) {
     });
   });
 
-  app.on('window-all-closed', () => {
+  app.on('before-quit', () => {
+    try {
+      session.defaultSession.flushStorageData();
+    } catch {
+      // ignore
+    }
+  });
+
+  app.on('will-quit', () => {
     if (localServer) {
       localServer.close();
       localServer = null;
     }
+  });
+
+  app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
       app.quit();
     }

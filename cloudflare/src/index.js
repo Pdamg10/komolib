@@ -967,6 +967,7 @@ export default {
           const now = Date.now();
           const comment = {
             id: `rc_${now}_${Math.random().toString(36).slice(2, 6)}`,
+            participantId: authorId,
             authorId,
             authorName: String(body?.authorName || 'Lector').slice(0, 40),
             avatarEmoji: body?.avatarEmoji || '💬',
@@ -1297,6 +1298,139 @@ export default {
           ]);
           return json(req, { ok: true });
         }
+      }
+
+      /* ===== LIVE PROFILE PROPAGATION ACROSS ALL SHARED ROOMS & SHELVES ===== */
+
+      if (method === 'PATCH' && pathname === '/api/shared/profile') {
+        if (!checkBearerAuth(req, url, env)) return json(req, { error: 'Token inválido o faltante' }, 401);
+        const body = await req.json().catch(() => ({}));
+        const rawIds = Array.isArray(body?.participantIds)
+          ? body.participantIds
+          : body?.participantId
+          ? [body.participantId]
+          : [];
+        const idList = Array.from(
+          new Set(rawIds.map((id) => String(id || '').trim().slice(0, 64)).filter(Boolean))
+        );
+        if (idList.length === 0) {
+          return json(req, { error: 'participantIds requerido' }, 400);
+        }
+        const idSet = new Set(idList);
+        const nextName =
+          typeof body?.name === 'string' && body.name.trim()
+            ? body.name.trim().slice(0, 40)
+            : undefined;
+        const nextEmoji =
+          typeof body?.avatarEmoji === 'string' && body.avatarEmoji.trim()
+            ? body.avatarEmoji.trim().slice(0, 12)
+            : undefined;
+        const nextBg =
+          typeof body?.avatarBg === 'string' && body.avatarBg.trim()
+            ? body.avatarBg.trim().slice(0, 32)
+            : undefined;
+        const hasAvatarUrl = body?.avatarImageUrl !== undefined;
+        const nextAvatarUrl = hasAvatarUrl ? sanitizeAvatarUrl(body.avatarImageUrl) : undefined;
+        const now = Date.now();
+
+        const updatedRooms = [];
+        const roomRows = await db.prepare('SELECT data FROM rooms ORDER BY updated_at DESC LIMIT 120').all();
+        for (const row of roomRows.results || []) {
+          let room;
+          try {
+            room = JSON.parse(row.data);
+          } catch {
+            continue;
+          }
+          if (!room?.code) continue;
+          let changed = false;
+          room.participants = room.participants || {};
+          for (const pid of idList) {
+            const prev = room.participants[pid];
+            if (prev) {
+              room.participants[pid] = {
+                ...prev,
+                ...(nextName ? { name: nextName } : {}),
+                ...(nextEmoji ? { avatarEmoji: nextEmoji } : {}),
+                ...(nextBg ? { avatarBg: nextBg } : {}),
+                ...(hasAvatarUrl ? { avatarImageUrl: nextAvatarUrl } : {}),
+              };
+              changed = true;
+            }
+          }
+          if (idSet.has(room.hostId) && nextName && room.hostName !== nextName) {
+            room.hostName = nextName;
+            changed = true;
+          }
+          if (Array.isArray(room.comments)) {
+            for (let i = 0; i < room.comments.length; i++) {
+              const c = room.comments[i];
+              const cPid = c?.participantId || c?.authorId;
+              if (cPid && idSet.has(cPid)) {
+                room.comments[i] = {
+                  ...c,
+                  participantId: cPid,
+                  ...(nextName ? { authorName: nextName } : {}),
+                  ...(nextEmoji ? { avatarEmoji: nextEmoji } : {}),
+                  ...(hasAvatarUrl ? { avatarImageUrl: nextAvatarUrl } : {}),
+                };
+                changed = true;
+              }
+            }
+          }
+          if (changed) {
+            room.updatedAt = now;
+            await putRoom(db, room);
+            updatedRooms.push(room);
+          }
+        }
+
+        const updatedShelves = [];
+        const shelfRows = await db.prepare('SELECT data FROM shelves ORDER BY updated_at DESC LIMIT 120').all();
+        for (const row of shelfRows.results || []) {
+          let shelf;
+          try {
+            shelf = JSON.parse(row.data);
+          } catch {
+            continue;
+          }
+          if (!shelf?.code) continue;
+          let changed = false;
+          shelf.members = shelf.members || {};
+          for (const mid of idList) {
+            const prev = shelf.members[mid];
+            if (prev) {
+              shelf.members[mid] = {
+                ...prev,
+                ...(nextName ? { name: nextName } : {}),
+                ...(nextEmoji ? { avatarEmoji: nextEmoji } : {}),
+                ...(nextBg ? { avatarBg: nextBg } : {}),
+                ...(hasAvatarUrl ? { avatarImageUrl: nextAvatarUrl } : {}),
+              };
+              changed = true;
+            }
+          }
+          if (idSet.has(shelf.hostId) && nextName && shelf.hostName !== nextName) {
+            shelf.hostName = nextName;
+            changed = true;
+          }
+          if (shelf.books && typeof shelf.books === 'object' && nextName) {
+            for (const key of Object.keys(shelf.books)) {
+              const entry = shelf.books[key];
+              if (entry && idSet.has(entry.ownerId) && entry.ownerName !== nextName) {
+                shelf.books[key] = { ...entry, ownerName: nextName };
+                changed = true;
+              }
+            }
+          }
+          if (changed) {
+            shelf.updatedAt = now;
+            await putShelf(db, shelf);
+            updatedShelves.push(shelf);
+          }
+        }
+
+        return json(req, { ok: true, rooms: updatedRooms, shelves: updatedShelves });
       }
 
       /* ===== BOOK BINARY UPLOAD/DOWNLOAD (FOR SHARED ROOMS & SYNC) ===== */
