@@ -64,7 +64,12 @@ async function scanDirectoryRecursive(rootDir, currentDir, depth, knownKeySet, r
   } catch {
     return;
   }
+  let processed = 0;
   for (const entry of entries) {
+    processed += 1;
+    if (processed % 60 === 0) {
+      await new Promise((r) => setImmediate(r));
+    }
     if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '__MACOSX') continue;
     const fullPath = path.join(currentDir, entry.name);
     if (entry.isDirectory()) {

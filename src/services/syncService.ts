@@ -964,6 +964,10 @@ export function subscribeToSyncStream(
   onFileUploadRequest?: (event: FileUploadRequestEvent) => void
 ): () => void {
   if (typeof EventSource === 'undefined') return () => undefined;
+  const base = normalizeServerUrl(config.serverUrl);
+  // Cloudflare Workers stateless API does not keep persistent SSE streams open;
+  // skip EventSource to avoid an infinite 3-second reconnect storm on PC/Mobile!
+  if (!base || /\.workers\.dev\b/i.test(base)) return () => undefined;
   const url = buildStreamUrl(config, '/api/sync/stream');
   if (!url) return () => undefined;
 

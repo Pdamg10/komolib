@@ -875,6 +875,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [mobilePanelOpen, setMobilePanelOpen] = useState<boolean>(false);
 
   const [activeBook, setActiveBook] = useState<BookItem | null>(null);
+  const activeBookIdRef = useRef<string | null>(null);
+  activeBookIdRef.current = activeBook?.id || null;
   const [activeBookFile, setActiveBookFile] = useState<{
     bookId: string;
     blob: Blob;
@@ -1608,96 +1610,112 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       setReady(true);
 
-      // Background pass (v3): ensure existing local books in IndexedDB extract their original cover
-      // (re-checks books that previously failed extraction on older Android WebView builds)
-      const needsCheck = loadedBooks.filter(
-        (b) =>
-          !b.coverCheckedV2 ||
-          (!b.coverCheckedV3 &&
-            b.hasLocalFile &&
-            !b.isDemo &&
-            !hasDisplayableOriginalCover(b) &&
-            b.hasOriginalCover !== false) ||
-          (!b.coverCheckedV3 && b.hasLocalFile && !b.isDemo && !isRasterCoverDataUrl(b.coverDataUrl))
-      );
+      // Background pass (v3): gently recover up to 6 small local covers after idle delay
+      // (never blocks startup, skips huge >25MB files, pauses while reading, and batches setBooks ONCE!)
+      const MAX_BG_COVER_BYTES = 25 * 1024 * 1024;
+      const needsCheck = loadedBooks
+        .filter(
+          (b) =>
+            (!b.fileSize || b.fileSize <= MAX_BG_COVER_BYTES) &&
+            (!b.coverCheckedV2 ||
+              (!b.coverCheckedV3 &&
+                b.hasLocalFile &&
+                !b.isDemo &&
+                !hasDisplayableOriginalCover(b) &&
+                b.hasOriginalCover !== false) ||
+              (!b.coverCheckedV3 && b.hasLocalFile && !b.isDemo && !isRasterCoverDataUrl(b.coverDataUrl)))
+        )
+        .slice(0, 6);
       if (needsCheck.length > 0) {
-        (async () => {
-          let upgradedCovers = 0;
-          for (const book of needsCheck) {
-            if (cancelled) return;
-            try {
-              let patch: Partial<BookItem> = { coverCheckedV2: true, coverCheckedV3: true };
-              if (book.isDemo) {
-                patch.hasOriginalCover = book.format !== 'md';
-              } else if (book.hasLocalFile) {
-                const fileRec = await dbGetBookFile(book.id);
-                const extracted = fileRec
-                  ? await extractOriginalCoverFromBlob(
-                      fileRec.blob,
-                      book.format,
-                      book.title,
-                      fileRec.extraImages
-                    )
-                  : {};
-                if (extracted.coverDataUrl && isRasterCoverDataUrl(extracted.coverDataUrl)) {
-                  const pal = await extractCoverPaletteFromDataUrl(
-                    extracted.coverDataUrl,
-                    book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
-                    book.ribbonColor || '#f2ba59'
-                  );
-                  patch = {
-                    coverDataUrl: extracted.coverDataUrl,
-                    hasOriginalCover: true,
-                    coverCheckedV2: true,
-                    coverCheckedV3: true,
-                    spineColor: pal.spineColor,
-                    ribbonColor: pal.ribbonColor,
-                    updatedAt: Date.now(),
-                  };
-                  if (
-                    extracted.author &&
-                    (!book.author ||
-                      book.author === 'Autor desconocido' ||
-                      book.author === 'Biblioteca Personal')
-                  ) {
-                    patch.author = extracted.author;
+        window.setTimeout(() => {
+          if (cancelled || activeBookIdRef.current) return;
+          (async () => {
+            let upgradedCovers = 0;
+            const patchesById = new Map<string, Partial<BookItem>>();
+            for (const book of needsCheck) {
+              if (cancelled || activeBookIdRef.current) break;
+              try {
+                let patch: Partial<BookItem> = { coverCheckedV2: true, coverCheckedV3: true };
+                if (book.isDemo) {
+                  patch.hasOriginalCover = book.format !== 'md';
+                } else if (book.hasLocalFile) {
+                  const fileRec = await dbGetBookFile(book.id);
+                  const extracted =
+                    fileRec && fileRec.blob.size <= MAX_BG_COVER_BYTES
+                      ? await extractOriginalCoverFromBlob(
+                          fileRec.blob,
+                          book.format,
+                          book.title,
+                          fileRec.extraImages
+                        )
+                      : {};
+                  if (extracted.coverDataUrl && isRasterCoverDataUrl(extracted.coverDataUrl)) {
+                    const pal = await extractCoverPaletteFromDataUrl(
+                      extracted.coverDataUrl,
+                      book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
+                      book.ribbonColor || '#f2ba59'
+                    );
+                    patch = {
+                      coverDataUrl: extracted.coverDataUrl,
+                      hasOriginalCover: true,
+                      coverCheckedV2: true,
+                      coverCheckedV3: true,
+                      spineColor: pal.spineColor,
+                      ribbonColor: pal.ribbonColor,
+                      updatedAt: Date.now(),
+                    };
+                    if (
+                      extracted.author &&
+                      (!book.author ||
+                        book.author === 'Autor desconocido' ||
+                        book.author === 'Biblioteca Personal')
+                    ) {
+                      patch.author = extracted.author;
+                    }
+                    upgradedCovers++;
+                  } else if (isRasterCoverDataUrl(book.coverDataUrl)) {
+                    const pal = await extractCoverPaletteFromDataUrl(
+                      book.coverDataUrl,
+                      book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
+                      book.ribbonColor || '#f2ba59'
+                    );
+                    patch = {
+                      hasOriginalCover: true,
+                      coverCheckedV2: true,
+                      coverCheckedV3: true,
+                      spineColor: pal.spineColor,
+                      ribbonColor: pal.ribbonColor,
+                    };
+                  } else {
+                    patch = {
+                      hasOriginalCover: false,
+                      coverCheckedV2: true,
+                      coverCheckedV3: true,
+                    };
                   }
-                  upgradedCovers++;
-                } else if (isRasterCoverDataUrl(book.coverDataUrl)) {
-                  const pal = await extractCoverPaletteFromDataUrl(
-                    book.coverDataUrl,
-                    book.spineColor.startsWith('#') ? book.spineColor : '#4c6c8a',
-                    book.ribbonColor || '#f2ba59'
-                  );
-                  patch = {
-                    hasOriginalCover: true,
-                    coverCheckedV2: true,
-                    coverCheckedV3: true,
-                    spineColor: pal.spineColor,
-                    ribbonColor: pal.ribbonColor,
-                  };
-                } else {
-                  patch = {
-                    hasOriginalCover: false,
-                    coverCheckedV2: true,
-                    coverCheckedV3: true,
-                  };
                 }
-              }
 
-              const updatedBook: BookItem = { ...book, ...patch };
-              await dbPutBook(updatedBook);
-              if (!cancelled) {
-                setBooks((prev) => prev.map((x) => (x.id === book.id ? { ...x, ...patch } : x)));
+                const updatedBook: BookItem = { ...book, ...patch };
+                await dbPutBook(updatedBook);
+                patchesById.set(book.id, patch);
+                await new Promise((r) => window.setTimeout(r, 150));
+              } catch {
+                // skip faulty book without blocking other books
               }
-            } catch {
-              // skip faulty book without blocking other books
             }
-          }
-          if (!cancelled && upgradedCovers > 0) {
-            setSyncMessage((prev) => prev || `${upgradedCovers} portadas originales recuperadas`);
-          }
-        })();
+            if (!cancelled && patchesById.size > 0) {
+              setBooks((prev) =>
+                prev.map((x) => {
+                  const p = patchesById.get(x.id);
+                  return p ? { ...x, ...p } : x;
+                })
+              );
+            }
+            if (!cancelled && upgradedCovers > 0) {
+              setSyncMessage((prev) => prev || `${upgradedCovers} portadas originales recuperadas`);
+            }
+          })();
+        }, 4000);
       }
     })();
     return () => {
@@ -1725,57 +1743,46 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, []);
 
-  // Detect server health, LAN/Public URL, and Gemini AI proxy availability.
-  // Retry briefly on hosted Render backends so mobile browsers recover cleanly after a cold start.
+  // Detect server health ONLY when user actually uses cloud sync, Google Drive, or shared rooms/shelves
+  // (keeps local-only PC & mobile startup 100% idle with ZERO background network/AI pings!)
   useEffect(() => {
     if (!ready) return;
-    let cancelled = false;
-    const timers: number[] = [];
+    const cfg = stateRef.current.syncConfig;
+    const hasCloudOrShared = Boolean(
+      stateRef.current.googleDriveAuth?.accessToken ||
+        cfg.accountEmail ||
+        cfg.spaceId ||
+        joinedRoomCodesRef.current.length > 0 ||
+        joinedShelfCodesRef.current.length > 0 ||
+        stateRef.current.sharedRooms.length > 0 ||
+        stateRef.current.sharedShelves.length > 0
+    );
+    if (!hasCloudOrShared) return;
 
-    const probe = async () => {
-      const cfg = stateRef.current.syncConfig;
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      if (cancelled || activeBookIdRef.current) return;
+      const currentCfg = stateRef.current.syncConfig;
       try {
-        const h = await checkServerHealth(cfg);
+        const h = await checkServerHealth(currentCfg);
         if (cancelled) return;
         setServerOnline(true);
         setServerAuthRequired(Boolean(h.authRequired));
         setAiOnline(Boolean(h.aiConfigured));
         setAiModelName(h.aiModel || 'gemini-2.5-flash');
         setServerLanUrl(h.lanUrls?.[0] || '');
-        return true;
       } catch {
-        if (cancelled) return false;
+        if (cancelled) return;
         setServerOnline(false);
         setAiOnline(false);
-        return false;
       }
-    };
-
-    (async () => {
-      const ok = await probe();
-      if (cancelled || ok) return;
-      const targetUrl = stateRef.current.syncConfig.serverUrl || SYNC_SERVER_URL;
-      if (/\.onrender\.com\b/i.test(targetUrl)) {
-        timers.push(
-          window.setTimeout(async () => {
-            if (cancelled) return;
-            const retryOk = await probe();
-            if (cancelled || retryOk) return;
-            timers.push(
-              window.setTimeout(() => {
-                if (!cancelled) void probe();
-              }, 10000)
-            );
-          }, 5000)
-        );
-      }
-    })();
+    }, 2500);
 
     return () => {
       cancelled = true;
-      for (const t of timers) window.clearTimeout(t);
+      window.clearTimeout(timer);
     };
-  }, [ready, syncConfig.serverUrl, syncConfig.token]);
+  }, [ready, googleDriveAuth?.email, syncConfig.serverUrl, syncConfig.accountEmail, syncConfig.spaceId, syncConfig.token]);
 
   const applyRemotePayload = useCallback(
     async (merged: RemoteSyncPayload, forceRestore = false) => {
@@ -1952,19 +1959,25 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           });
         }
 
-        // Background auto-download ONLY the 3 most recently read books so low-end phones never freeze or flicker!
-        if (booksToAutoDownload.length > 0) {
-          const priorityDownloads = [...booksToAutoDownload]
+        // Background auto-download ONLY small (<=25 MB) recent books and NEVER while actively reading!
+        // Large PDFs/Manhwas download cleanly on-demand when clicked so PC/phones never freeze unexpectedly.
+        const MAX_BG_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+        const smallAutoDownloads = booksToAutoDownload.filter(
+          (b) => !b.fileSize || b.fileSize <= MAX_BG_DOWNLOAD_BYTES
+        );
+        if (smallAutoDownloads.length > 0 && !activeBookIdRef.current) {
+          const priorityDownloads = [...smallAutoDownloads]
             .sort(
               (a, b) =>
                 Math.max(b.lastReadAt || 0, b.updatedAt || 0, b.addedAt || 0) -
                 Math.max(a.lastReadAt || 0, a.updatedAt || 0, a.addedAt || 0)
             )
-            .slice(0, 3);
+            .slice(0, 2);
           (async () => {
             const downloadedPatches = new Map<string, string | undefined>();
             let activeDrive = stateRef.current.googleDriveAuth;
             for (const target of priorityDownloads) {
+              if (activeBookIdRef.current) break;
               try {
                 let resolvedDriveId = target.driveFileId;
                 if (activeDrive?.accessToken) {
@@ -3868,10 +3881,17 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (cfg.lastScannedAt && Date.now() - cfg.lastScannedAt < COOLDOWN_MS) return;
 
     const timer = window.setTimeout(() => {
+      if (activeBookIdRef.current) return;
       void scanLinkedLibraryFolder({ silent: true });
     }, 5000);
     return () => window.clearTimeout(timer);
   }, [ready, linkedFolder?.pathOrUri, linkedFolder?.autoScanOnStartup, scanLinkedLibraryFolder]);
+
+  // Lightweight key so reading-progress/scroll updates NEVER re-run Unicode NFD duplicate scans!
+  const booksDuplicateSig = React.useMemo(
+    () => books.map((b) => (b.isDemo ? '' : `${b.id}:${b.fileName || ''}:${b.title || ''}`)).join('\n'),
+    [books]
+  );
 
   const duplicateBooksCount = React.useMemo(() => {
     const norm = (raw: string) =>
@@ -3886,7 +3906,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         .trim();
     const seen = new Set<string>();
     let dups = 0;
-    for (const b of books) {
+    for (const b of stateRef.current.books) {
       if (b.isDemo) continue;
       const key = norm(b.fileName || '') || norm(b.title || '');
       if (!key) continue;
@@ -3894,7 +3914,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       else seen.add(key);
     }
     return dups;
-  }, [books]);
+  }, [booksDuplicateSig]);
 
   const removeDuplicateBooks = useCallback(async (): Promise<number> => {
     const norm = (raw: string) =>
@@ -6077,8 +6097,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (pulled.state && hasNewRemoteData) {
           await applyRemotePayload(pulled.state);
         }
-        setSyncStatus('ok');
-        setSyncMessage(`Google Drive activo (${auth.email})`);
+        const okMsg = `Google Drive activo (${auth.email})`;
+        setSyncStatus((prev) => (prev === 'ok' ? prev : 'ok'));
+        setSyncMessage((prev) => (prev === okMsg ? prev : okMsg));
       } catch (err) {
         if (!active) return;
         const msg = err instanceof Error ? err.message : '';
@@ -6087,8 +6108,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           return;
         }
         if (msg) {
-          setSyncStatus('error');
-          setSyncMessage(msg);
+          setSyncStatus((prev) => (prev === 'error' ? prev : 'error'));
+          setSyncMessage((prev) => (prev === msg ? prev : msg));
         }
       }
     };
@@ -6096,17 +6117,18 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     void syncDriveNow(false);
 
     let lastFocusCheckAt = Date.now();
-    const FOCUS_CHECK_COOLDOWN_MS = 45_000;
+    const FOCUS_CHECK_COOLDOWN_MS = 120_000;
 
+    // Gentle 3-minute idle poll — completely paused while actively reading or hidden!
     const pollTimer = window.setInterval(() => {
-      if (document.visibilityState === 'hidden') return;
+      if (document.visibilityState === 'hidden' || activeBookIdRef.current) return;
       lastFocusCheckAt = Date.now();
       void syncDriveNow(true);
-    }, 60_000);
+    }, 180_000);
 
     const onVisibilityOrPageHide = () => {
       if (document.visibilityState === 'hidden') {
-        // Flush pending changes from Tablet/Phone right away before OS suspends WebView!
+        // Flush pending changes right away before OS suspends WebView/app!
         if (autoSyncTimerRef.current) {
           window.clearTimeout(autoSyncTimerRef.current);
           autoSyncTimerRef.current = null;
@@ -6116,6 +6138,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
         return;
       }
+      if (activeBookIdRef.current) return;
       const now = Date.now();
       if (now - lastFocusCheckAt < FOCUS_CHECK_COOLDOWN_MS) return;
       lastFocusCheckAt = now;
@@ -6123,7 +6146,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
 
     const onOnlineOrFocus = () => {
-      if (document.visibilityState === 'hidden') return;
+      if (document.visibilityState === 'hidden' || activeBookIdRef.current) return;
       const now = Date.now();
       if (now - lastFocusCheckAt < FOCUS_CHECK_COOLDOWN_MS) return;
       lastFocusCheckAt = now;
@@ -7126,6 +7149,13 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!cfg.serverUrl.trim()) return;
 
     const prevRooms = stateRef.current.sharedRooms;
+    const hasAccountOrRooms = Boolean(
+      joinedRoomCodesRef.current.length > 0 ||
+        prevRooms.length > 0 ||
+        cfg.accountEmail ||
+        stateRef.current.googleDriveAuth?.email
+    );
+    if (!hasAccountOrRooms) return;
     const prevByCode = new Map<string, SharedRoom>();
     for (const r of prevRooms) {
       if (r?.code) prevByCode.set(r.code.trim().toUpperCase(), r);
@@ -7330,15 +7360,20 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [refreshServerHealth, refreshSharedRooms, showToast, triggerSync, updateSyncConfig]
   );
 
-  // Live SSE Sync Web <-> APK + Foreground/Online Recovery + Initial silent sync on startup
-  // Automatically paused when Google Drive Personal Cloud is connected so Render Free stays idle!
+  // Live Sync Web <-> APK + Foreground/Online Recovery
+  // Runs ONLY when the user explicitly signed into a Cloud Sync account or a custom LAN server
+  // (NEVER polls or opens SSE on local-only PC/mobile installs or while actively reading!)
   useEffect(() => {
+    const serverBase = syncConfig.serverUrl.trim();
+    const isOfficialCloud = /\.workers\.dev\b/i.test(serverBase);
+    const hasConfiguredSyncAccount = Boolean(syncConfig.accountEmail || syncConfig.spaceId);
     if (
       !ready ||
       !deviceId ||
       googleDriveAuth?.accessToken ||
       syncConfig.liveSync === false ||
-      !syncConfig.serverUrl.trim()
+      !serverBase ||
+      (isOfficialCloud && !hasConfiguredSyncAccount)
     ) {
       setLiveConnected(false);
       return;
@@ -7347,7 +7382,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     let sseIsUp = false;
 
     const pullRemoteNow = async () => {
-      if (!active) return;
+      if (!active || activeBookIdRef.current) return;
       try {
         const remote = await fetchRemoteSyncState(
           stateRef.current.syncConfig,
@@ -7355,9 +7390,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         );
         if (!active) return;
         await applyRemotePayload(remote);
-        setServerOnline(true);
-        setSyncStatus('ok');
-        setSyncMessage('Sincronizado en vivo');
+        setServerOnline((prev) => (prev ? prev : true));
+        setSyncStatus((prev) => (prev === 'ok' ? prev : 'ok'));
+        setSyncMessage((prev) => (prev === 'Sincronizado en vivo' ? prev : 'Sincronizado en vivo'));
       } catch {
         // ignore transient network glitches
       }
@@ -7366,11 +7401,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // Initial silent pull first (seeds syncedBookUpdatedAtRef so delta sync only sends actual changes!)
     pullRemoteNow()
       .then(() => {
-        if (active) return triggerSync(true);
+        if (active && !activeBookIdRef.current) return triggerSync(true);
       })
       .catch(() => undefined);
 
-    // Subscribe to real-time SSE updates from other devices (e.g. Android APK <-> Web)
+    // Subscribe to real-time SSE updates ONLY on persistent self-hosted/LAN servers (never *.workers.dev)
     const unsubscribe = subscribeToSyncStream(
       syncConfig,
       async (ev) => {
@@ -7382,8 +7417,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       (connected) => {
         sseIsUp = connected;
         if (active) {
-          setLiveConnected(connected);
-          if (connected) setServerOnline(true);
+          setLiveConnected((prev) => (prev === connected ? prev : connected));
+          if (connected) setServerOnline((prev) => (prev ? prev : true));
         }
       },
       async (reqEv) => {
@@ -7421,26 +7456,25 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     );
 
-    // Mobile APK / Tab resume & network reconnect recovery (throttled so file pickers don't race uploads)
+    // Mobile APK / Tab resume & network reconnect recovery (throttled & paused while reading)
     const handleResume = () => {
-      if (document.visibilityState === 'hidden') return;
+      if (document.visibilityState === 'hidden' || activeBookIdRef.current) return;
       const now = Date.now();
-      if (now - lastResumeSyncAtRef.current < 8000) return;
+      if (now - lastResumeSyncAtRef.current < 60_000) return;
       lastResumeSyncAtRef.current = now;
-      refreshServerHealth();
       triggerSync(true).catch(() => undefined);
-      refreshSharedRooms();
+      if (joinedRoomCodesRef.current.length > 0) refreshSharedRooms();
     };
 
     window.addEventListener('online', handleResume);
     window.addEventListener('focus', handleResume);
     document.addEventListener('visibilitychange', handleResume);
 
-    // Fallback polling when SSE is temporarily dropped (e.g. mobile sleep / strict proxy)
+    // Gentle fallback polling (every 2 minutes, paused while reading or hidden)
     const fallbackTimer = window.setInterval(() => {
-      if (!active || sseIsUp || document.visibilityState === 'hidden') return;
+      if (!active || sseIsUp || document.visibilityState === 'hidden' || activeBookIdRef.current) return;
       pullRemoteNow();
-    }, 30000);
+    }, 120_000);
 
     return () => {
       active = false;
@@ -7456,10 +7490,11 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     deviceId,
     googleDriveAuth?.accessToken,
     syncConfig.serverUrl,
+    syncConfig.accountEmail,
+    syncConfig.spaceId,
     syncConfig.token,
     syncConfig.liveSync,
     applyRemotePayload,
-    refreshServerHealth,
     refreshSharedRooms,
     triggerSync,
   ]);

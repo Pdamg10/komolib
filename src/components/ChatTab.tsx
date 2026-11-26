@@ -123,11 +123,13 @@ const ChatTabInner: React.FC = () => {
       ? 'Detallado'
       : 'Equilibrado';
 
+  const prevMsgCountRef = useRef(chatMessages.length);
   useEffect(() => {
-    if (!historyOpen) {
+    if (!historyOpen && chatMessages.length !== prevMsgCountRef.current) {
+      prevMsgCountRef.current = chatMessages.length;
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [chatMessages, historyOpen]);
+  }, [chatMessages.length, historyOpen]);
 
   const booksById = useMemo(() => {
     const map = new Map<string, (typeof books)[number]>();

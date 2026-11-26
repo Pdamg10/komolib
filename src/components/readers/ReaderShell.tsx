@@ -548,6 +548,39 @@ export const ReaderShell: React.FC = () => {
     };
   }, [activeBook?.id, activeBookFile]);
 
+  const handleBookmarkClickInReader = useCallback(
+    (bm: BookmarkItem) => {
+      const currBook = activeBookRef.current;
+      if (!currBook) return;
+      // If clicking a bookmark pip on the progress bar from another page, jump straight to it;
+      // if already on that bookmark, open the marks drawer focused on bookmarks.
+      const samePage = bm.page !== undefined && livePosRef.current.page === bm.page;
+      const sameRatio =
+        bm.scrollRatio !== undefined &&
+        livePosRef.current.scrollRatio !== undefined &&
+        Math.abs(bm.scrollRatio - livePosRef.current.scrollRatio) <= 0.03;
+      const sameCfi = Boolean(bm.cfi && livePosRef.current.cfi && bm.cfi === livePosRef.current.cfi);
+      if (samePage || sameRatio || sameCfi) {
+        setMarksTab('marcadores');
+        setExpandedDrawerIds((prev) => ({ ...prev, [bm.id]: true }));
+        setDrawer('marks');
+      } else {
+        clearReaderJumpTarget();
+        setLocalJumpTarget({
+          id: `lj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          bookId: currBook.id,
+          cfi: bm.cfi,
+          chapterHref: bm.chapterHref,
+          page: bm.page,
+          scrollRatio: bm.scrollRatio,
+          bookmarkId: bm.id,
+          bookmarkDesignId: bm.designId,
+        });
+      }
+    },
+    [clearReaderJumpTarget]
+  );
+
   if (!activeBook) return null;
 
   const pal = READER_PALETTES[readerSettings.theme];
@@ -745,37 +778,6 @@ export const ReaderShell: React.FC = () => {
     setAnnFilter('all');
     setDrawer('marks');
   };
-
-  const handleBookmarkClickInReader = useCallback(
-    (bm: BookmarkItem) => {
-      // If clicking a bookmark pip on the progress bar from another page, jump straight to it;
-      // if already on that bookmark, open the marks drawer focused on bookmarks.
-      const samePage = bm.page !== undefined && livePosRef.current.page === bm.page;
-      const sameRatio =
-        bm.scrollRatio !== undefined &&
-        livePosRef.current.scrollRatio !== undefined &&
-        Math.abs(bm.scrollRatio - livePosRef.current.scrollRatio) <= 0.03;
-      const sameCfi = Boolean(bm.cfi && livePosRef.current.cfi && bm.cfi === livePosRef.current.cfi);
-      if (samePage || sameRatio || sameCfi) {
-        setMarksTab('marcadores');
-        setExpandedDrawerIds((prev) => ({ ...prev, [bm.id]: true }));
-        setDrawer('marks');
-      } else {
-        clearReaderJumpTarget();
-        setLocalJumpTarget({
-          id: `lj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          bookId: activeBook.id,
-          cfi: bm.cfi,
-          chapterHref: bm.chapterHref,
-          page: bm.page,
-          scrollRatio: bm.scrollRatio,
-          bookmarkId: bm.id,
-          bookmarkDesignId: bm.designId,
-        });
-      }
-    },
-    [activeBook.id, clearReaderJumpTarget]
-  );
 
   const hasOpenOverlay = drawer !== 'none' || Boolean(pendingSel) || mobileToolsOpen;
 

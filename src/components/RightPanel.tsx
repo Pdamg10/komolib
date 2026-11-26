@@ -5,10 +5,10 @@ import { ChatTab } from './ChatTab';
 import { NotesSyncTab } from './NotesSyncTab';
 
 const RightPanelInner: React.FC = () => {
-  const { theme, updateTheme, rightTab, setRightTab, mobilePanelOpen, setMobilePanelOpen } =
+  const { activeBook, theme, updateTheme, rightTab, setRightTab, mobilePanelOpen, setMobilePanelOpen } =
     useLibrary();
 
-  if (!theme.showRightPanel && !mobilePanelOpen) return null;
+  if (activeBook || (!theme.showRightPanel && !mobilePanelOpen)) return null;
 
   const title = rightTab === 'chat' ? 'Chat IA' : 'Diario y Notas';
 

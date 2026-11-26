@@ -57,6 +57,25 @@ const AppWorkspace: React.FC = () => {
   const [globalDragging, setGlobalDragging] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const mainCanvasRef = useRef<HTMLElement>(null);
+  const savedLibraryScrollTopRef = useRef(0);
+
+  // Preserve library scroll position when unmounting heavy background views during fullscreen reading
+  useEffect(() => {
+    if (activeBook) {
+      if (mainCanvasRef.current) {
+        savedLibraryScrollTopRef.current = mainCanvasRef.current.scrollTop;
+      }
+      return;
+    }
+    const targetScroll = savedLibraryScrollTopRef.current;
+    if (targetScroll > 0) {
+      requestAnimationFrame(() => {
+        if (mainCanvasRef.current) {
+          mainCanvasRef.current.scrollTop = targetScroll;
+        }
+      });
+    }
+  }, [activeBook]);
 
   useEffect(() => {
     const el = mainCanvasRef.current;
@@ -247,13 +266,14 @@ const AppWorkspace: React.FC = () => {
         }
       }}
     >
-      {hasWallpaper && (
+      {hasWallpaper && !activeBook && (
         <div
           className="app-wallpaper-bg"
           style={{ backgroundImage: `url(${theme.customWallpaperUrl})` }}
           aria-hidden="true"
         />
       )}
+      {!activeBook && (
       <div className={shellClasses}>
         <Sidebar />
 
@@ -321,7 +341,7 @@ const AppWorkspace: React.FC = () => {
             </>
           )}
 
-          {showScrollTop && !activeBook && (
+          {showScrollTop && (
             <div
               className={`scroll-top-anchor ${audioBook ? 'with-audio' : ''}`}
               aria-hidden="false"
@@ -374,6 +394,7 @@ const AppWorkspace: React.FC = () => {
           </div>
         )}
       </div>
+      )}
 
       {/* Fullscreen Universal Reader */}
       <ReaderShell />
