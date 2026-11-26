@@ -854,6 +854,8 @@ export const AnnotationsView: React.FC = () => {
                                           chapterHref: bm.chapterHref,
                                           page: bm.page,
                                           scrollRatio: bm.scrollRatio,
+                                          bookmarkId: bm.id,
+                                          bookmarkDesignId: bm.designId,
                                         })
                                       }
                                     >

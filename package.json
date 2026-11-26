@@ -1,6 +1,6 @@
 {
   "name": "komolib",
-  "version": "1.13.0",
+  "version": "1.14.2",
   "description": "KomoLib — Librería universal multi-formato personalizable",
   "author": "KomoLib",
   "desktopName": "komolib.desktop",
@@ -14,8 +14,9 @@
     "preview": "vite preview",
     "desktop": "npm run build && electron .",
     "desktop:run": "electron .",
-    "desktop:build:linux": "npm run build && electron-builder --linux AppImage",
+    "desktop:build:linux": "npm run build && electron-builder --linux AppImage && ln -sf Komolib-1.14.2.AppImage release/Komolib.AppImage",
     "desktop:build:win": "npm run build && electron-builder --win nsis",
+    "desktop:build:all": "npm run build && electron-builder --linux AppImage --win nsis && ln -sf Komolib-1.14.2.AppImage release/Komolib.AppImage",
     "cap:sync": "npm run build && npx cap sync android",
     "cap:open": "npx cap open android",
     "aief:doctor": "aief-init doctor",
@@ -24,13 +25,15 @@
   "build": {
     "appId": "com.komolib.reader",
     "productName": "Komolib",
+    "npmRebuild": false,
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "public/icon.svg"
+      "public/icon.svg",
+      "!node_modules/**/*"
     ],
     "linux": {
       "target": [
@@ -45,7 +48,15 @@
       "target": [
         "nsis"
       ],
-      "icon": "electron/icon.png"
+      "icon": "electron/icon.png",
+      "artifactName": "Komolib-Setup-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Komolib"
     }
   },
   "dependencies": {

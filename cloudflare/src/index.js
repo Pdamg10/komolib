@@ -59,6 +59,514 @@ function getRequestSpaceId(req, url, body) {
   return normalizeSpaceId(fromHeader || fromQuery || fromBody || 'default');
 }
 
+const CATALOG_UA = 'KomoLib/1.14 (+https://github.com/Pdamg10/komolib)';
+
+const GENRE_ES_MAP = {
+  Action: 'Acción',
+  Adventure: 'Aventura',
+  Comedy: 'Comedia',
+  Drama: 'Drama',
+  Ecchi: 'Ecchi',
+  Fantasy: 'Fantasía',
+  Horror: 'Terror',
+  Historical: 'Histórico',
+  Isekai: 'Isekai',
+  Magic: 'Magia',
+  'Mahou Shoujo': 'Chicas Mágicas',
+  'Martial Arts': 'Artes Marciales',
+  Mecha: 'Mecha',
+  Monsters: 'Monstruos',
+  Music: 'Música',
+  Mystery: 'Misterio',
+  Psychological: 'Psicológico',
+  Reincarnation: 'Reencarnación',
+  Romance: 'Romance',
+  'School Life': 'Vida Escolar',
+  'Sci-Fi': 'Ciencia Ficción',
+  'Slice of Life': 'Recuentos de la vida',
+  Sports: 'Deportes',
+  Supernatural: 'Sobrenatural',
+  Survival: 'Supervivencia',
+  Thriller: 'Suspenso',
+  'Time Travel': 'Viajes en el Tiempo',
+  Tragedy: 'Tragedia',
+  'Video Games': 'Videojuegos',
+  Villainess: 'Villana',
+};
+
+const IGNORED_FORMAT_TAGS = new Set([
+  'long strip',
+  'full color',
+  'web comic',
+  'adaptation',
+  'official colored',
+  'fan colored',
+  'oneshot',
+  'award winning',
+  'anthology',
+]);
+
+function stripHtmlTags(raw) {
+  return String(raw || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
+    .replace(/\n\s*---[\s\S]*$/m, '')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/\*\*/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function buildCleanCatalogQuery(raw) {
+  return String(raw || '')
+    .replace(/\.[^.]+$/, '')
+    .replace(/_+/g, ' ')
+    .replace(/\[[^\]]*\]|\([^)]*\)|【[^】]*】/g, ' ')
+    .replace(/\b(cap(?:s|[ií]tulos?)?|ch(?:ap)?|tomo|vol(?:umen)?|parte|pack|pdf|cbz|cbr|epub|mobi|azw3|español|espanol|completo|final|manhwa|manga|manhua|webtoon|scans?|scanlation|fansub|traducci[oó]n(?:es)?|translations?|olympus|ikigai|meian|mango|ajce|amistosas|plot\s*twist|dragon)\b/gi, ' ')
+    .replace(/\b\d+\s*[-–—~]\s*\d+\b/g, ' ')
+    .replace(/(?:^|\s)#?\d{1,4}\s*$/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, 110);
+}
+
+function normalizeMatchKey(s) {
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+async function lookupWikipediaEsSummary(query, hint = '') {
+  try {
+    const sr = encodeURIComponent(hint ? `${query} ${hint}` : query);
+    const searchRes = await fetch(
+      `https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch=${sr}&format=json&srlimit=3`,
+      { headers: { Accept: 'application/json', 'User-Agent': CATALOG_UA } }
+    );
+    if (!searchRes.ok) return null;
+    const sData = await searchRes.json().catch(() => ({}));
+    const hits = Array.isArray(sData?.query?.search) ? sData.query.search : [];
+    const qKey = normalizeMatchKey(query);
+    const best = hits.find((h) => normalizeMatchKey(h.title).includes(qKey) || qKey.includes(normalizeMatchKey(h.title))) || hits[0];
+    if (!best?.title) return null;
+    const sumRes = await fetch(
+      `https://es.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(best.title)}`,
+      { headers: { Accept: 'application/json', 'User-Agent': CATALOG_UA } }
+    );
+    if (!sumRes.ok) return null;
+    const sumData = await sumRes.json().catch(() => ({}));
+    const extract = stripHtmlTags(sumData?.extract || '');
+    if (extract.length < 40) return null;
+    return {
+      title: typeof sumData?.title === 'string' ? sumData.title.replace(/\s*\([^)]*\)\s*$/, '').trim() : '',
+      description: extract.slice(0, 950),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function matchExistingSpanishSeries(candidateTitles, existingSeriesNames = []) {
+  if (!Array.isArray(existingSeriesNames) || existingSeriesNames.length === 0) return '';
+  const candKeys = Array.from(
+    new Set((candidateTitles || []).map(normalizeMatchKey).filter((k) => k.length >= 3))
+  );
+  if (candKeys.length === 0) return '';
+
+  const normalizedExisting = existingSeriesNames
+    .map((name) => ({ raw: String(name || '').trim(), key: normalizeMatchKey(name) }))
+    .filter((x) => x.raw.length >= 2 && x.key.length >= 3);
+
+  // 1. Exact normalized match against any title / altTitle (bridges Spanish <-> English <-> Romaji!)
+  for (const ex of normalizedExisting) {
+    if (candKeys.includes(ex.key)) return ex.raw;
+  }
+  // 2. Strong prefix match (shorter >= 6 chars, <= 3 extra words)
+  for (const ex of normalizedExisting) {
+    for (const ck of candKeys) {
+      const shorter = ex.key.length <= ck.length ? ex.key : ck;
+      const longer = ex.key.length <= ck.length ? ck : ex.key;
+      if (shorter.length >= 6 && longer.startsWith(`${shorter} `)) {
+        const tail = longer.slice(shorter.length).trim().split(/\s+/).filter(Boolean);
+        if (tail.length <= 3) return ex.raw;
+      }
+    }
+  }
+  return '';
+}
+
+function originTagToKind(originTag) {
+  if (originTag === 'comic') return 'comic';
+  if (originTag === 'manga') return 'manga';
+  return 'manhwa';
+}
+
+async function lookupVisualSeriesFallback(queryRaw, existingSeriesNames = [], strictConfidence = false) {
+  const query = buildCleanCatalogQuery(queryRaw);
+  if (!query || query.length < 2) return null;
+  const qKey = normalizeMatchKey(query);
+  const catalogHeaders = { Accept: 'application/json', 'User-Agent': CATALOG_UA };
+
+  // 1. MangaDex public API (free, no key, native Spanish titles & altTitles, massive Manhwa/Manga/Manhua catalog)
+  try {
+    const mdUrl =
+      `https://api.mangadex.org/manga?title=${encodeURIComponent(query)}` +
+      `&limit=5&includes[]=author&includes[]=artist` +
+      `&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`;
+    const mdRes = await fetch(mdUrl, { headers: catalogHeaders });
+    if (mdRes.ok) {
+      const mdData = await mdRes.json().catch(() => ({}));
+      const items = Array.isArray(mdData?.data) ? mdData.data : [];
+      if (items.length > 0) {
+        const scoreItem = (item) => {
+          const attrs = item?.attributes || {};
+          const titles = [
+            ...Object.values(attrs.title || {}),
+            ...(Array.isArray(attrs.altTitles) ? attrs.altTitles.flatMap((t) => Object.values(t || {})) : []),
+          ]
+            .map(normalizeMatchKey)
+            .filter((t) => t.length >= 3);
+          let titleScore = 0;
+          if (titles.some((t) => t === qKey)) titleScore = 100;
+          else if (titles.some((t) => t.startsWith(qKey) || qKey.startsWith(t))) titleScore = 60;
+          else if (titles.some((t) => t.includes(qKey))) titleScore = 30;
+          let bonus = 0;
+          if (attrs.description?.es || attrs.description?.['es-la']) bonus += 25;
+          else if (attrs.description?.en) bonus += 10;
+          if (attrs.originalLanguage === 'ko' || attrs.originalLanguage === 'ja' || attrs.originalLanguage === 'zh') bonus += 5;
+          return { titleScore, total: titleScore + bonus };
+        };
+        const ranked = items.map((item) => ({ item, ...scoreItem(item) })).sort((a, b) => b.total - a.total);
+        const top = ranked[0];
+        if (!strictConfidence || top.titleScore >= 60) {
+          const best = top.item;
+          const attrs = best?.attributes || {};
+          const allRawTitles = [
+            ...Object.values(attrs.title || {}),
+            ...(Array.isArray(attrs.altTitles) ? attrs.altTitles.flatMap((t) => Object.values(t || {})) : []),
+            query,
+          ].filter((x) => typeof x === 'string' && x.trim().length > 0);
+          const altEs = Array.isArray(attrs.altTitles)
+            ? attrs.altTitles.map((t) => t?.es || t?.['es-la']).find(Boolean)
+            : '';
+          const matchedExisting = matchExistingSpanishSeries(allRawTitles, existingSeriesNames);
+          const mainTitle =
+            matchedExisting ||
+            attrs.title?.es ||
+            attrs.title?.['es-la'] ||
+            altEs ||
+            query ||
+            attrs.title?.en ||
+            Object.values(attrs.title || {})[0];
+          const lang = String(attrs.originalLanguage || '').toLowerCase();
+          const originTag =
+            lang === 'ko'
+              ? 'manhwa'
+              : lang === 'ja'
+              ? 'manga'
+              : lang.startsWith('zh')
+              ? 'manhua'
+              : 'comic';
+          const statusMap = {
+            ongoing: 'ongoing',
+            completed: 'completed',
+            hiatus: 'hiatus',
+            cancelled: 'cancelled',
+          };
+          const genres = Array.isArray(attrs.tags)
+            ? attrs.tags
+                .filter((t) => t?.attributes?.group === 'genre' || t?.attributes?.group === 'theme')
+                .map((t) => {
+                  const enName = String(t?.attributes?.name?.en || '').trim();
+                  if (!enName || IGNORED_FORMAT_TAGS.has(enName.toLowerCase())) return '';
+                  return t?.attributes?.name?.es || GENRE_ES_MAP[enName] || enName;
+                })
+                .filter(Boolean)
+                .slice(0, 8)
+            : [];
+          const rels = Array.isArray(best?.relationships) ? best.relationships : [];
+          const authorRel = rels.find((r) => r?.type === 'author' && r?.attributes?.name) ||
+            rels.find((r) => r?.type === 'artist' && r?.attributes?.name);
+          const author = authorRel?.attributes?.name || '';
+          const rawDesc =
+            attrs.description?.es ||
+            attrs.description?.['es-la'] ||
+            attrs.description?.en ||
+            '';
+          let description = stripHtmlTags(rawDesc).slice(0, 950);
+          if (!attrs.description?.es && !attrs.description?.['es-la']) {
+            const wiki = await lookupWikipediaEsSummary(mainTitle, originTag);
+            if (wiki?.description) description = wiki.description;
+          }
+          const parsedLast = Number(attrs.lastChapter);
+          const totalChaptersExpected =
+            Number.isFinite(parsedLast) && parsedLast > 0 ? Math.floor(parsedLast) : undefined;
+          return {
+            model: 'mangadex-catalog',
+            detectedKind: originTagToKind(originTag),
+            seriesName: mainTitle,
+            title: mainTitle,
+            author,
+            originTag,
+            genres,
+            seriesStatus: statusMap[String(attrs.status || '').toLowerCase()] || undefined,
+            totalChaptersExpected,
+            description,
+          };
+        }
+      }
+    }
+  } catch {
+    // fall through to AniList
+  }
+
+  // 2. AniList GraphQL (free, no key, covers Manhwa/Manga/Manhua)
+  try {
+    const gql = `query ($search: String) {
+      Media(search: $search, type: MANGA) {
+        title { romaji english native }
+        synonyms
+        countryOfOrigin
+        status
+        chapters
+        genres
+        description(asHtml: false)
+        staff(perPage: 2) { nodes { name { full } } }
+      }
+    }`;
+    const res = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...catalogHeaders },
+      body: JSON.stringify({ query: gql, variables: { search: query } }),
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const m = data?.data?.Media;
+      if (m) {
+        const allTitles = [m.title?.english, m.title?.romaji, m.title?.native, ...(Array.isArray(m.synonyms) ? m.synonyms : []), query].filter(Boolean);
+        const normTitles = allTitles.map(normalizeMatchKey).filter((t) => t.length >= 3);
+        const strongMatch = normTitles.some((t) => t === qKey || (qKey.length >= 5 && (t.startsWith(qKey) || qKey.startsWith(t))));
+        if (!strictConfidence || strongMatch) {
+          const originTag =
+            m.countryOfOrigin === 'KR'
+              ? 'manhwa'
+              : m.countryOfOrigin === 'CN'
+              ? 'manhua'
+              : m.countryOfOrigin === 'JP'
+              ? 'manga'
+              : 'manhwa';
+          const statusMap = {
+            FINISHED: 'completed',
+            RELEASING: 'ongoing',
+            HIATUS: 'hiatus',
+            CANCELLED: 'cancelled',
+          };
+          const genres = Array.isArray(m.genres)
+            ? m.genres.map((g) => GENRE_ES_MAP[g] || g).filter(Boolean).slice(0, 8)
+            : [];
+          const author = m.staff?.nodes?.[0]?.name?.full || '';
+          const matchedExisting = matchExistingSpanishSeries(allTitles, existingSeriesNames);
+          const resolvedName = matchedExisting || query;
+          const wiki = await lookupWikipediaEsSummary(m.title?.english || m.title?.romaji || query, originTag);
+          return {
+            model: 'anilist-catalog',
+            detectedKind: originTagToKind(originTag),
+            seriesName: resolvedName,
+            title: resolvedName,
+            author,
+            originTag,
+            genres,
+            seriesStatus: statusMap[m.status] || undefined,
+            totalChaptersExpected: typeof m.chapters === 'number' && m.chapters > 0 ? m.chapters : undefined,
+            description: wiki?.description || stripHtmlTags(m.description).slice(0, 950),
+          };
+        }
+      }
+    }
+  } catch {
+    // fall through to Jikan
+  }
+
+  // 3. Jikan / MyAnimeList public API (free, no key)
+  if (!strictConfidence) {
+    try {
+      const jRes = await fetch(
+        `https://api.jikan.moe/v4/manga?q=${encodeURIComponent(query)}&limit=1`,
+        { headers: catalogHeaders }
+      );
+      if (jRes.ok) {
+        const jData = await jRes.json().catch(() => ({}));
+        const m = jData?.data?.[0];
+        if (m) {
+          const typeLow = String(m.type || '').toLowerCase();
+          const originTag = typeLow.includes('manhwa')
+            ? 'manhwa'
+            : typeLow.includes('manhua')
+            ? 'manhua'
+            : 'manga';
+          const stLow = String(m.status || '').toLowerCase();
+          const seriesStatus = stLow.includes('finish')
+            ? 'completed'
+            : stLow.includes('hiatus')
+            ? 'hiatus'
+            : stLow.includes('discontinu')
+            ? 'cancelled'
+            : stLow.includes('publish')
+            ? 'ongoing'
+            : undefined;
+          const genres = Array.isArray(m.genres)
+            ? m.genres.map((g) => GENRE_ES_MAP[g.name] || g.name).filter(Boolean).slice(0, 8)
+            : [];
+          const author = m.authors?.[0]?.name || '';
+          const jTitles = [
+            m.title,
+            m.title_english,
+            ...(Array.isArray(m.titles) ? m.titles.map((t) => t?.title) : []),
+            query,
+          ].filter(Boolean);
+          const matchedExisting = matchExistingSpanishSeries(jTitles, existingSeriesNames);
+          return {
+            model: 'jikan-catalog',
+            detectedKind: originTagToKind(originTag),
+            seriesName: matchedExisting || query,
+            title: matchedExisting || m.title || query,
+            author,
+            originTag,
+            genres,
+            seriesStatus,
+            totalChaptersExpected: typeof m.chapters === 'number' && m.chapters > 0 ? m.chapters : undefined,
+            description: stripHtmlTags(m.synopsis).slice(0, 950),
+          };
+        }
+      }
+    } catch {
+      // fall through to Wikipedia ES
+    }
+  }
+
+  if (!strictConfidence) {
+    const wikiOnly = await lookupWikipediaEsSummary(query, 'manhwa manga');
+    if (wikiOnly?.description) {
+      return {
+        model: 'wikipedia-es-catalog',
+        seriesName: matchExistingSpanishSeries([wikiOnly.title, query], existingSeriesNames) || wikiOnly.title || query,
+        title: wikiOnly.title || query,
+        author: '',
+        description: wikiOnly.description,
+      };
+    }
+  }
+  return null;
+}
+
+async function lookupBookCatalogFallback(queryRaw, currentAuthor = '') {
+  const query = buildCleanCatalogQuery(queryRaw);
+  if (!query || query.length < 2) return null;
+  const catalogHeaders = { Accept: 'application/json', 'User-Agent': CATALOG_UA };
+  const qWithAuthor =
+    currentAuthor && !/desconocido|biblioteca personal/i.test(currentAuthor)
+      ? `${query} ${currentAuthor}`
+      : query;
+
+  // 1. Google Books public API (Spanish first, then unrestricted; pick best result that actually has a synopsis)
+  for (const langParam of ['&langRestrict=es', '']) {
+    try {
+      const res = await fetch(
+        `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(qWithAuthor)}&maxResults=5${langParam}`,
+        { headers: catalogHeaders }
+      );
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const items = Array.isArray(data?.items) ? data.items : [];
+        const best =
+          items.find((it) => it?.volumeInfo?.description && String(it.volumeInfo.description).trim().length >= 40) ||
+          items[0];
+        const info = best?.volumeInfo;
+        if (info && (info.title || info.description || info.authors?.length)) {
+          let desc = stripHtmlTags(info.description).slice(0, 950);
+          if (!desc) {
+            const wiki = await lookupWikipediaEsSummary(info.title || query, 'novela libro');
+            if (wiki?.description) desc = wiki.description;
+          }
+          return {
+            model: 'google-books-catalog',
+            title: typeof info.title === 'string' ? info.title.trim() : '',
+            author: Array.isArray(info.authors) ? info.authors.join(', ').trim() : '',
+            description: desc,
+          };
+        }
+      }
+    } catch {
+      // try next
+    }
+  }
+
+  // 2. Open Library Search + Work Details API
+  try {
+    const olRes = await fetch(
+      `https://openlibrary.org/search.json?q=${encodeURIComponent(qWithAuthor)}&limit=3`,
+      { headers: catalogHeaders }
+    );
+    if (olRes.ok) {
+      const olData = await olRes.json().catch(() => ({}));
+      const doc = olData?.docs?.[0];
+      if (doc) {
+        let description = '';
+        if (typeof doc.key === 'string' && doc.key.startsWith('/works/')) {
+          try {
+            const wRes = await fetch(`https://openlibrary.org${doc.key}.json`, { headers: catalogHeaders });
+            if (wRes.ok) {
+              const wData = await wRes.json().catch(() => ({}));
+              const rawWDesc = typeof wData?.description === 'string' ? wData.description : wData?.description?.value || '';
+              description = stripHtmlTags(rawWDesc).slice(0, 950);
+            }
+          } catch {
+            // ignore work details error
+          }
+        }
+        if (!description) {
+          description = Array.isArray(doc.first_sentence)
+            ? String(doc.first_sentence[0] || '').trim()
+            : typeof doc.first_sentence === 'string'
+            ? doc.first_sentence.trim()
+            : '';
+        }
+        if (!description) {
+          const wiki = await lookupWikipediaEsSummary(doc.title || query, 'libro');
+          if (wiki?.description) description = wiki.description;
+        }
+        return {
+          model: 'openlibrary-catalog',
+          title: typeof doc.title === 'string' ? doc.title.trim() : '',
+          author: Array.isArray(doc.author_name) ? doc.author_name[0] || '' : '',
+          description,
+        };
+      }
+    }
+  } catch {
+    // fall through to Wikipedia ES
+  }
+
+  // 3. Wikipedia ES fallback
+  const wikiBook = await lookupWikipediaEsSummary(query, 'novela libro');
+  if (wikiBook?.description) {
+    return {
+      model: 'wikipedia-es-catalog',
+      title: wikiBook.title || query,
+      author: '',
+      description: wikiBook.description,
+    };
+  }
+  return null;
+}
+
 function sanitizeAvatarUrl(raw) {
   if (typeof raw !== 'string') return '';
   const trimmed = raw.trim();
@@ -1626,25 +2134,36 @@ export default {
         }
         contents.push({ role: 'user', parts: [{ text: message }] });
 
-        const gRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              systemInstruction: { parts: [{ text: systemPrompt }] },
-              contents,
-              generationConfig: {
-                temperature: 0.65,
-                maxOutputTokens: 1100,
-                thinkingConfig: {
-                  thinkingBudget: 0,
+        const chatModelChain = Array.from(new Set([model, 'gemini-2.5-flash-lite']));
+        let gRes = null;
+        let gData = {};
+        let usedChatModel = model;
+        for (const candidateModel of chatModelChain) {
+          gRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(candidateModel)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+                contents,
+                generationConfig: {
+                  temperature: 0.65,
+                  maxOutputTokens: 1100,
+                  ...(candidateModel.startsWith('gemini-2.5') ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
                 },
-              },
-            }),
+              }),
+            }
+          );
+          gData = await gRes.json().catch(() => ({}));
+          if (gRes.ok) {
+            usedChatModel = candidateModel;
+            break;
           }
-        );
-        const gData = await gRes.json().catch(() => ({}));
+          if (gRes.status !== 429 && gRes.status !== 503 && gRes.status !== 404) {
+            break;
+          }
+        }
         const rawReply = gData?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim() || '';
         const reply = rawReply
           .replace(/^\s{0,3}#{1,6}\s+/gm, '')
@@ -1654,52 +2173,191 @@ export default {
           .replace(/\*/g, '')
           .replace(/\n{3,}/g, '\n\n')
           .trim();
-        if (!gRes.ok || !reply) {
-          return json(req, { error: gData?.error?.message || 'La IA no pudo responder en este momento' }, 502);
+        if (!gRes?.ok || !reply) {
+          return json(req, { error: gData?.error?.message || 'La IA no pudo responder en este momento' }, gRes?.status === 429 ? 429 : 502);
         }
         const lowerCombined = `${message} ${reply}`.toLowerCase();
         const matchedBookIds = booksList
           .filter((b) => b?.id && b?.title && lowerCombined.includes(String(b.title).toLowerCase()))
           .slice(0, 4)
           .map((b) => b.id);
-        return json(req, { ok: true, reply, model, matchedBookIds });
+        return json(req, { ok: true, reply, model: usedChatModel, matchedBookIds });
       }
 
       if (method === 'POST' && pathname === '/api/ai/identify-book') {
         if (!checkBearerAuth(req, url, env)) return json(req, { error: 'Token inválido o faltante' }, 401);
         const apiKey = (env.GEMINI_API_KEY || '').trim();
-        const model = (env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
-        if (!apiKey) return json(req, { error: 'GEMINI_API_KEY no configurada en Cloudflare' }, 503);
+        const primaryModel = (env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+        const modelChain = Array.from(new Set([primaryModel, 'gemini-2.5-flash-lite']));
 
         const body = await req.json().catch(() => ({}));
-        const prompt =
-          'Identifica este libro y responde SOLO un JSON válido con {"title":"...","author":"...","description":"sinopsis breve en español"}.\n' +
-          `Archivo: ${body.fileName || ''}\nTítulo actual: ${body.currentTitle || ''}\nAutor actual: ${body.currentAuthor || ''}\n` +
-          (body.textExcerpt ? `Extracto:\n${String(body.textExcerpt).slice(0, 2000)}` : '');
+        const fileFormat = String(body.format || '').toLowerCase();
+        const currentKind = String(body.currentKind || '').toLowerCase();
+        const isVisual = Boolean(body.isVisualSeries);
+        const canBeVisual = isVisual || ['pdf', 'cbz', 'cbr', 'images'].includes(fileFormat);
+        const existingSeriesNames = Array.isArray(body.existingSeriesNames)
+          ? body.existingSeriesNames.map((s) => String(s || '').trim()).filter((s) => s.length >= 2).slice(0, 80)
+          : [];
 
-        const gRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }],
-              generationConfig: { responseMimeType: 'application/json' },
-            }),
+        const promptLines = [
+          'Eres un clasificador y catalogador experto de bibliotecas digitales para KomoLib (libros, audiolibros, mangas japoneses, manhwas coreanos, manhuas chinos y cómics).',
+          'Analiza la imagen de portada (si se adjunta), el nombre de archivo, carpeta, extracto y la lista de series existentes.',
+          'Devuelve ÚNICAMENTE un JSON válido con estas claves:',
+          '{"detectedKind":"book|audiobook|manga|manhwa|comic","originTag":"manhwa|manga|manhua|comic|null","seriesName":"nombre canónico en español si es manga/manhwa/manhua/cómic (o vacío si es libro)","title":"título limpio","author":"autor/estudio o vacío","genres":["Acción","Fantasía"],"seriesStatus":"ongoing|completed|hiatus|cancelled|null","totalChaptersExpected":null,"description":"sinopsis limpia en español (2 a 4 frases, sin asteriscos ni spoilers)"}',
+          'REGLAS CLAVE:',
+          '- Si formato es audio -> detectedKind="audiobook".',
+          '- Si formato es epub/mobi/azw3/fb2/docx/txt/html -> normalmente detectedKind="book".',
+          '- Si formato es pdf/cbz/cbr/images -> distingue con precisión si es libro de texto/novela ("book"), manhwa coreano ("manhwa" + originTag="manhwa"), manhua chino ("manhwa" + originTag="manhua"), manga japonés ("manga" + originTag="manga") o cómic occidental ("comic" + originTag="comic").',
+          '- UNIFICACIÓN DE NOMBRES (MUY IMPORTANTE): Si la obra corresponde a UNA de las series ya existentes en "Series en la biblioteca" (aunque el archivo tenga título en inglés, sinónimo, abreviatura o distinto fansub), devuelve EXACTAMENTE ese mismo nombre en "seriesName". Conserva siempre el nombre en español más conocido.',
+          `Formato: ${fileFormat || 'desconocido'} | Tipo actual: ${currentKind || 'desconocido'}`,
+          `Archivo: ${String(body.fileName || '').slice(0, 220)}`,
+          `Carpeta: ${String(body.folderPath || '').slice(0, 160)}`,
+          `Título/Serie actual: ${String(body.seriesName || body.currentTitle || '').slice(0, 200)}`,
+          `Autor actual: ${String(body.currentAuthor || '').slice(0, 160)}`,
+        ];
+
+        if (existingSeriesNames.length > 0 && canBeVisual) {
+          promptLines.push(`Series en la biblioteca (reutiliza el nombre exacto si es la misma obra): ${existingSeriesNames.join(' | ').slice(0, 1600)}`);
+        }
+
+        if (body.textExcerpt && typeof body.textExcerpt === 'string' && body.textExcerpt.trim()) {
+          promptLines.push(`Extracto:\n${body.textExcerpt.trim().slice(0, 2200)}`);
+        }
+
+        const parts = [{ text: promptLines.join('\n') }];
+        if (typeof body.coverDataUrl === 'string') {
+          const imgMatch = body.coverDataUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i);
+          if (imgMatch && imgMatch[2].length < 3 * 1024 * 1024) {
+            const mimeType = imgMatch[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : imgMatch[1].toLowerCase();
+            parts.push({ inlineData: { mimeType, data: imgMatch[2].replace(/\s+/g, '') } });
           }
-        );
-        const gData = await gRes.json().catch(() => ({}));
-        const rawText = gData?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim() || '';
-        const cleaned = rawText.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+        }
+
         let parsed = null;
-        try { parsed = JSON.parse(cleaned); } catch { /* ignore */ }
-        if (!parsed) return json(req, { error: 'Respuesta inválida del modelo de IA' }, 502);
+        let usedModel = primaryModel;
+        let lastErrStatus = 502;
+        let lastErrDetail = '';
+
+        if (apiKey) {
+          for (const candidateModel of modelChain) {
+            const gRes = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(candidateModel)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contents: [{ role: 'user', parts }],
+                  generationConfig: {
+                    temperature: 0.2,
+                    maxOutputTokens: 700,
+                    responseMimeType: 'application/json',
+                    ...(candidateModel.startsWith('gemini-2.5') ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+                  },
+                }),
+              }
+            );
+            if (!gRes.ok) {
+              lastErrStatus = gRes.status;
+              lastErrDetail = (await gRes.text().catch(() => '')).slice(0, 220);
+              if (gRes.status === 429 || gRes.status === 503 || gRes.status === 404) {
+                continue;
+              }
+              break;
+            }
+            const gData = await gRes.json().catch(() => ({}));
+            const rawText = gData?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim() || '';
+            const cleaned = rawText.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+            try {
+              parsed = JSON.parse(cleaned);
+            } catch {
+              const m = cleaned.match(/\{[\s\S]*\}/);
+              if (m) {
+                try { parsed = JSON.parse(m[0]); } catch { /* ignore */ }
+              }
+            }
+            if (parsed && typeof parsed === 'object') {
+              usedModel = candidateModel;
+              break;
+            }
+          }
+        }
+
+        // Zero-quota public catalog fallback (MangaDex/AniList/Jikan for Manga/Manhwa/Manhua + altTitle matching,
+        // Google Books/OpenLibrary/Wikipedia ES for Books!)
+        if (!parsed || typeof parsed !== 'object') {
+          if (fileFormat === 'audio' || currentKind === 'audiobook') {
+            return json(req, {
+              ok: true,
+              model: 'format-classifier',
+              detectedKind: 'audiobook',
+              title: '',
+              seriesName: '',
+              author: '',
+              description: '',
+            });
+          }
+          const querySeed = body.fileName || body.seriesName || body.currentTitle || '';
+          let catalogRes = null;
+          if (canBeVisual) {
+            // Strict confidence when testing a PDF currently marked as 'book' so real novels/textbooks are never misclassified!
+            catalogRes = await lookupVisualSeriesFallback(querySeed, existingSeriesNames, !isVisual && fileFormat === 'pdf');
+          }
+          if (!catalogRes && !isVisual) {
+            const bookRes = await lookupBookCatalogFallback(querySeed, body.currentAuthor || '');
+            if (bookRes) catalogRes = { ...bookRes, detectedKind: 'book' };
+          }
+          if (catalogRes) {
+            return json(req, { ok: true, ...catalogRes });
+          }
+          return json(req, {
+            ok: true,
+            model: 'catalog-checked',
+            title: '',
+            seriesName: '',
+            author: '',
+            description: '',
+            note: lastErrStatus === 429 ? 'Cuota diaria de Gemini alcanzada; catálogo público sin coincidencias' : lastErrDetail,
+          });
+        }
+
+        const rawDetected = String(parsed.detectedKind || '').toLowerCase().trim();
+        const validDetectedKind = ['book', 'audiobook', 'manga', 'manhwa', 'comic'].includes(rawDetected)
+          ? rawDetected
+          : rawDetected === 'manhua'
+          ? 'manhwa'
+          : undefined;
+        const validOrigin = ['manga', 'manhwa', 'manhua', 'comic'].includes(String(parsed.originTag || '').toLowerCase())
+          ? String(parsed.originTag).toLowerCase()
+          : rawDetected === 'manhua'
+          ? 'manhua'
+          : undefined;
+        const validStatus = ['ongoing', 'completed', 'hiatus', 'cancelled'].includes(String(parsed.seriesStatus || '').toLowerCase())
+          ? String(parsed.seriesStatus).toLowerCase()
+          : undefined;
+        const validGenres = Array.isArray(parsed.genres)
+          ? parsed.genres.map((g) => String(g || '').replace(/^#/, '').trim()).filter((g) => g.length >= 2 && g.length <= 36).slice(0, 8)
+          : undefined;
+        const validTotalCaps =
+          typeof parsed.totalChaptersExpected === 'number' && Number.isFinite(parsed.totalChaptersExpected) && parsed.totalChaptersExpected > 0
+            ? Math.floor(parsed.totalChaptersExpected)
+            : undefined;
+        const rawSeriesOut = typeof parsed.seriesName === 'string' ? parsed.seriesName.trim() : '';
+        const matchedExistingOut =
+          canBeVisual && existingSeriesNames.length > 0
+            ? matchExistingSpanishSeries([rawSeriesOut, parsed.title, body.seriesName, body.fileName], existingSeriesNames)
+            : '';
         return json(req, {
           ok: true,
-          model,
+          model: usedModel,
+          detectedKind: validDetectedKind,
           title: typeof parsed.title === 'string' ? parsed.title.trim() : '',
+          seriesName: matchedExistingOut || rawSeriesOut,
           author: typeof parsed.author === 'string' ? parsed.author.trim() : '',
-          description: typeof parsed.description === 'string' ? parsed.description.trim() : '',
+          description: typeof parsed.description === 'string' ? parsed.description.replace(/\*/g, '').trim() : '',
+          originTag: validOrigin,
+          genres: validGenres,
+          seriesStatus: validStatus,
+          totalChaptersExpected: validTotalCaps,
         });
       }
 

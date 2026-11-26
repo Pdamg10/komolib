@@ -9,7 +9,9 @@ import {
   ClipboardPaste,
   Cloud,
   Edit3,
+  Layers,
   Play,
+  RotateCcw,
   Sparkles,
   Star,
   Trash2,
@@ -47,6 +49,7 @@ export const MangaSeriesModal: React.FC = () => {
     setActiveSeriesKey,
     openBook,
     setEditingBook,
+    updateBook,
     updateSeriesBooks,
     deleteBook,
     identifyBookWithAI,
@@ -55,6 +58,9 @@ export const MangaSeriesModal: React.FC = () => {
 
   const [descOrder, setDescOrder] = useState(false);
   const [editingMeta, setEditingMeta] = useState(false);
+  const [mergingSeries, setMergingSeries] = useState(false);
+  const [mergeQuery, setMergeQuery] = useState('');
+  const [selectedMergeIds, setSelectedMergeIds] = useState<string[]>([]);
   const [telegramPaste, setTelegramPaste] = useState('');
   const [identifyingAi, setIdentifyingAi] = useState(false);
   const [cleaningDups, setCleaningDups] = useState(false);
@@ -68,15 +74,40 @@ export const MangaSeriesModal: React.FC = () => {
   const [totalCapsDraft, setTotalCapsDraft] = useState('');
   const [synopsisDraft, setSynopsisDraft] = useState('');
 
-  const series: MangaSeriesGroup | null = useMemo(() => {
-    if (!activeSeriesKey) return null;
+  const { series, mergeCandidates } = useMemo(() => {
+    if (!activeSeriesKey) return { series: null as MangaSeriesGroup | null, mergeCandidates: [] as Array<{ id: string; label: string; sub: string; bookIds: string[]; fansubs: string[] }> };
     const grouped = groupLibraryForDisplay(books);
+    let current: MangaSeriesGroup | null = null;
+    const candidates: Array<{ id: string; label: string; sub: string; bookIds: string[]; fansubs: string[] }> = [];
     for (const item of grouped) {
-      if (item.type === 'series' && item.series.seriesKey === activeSeriesKey) {
-        return item.series;
+      if (item.type === 'series') {
+        if (item.series.seriesKey === activeSeriesKey) {
+          current = item.series;
+        } else {
+          candidates.push({
+            id: `series:${item.series.seriesKey}`,
+            label: item.series.seriesName,
+            sub: `${item.series.chapters.length} ${item.series.chapters.length === 1 ? 'paquete' : 'paquetes'} · ${item.series.rangeLabel}`,
+            bookIds: item.series.allBooks.map((b) => b.id),
+            fansubs: item.series.fansubs,
+          });
+        }
+      } else if (
+        item.book.format === 'pdf' ||
+        item.book.format === 'cbz' ||
+        item.book.format === 'cbr' ||
+        item.book.format === 'images'
+      ) {
+        candidates.push({
+          id: `book:${item.book.id}`,
+          label: item.book.title || item.book.fileName,
+          sub: `${item.book.format.toUpperCase()} · ${item.book.fileName}`,
+          bookIds: [item.book.id],
+          fansubs: item.book.fansubs || [],
+        });
       }
     }
-    return null;
+    return { series: current, mergeCandidates: candidates };
   }, [books, activeSeriesKey]);
 
   useEffect(() => {
@@ -112,6 +143,52 @@ export const MangaSeriesModal: React.FC = () => {
   const continueEntry =
     series.chapters.find((c) => c.book.id === series.continueBook.id) || series.chapters[0];
   const hasStarted = series.overallProgress > 0;
+  const isAllRead = series.chapters.every(
+    (c) => c.book.readingStatus === 'completed' || (c.book.progress || 0) >= 98
+  );
+
+  const handleToggleWholeSeriesRead = async () => {
+    const now = Date.now();
+    const allIds = series.allBooks.map((b) => b.id);
+    if (isAllRead) {
+      await updateSeriesBooks(allIds, {
+        progress: 0,
+        currentPage: 1,
+        currentCfi: undefined,
+        scrollRatio: 0,
+        readingStatus: 'want_to_read',
+        finishedAt: undefined,
+      });
+      showToast(`Serie reiniciada (${allIds.length} paquetes en 0%)`);
+    } else {
+      await updateSeriesBooks(allIds, {
+        progress: 100,
+        readingStatus: 'completed',
+        finishedAt: now,
+        lastReadAt: now,
+      });
+      showToast(`Todos los capítulos marcados como leídos (${allIds.length} paquetes)`);
+    }
+  };
+
+  const handleToggleSinglePackRead = async (b: BookItem, currentlyDone: boolean) => {
+    const now = Date.now();
+    if (currentlyDone) {
+      await updateBook(b.id, {
+        progress: 0,
+        currentPage: 1,
+        readingStatus: 'want_to_read',
+        finishedAt: undefined,
+      });
+    } else {
+      await updateBook(b.id, {
+        progress: 100,
+        readingStatus: 'completed',
+        finishedAt: now,
+        lastReadAt: now,
+      });
+    }
+  };
 
   const handleOpenChapter = (book: BookItem) => {
     setActiveSeriesKey(null);
@@ -194,6 +271,7 @@ export const MangaSeriesModal: React.FC = () => {
 
     const patch: Partial<BookItem> = {
       seriesName: cleanName,
+      seriesNameLocked: true,
       kind: nextKind,
       originTag: originDraft,
       seriesStatus: statusDraft || undefined,
@@ -220,22 +298,17 @@ export const MangaSeriesModal: React.FC = () => {
     if (identifyingAi) return;
     setIdentifyingAi(true);
     try {
-      const res = await identifyBookWithAI(primary.id);
+      const res = await identifyBookWithAI(primary.id, {
+        seriesBookIds: series.allBooks.map((b) => b.id),
+        isVisualSeries: true,
+        seriesName: series.seriesName,
+      });
       if (res) {
-        const patch: Partial<BookItem> = {};
-        if (res.description && !series.synopsis) {
-          patch.description = res.description;
-          setSynopsisDraft(res.description);
-        }
-        if (res.author && primary.author === 'Biblioteca Personal') {
-          patch.author = res.author;
-        }
-        if (Object.keys(patch).length > 0) {
-          await updateSeriesBooks(
-            series.allBooks.map((b) => b.id),
-            patch
-          );
-        }
+        if (res.description) setSynopsisDraft(res.description);
+        if (res.genres?.length) setGenresDraft(res.genres.join(', '));
+        if (res.seriesStatus) setStatusDraft(res.seriesStatus);
+        if (res.originTag) setOriginDraft(res.originTag);
+        if (res.totalChaptersExpected) setTotalCapsDraft(String(res.totalChaptersExpected));
       }
     } finally {
       setIdentifyingAi(false);
@@ -256,6 +329,41 @@ export const MangaSeriesModal: React.FC = () => {
       setCleaningDups(false);
     }
   };
+
+  const handleMergeSelected = async () => {
+    if (selectedMergeIds.length === 0) return;
+    const chosen = mergeCandidates.filter((c) => selectedMergeIds.includes(c.id));
+    const bookIdsToAbsorb = Array.from(new Set(chosen.flatMap((c) => c.bookIds)));
+    if (bookIdsToAbsorb.length === 0) return;
+    const combinedFansubs = Array.from(
+      new Set([...series.fansubs, ...chosen.flatMap((c) => c.fansubs)])
+    );
+    await updateSeriesBooks(bookIdsToAbsorb, {
+      seriesName: series.seriesName,
+      seriesNameLocked: true,
+      kind: series.kind,
+      originTag: series.originTag,
+      genres: series.genres,
+      fansubs: combinedFansubs,
+      seriesStatus: series.seriesStatus,
+      totalChaptersExpected: series.totalChaptersExpected,
+      description: series.synopsis || undefined,
+      favorite: series.favorite || undefined,
+      wishlist: series.wishlist || undefined,
+    });
+    setSelectedMergeIds([]);
+    setMergeQuery('');
+    setMergingSeries(false);
+    showToast(
+      `Se unieron ${bookIdsToAbsorb.length} archivo${bookIdsToAbsorb.length === 1 ? '' : 's'} en "${series.seriesName}"`
+    );
+  };
+
+  const filteredMergeCandidates = mergeQuery.trim()
+    ? mergeCandidates.filter((c) =>
+        `${c.label} ${c.sub}`.toLowerCase().includes(mergeQuery.trim().toLowerCase())
+      )
+    : mergeCandidates;
 
   const formatListLabel = series.formats.map((f) => f.toUpperCase()).join(', ');
   const genresFormatted =
@@ -416,14 +524,47 @@ export const MangaSeriesModal: React.FC = () => {
 
           <button
             type="button"
+            className={`pill-btn ${isAllRead ? 'active' : ''}`}
+            style={{ height: 34, fontSize: 11.5 }}
+            onClick={() => void handleToggleWholeSeriesRead()}
+            title={
+              isAllRead
+                ? 'Marcar toda la serie como sin leer'
+                : 'Marcar todos los capítulos/paquetes de esta serie como leídos'
+            }
+          >
+            {isAllRead ? <RotateCcw size={13} /> : <CheckCircle2 size={13} />}
+            {isAllRead ? 'Reiniciar serie (0%)' : 'Marcar todo leído'}
+          </button>
+
+          <button
+            type="button"
             className={`pill-btn ${editingMeta ? 'active' : ''}`}
             style={{ height: 34, fontSize: 11.5 }}
-            onClick={() => setEditingMeta((v) => !v)}
+            onClick={() => {
+              setEditingMeta((v) => !v);
+              setMergingSeries(false);
+            }}
           >
             <Edit3 size={13} /> {editingMeta ? 'Cerrar editor' : 'Editar ficha / Pegar de Telegram'}
           </button>
 
-          {!series.synopsis && (
+          {mergeCandidates.length > 0 && (
+            <button
+              type="button"
+              className={`pill-btn ${mergingSeries ? 'active' : ''}`}
+              style={{ height: 34, fontSize: 11.5 }}
+              onClick={() => {
+                setMergingSeries((v) => !v);
+                setEditingMeta(false);
+              }}
+              title="Unir otros paquetes o series sueltas dentro de este mismo título"
+            >
+              <Layers size={13} /> {mergingSeries ? 'Cerrar unión' : 'Unir capítulos / series'}
+            </button>
+          )}
+
+          {(!series.synopsis || series.genres.length === 0 || !series.seriesStatus) && (
             <button
               type="button"
               className="pill-btn"
@@ -432,7 +573,7 @@ export const MangaSeriesModal: React.FC = () => {
               onClick={() => void handleAiFillSeries()}
             >
               <Sparkles size={13} className={identifyingAi ? 'spin' : ''} />
-              {identifyingAi ? 'Analizando...' : 'Completar sinopsis con IA'}
+              {identifyingAi ? 'Analizando...' : 'Completar ficha con IA'}
             </button>
           )}
 
@@ -451,6 +592,92 @@ export const MangaSeriesModal: React.FC = () => {
             </button>
           )}
         </div>
+
+        {/* Collapsible 1-Click Manual Series / Chapter Pack Merger */}
+        {mergingSeries && (
+          <div className="series-editor-box" style={{ gap: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 12, fontWeight: 800 }}>
+                Selecciona los paquetes o series sueltas que pertenecen a “{series.seriesName}”
+              </span>
+              <span style={{ fontSize: 11, color: 'var(--ink-soft)' }}>
+                {selectedMergeIds.length} seleccionado{selectedMergeIds.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <input
+              className="studio-input"
+              placeholder="Buscar por nombre o archivo..."
+              value={mergeQuery}
+              onChange={(e) => setMergeQuery(e.target.value)}
+            />
+            <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {filteredMergeCandidates.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--ink-soft)', padding: '8px 2px' }}>
+                  No hay coincidencias con ese filtro.
+                </div>
+              ) : (
+                filteredMergeCandidates.slice(0, 60).map((cand) => {
+                  const checked = selectedMergeIds.includes(cand.id);
+                  return (
+                    <label
+                      key={cand.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '8px 10px',
+                        borderRadius: 10,
+                        cursor: 'pointer',
+                        border: checked ? '1.5px solid var(--coral)' : '1px solid var(--border-subtle)',
+                        background: checked ? 'var(--accent-tint, rgba(232,122,93,0.1))' : 'var(--bg-card)',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() =>
+                          setSelectedMergeIds((prev) =>
+                            prev.includes(cand.id) ? prev.filter((x) => x !== cand.id) : [...prev, cand.id]
+                          )
+                        }
+                      />
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 12.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {cand.label}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--ink-soft)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {cand.sub}
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                type="button"
+                className="pill-btn"
+                style={{ height: 32, fontSize: 11.5 }}
+                onClick={() => {
+                  setMergingSeries(false);
+                  setSelectedMergeIds([]);
+                }}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="coral-cta-btn"
+                style={{ height: 32, fontSize: 11.5, padding: '0 14px' }}
+                disabled={selectedMergeIds.length === 0}
+                onClick={() => void handleMergeSelected()}
+              >
+                <Layers size={13} /> Unir seleccionados ({selectedMergeIds.length})
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Collapsible Series Metadata Editor + Telegram 1-Click Parser */}
         {editingMeta && (
@@ -549,7 +776,8 @@ export const MangaSeriesModal: React.FC = () => {
               <label className="series-field-label">Sinopsis</label>
               <textarea
                 className="studio-input"
-                rows={3}
+                rows={6}
+                style={{ minHeight: 128, lineHeight: 1.55, resize: 'vertical' }}
                 value={synopsisDraft}
                 onChange={(e) => setSynopsisDraft(e.target.value)}
               />
@@ -656,6 +884,19 @@ export const MangaSeriesModal: React.FC = () => {
                       className="series-chapter-btns"
                       onClick={(e) => e.stopPropagation()}
                     >
+                      <button
+                        type="button"
+                        className="circle-arrow-btn"
+                        style={{
+                          width: 28,
+                          height: 28,
+                          color: isDone ? '#2d936c' : undefined,
+                        }}
+                        title={isDone ? 'Marcar paquete como sin leer' : 'Marcar paquete como leído'}
+                        onClick={() => void handleToggleSinglePackRead(b, isDone)}
+                      >
+                        <CheckCircle2 size={12} />
+                      </button>
                       <button
                         type="button"
                         className="circle-arrow-btn"

@@ -3743,6 +3743,33 @@ body,
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.14);
 }
 
+.reader-hanging-bookmark.is-at-bookmark {
+  opacity: 1;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.38), 0 0 0 2px var(--accent-primary);
+}
+
+.reader-hanging-bookmark.is-at-bookmark.reading-tucked {
+  transform: translateY(-64%);
+  opacity: 0.88;
+}
+
+.reader-hanging-bookmark-tag {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 4px;
+  padding: 2px 4px;
+  border-radius: 999px;
+  background: rgba(18, 16, 15, 0.78);
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1.15;
+  text-align: center;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
 .reader-hanging-bookmark:hover,
 .reader-hanging-bookmark:focus-visible {
   transform: translateY(-4px);
@@ -3757,6 +3784,169 @@ body,
   display: block;
 }
 
+/* On-page clipped visual bookmark ribbon (PDF / Comic / Manga pages) */
+.reader-page-bookmark-ribbon {
+  position: absolute;
+  top: 0;
+  right: 14px;
+  z-index: 8;
+  width: 34px;
+  height: 92px;
+  padding: 0;
+  border: none;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+  background: var(--accent-primary);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.32), 0 0 0 1.5px rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.reader-page-bookmark-ribbon:hover {
+  transform: translateY(3px);
+  box-shadow: 0 9px 20px rgba(0, 0, 0, 0.4), 0 0 0 2px var(--accent-primary);
+}
+
+.reader-page-bookmark-ribbon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.reader-page-bookmark-fallback {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(180deg, var(--accent-primary), var(--accent-secondary));
+}
+
+.reader-page-bookmark-count {
+  position: absolute;
+  bottom: 3px;
+  right: 3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: rgba(16, 16, 18, 0.85);
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* Inline document margin bookmark ribbon (Text / Markdown / HTML / FB2 / MOBI / DOCX) */
+.reader-text-bookmark-marker {
+  position: absolute;
+  right: -12px;
+  transform: translateY(-50%);
+  z-index: 7;
+  width: 28px;
+  height: 68px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--accent-primary);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.28), 0 0 0 1.5px rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  transition: transform 0.16s ease;
+}
+
+.reader-text-bookmark-marker:hover {
+  transform: translateY(-50%) scale(1.08);
+}
+
+.reader-text-bookmark-marker img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Bottom scrubber slider wrapper with visual bookmark indicators */
+.reader-slider-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 60px;
+  max-width: 440px;
+  display: flex;
+  align-items: center;
+}
+
+.reader-bottombar.is-compact .reader-slider-wrap {
+  max-width: none;
+}
+
+.reader-slider-wrap .reader-bottom-slider {
+  width: 100%;
+  max-width: none;
+}
+
+.reader-slider-dots {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 50%;
+  height: 0;
+  pointer-events: none;
+}
+
+.reader-slider-bm-dot {
+  position: absolute;
+  top: -11px;
+  width: 7px;
+  height: 10px;
+  transform: translateX(-50%);
+  border-radius: 2px 2px 3px 3px;
+  background: var(--accent-primary);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.32);
+  opacity: 0.9;
+}
+
+.reader-slider-bm-dot.is-current {
+  background: var(--accent-secondary, #f5b855);
+  transform: translateX(-50%) scale(1.22);
+  opacity: 1;
+}
+
+/* Slim progress track with clickable bookmark pips (EPUB & Text readers) */
+.reader-progress-track-bar {
+  position: relative;
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.2);
+}
+
+.reader-progress-track-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent-primary);
+  transition: width 0.15s ease;
+}
+
+.reader-progress-bm-pip {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 13px;
+  padding: 0;
+  border: 1.5px solid #ffffff;
+  border-radius: 2px 2px 4px 4px;
+  background: var(--accent-primary);
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.28);
+  transition: transform 0.14s ease;
+}
+
+.reader-progress-bm-pip:hover {
+  transform: translate(-50%, -50%) scale(1.25);
+}
+
 @media (max-width: 640px) {
   .reader-hanging-bookmark {
     width: 36px;
@@ -3767,6 +3957,23 @@ body,
   .reader-hanging-bookmark.reading-tucked {
     transform: translateY(-84%);
     opacity: 0.22;
+  }
+
+  .reader-hanging-bookmark.is-at-bookmark.reading-tucked {
+    transform: translateY(-62%);
+    opacity: 0.88;
+  }
+
+  .reader-page-bookmark-ribbon {
+    width: 26px;
+    height: 70px;
+    right: 8px;
+  }
+
+  .reader-text-bookmark-marker {
+    right: -6px;
+    width: 22px;
+    height: 54px;
   }
 }
 
@@ -6095,12 +6302,13 @@ select.studio-input {
 
 .series-ficha-synopsis p {
   margin: 0;
-  font-size: 12.2px;
-  line-height: 1.5;
+  font-size: 12.6px;
+  line-height: 1.6;
   color: var(--text-primary);
   white-space: pre-line;
-  max-height: 132px;
+  max-height: 280px;
   overflow-y: auto;
+  padding-right: 4px;
 }
 
 .series-ficha-synopsis p.muted {

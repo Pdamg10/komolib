@@ -43,6 +43,7 @@ import { subscribeToRoomStream } from '../../services/sharedReadingService';
 import type {
   AnnotationTool,
   BookAnnotation,
+  BookmarkItem,
   ComicReadMode,
   ReaderJumpTarget,
   ReaderSettings,
@@ -74,6 +75,7 @@ export const ReaderShell: React.FC = () => {
   const {
     books,
     activeBook,
+    activeBookFile,
     openBook,
     setActiveSeriesKey,
     readerJumpTarget,
@@ -157,6 +159,7 @@ export const ReaderShell: React.FC = () => {
 
   const [livePos, setLivePos] = useState<{
     page?: number;
+    pageCount?: number;
     cfi?: string;
     scrollRatio?: number;
     chapter?: string;
@@ -165,6 +168,68 @@ export const ReaderShell: React.FC = () => {
   }>({ pct: 0 });
   const livePosRef = useRef(livePos);
   livePosRef.current = livePos;
+  const activeBookRef = useRef(activeBook);
+  activeBookRef.current = activeBook;
+  const activeReaderFlushRef = useRef<(() => void) | null>(null);
+  const registerReaderFlush = useCallback((fn: (() => void) | null) => {
+    activeReaderFlushRef.current = fn;
+  }, []);
+  const [activeJumpedBookmarkDesignId, setActiveJumpedBookmarkDesignId] = useState<string | null>(
+    null
+  );
+  const jumpDesignTimerRef = useRef<number | null>(null);
+
+  const flushCurrentReadingPosition = useCallback(() => {
+    try {
+      activeReaderFlushRef.current?.();
+    } catch {
+      // ignore reader flush errors
+    }
+    const currBook = activeBookRef.current;
+    const lp = livePosRef.current;
+    if (!currBook) return;
+    const patch: Partial<typeof currBook> = {};
+    if (lp.page !== undefined) patch.currentPage = lp.page;
+    if (lp.pageCount !== undefined) patch.pageCount = lp.pageCount;
+    if (lp.cfi) patch.currentCfi = lp.cfi;
+    if (lp.scrollRatio !== undefined) patch.scrollRatio = lp.scrollRatio;
+    if (lp.chapter) patch.currentChapter = lp.chapter;
+    if (lp.pct > 0 || lp.page !== undefined || lp.cfi || lp.scrollRatio !== undefined) {
+      patch.progress = lp.pct;
+      void updateBook(currBook.id, patch);
+    }
+  }, [updateBook]);
+
+  const handleCloseReader = useCallback(() => {
+    flushCurrentReadingPosition();
+    closeReader();
+  }, [flushCurrentReadingPosition, closeReader]);
+
+  // Register global flush hook + flush automatically on tab hide / app suspend / window close
+  useEffect(() => {
+    const win = window as unknown as { __komoFlushReaderProgress?: () => void };
+    if (!activeBook) {
+      delete win.__komoFlushReaderProgress;
+      return;
+    }
+    win.__komoFlushReaderProgress = flushCurrentReadingPosition;
+    const onPageHide = () => flushCurrentReadingPosition();
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        flushCurrentReadingPosition();
+      }
+    };
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('beforeunload', onPageHide);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      flushCurrentReadingPosition();
+      delete win.__komoFlushReaderProgress;
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('beforeunload', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [activeBook?.id, flushCurrentReadingPosition]);
 
   const activeRoom = activeBook
     ? sharedRooms.find((r) => r.bookId === activeBook.id)
@@ -174,6 +239,28 @@ export const ReaderShell: React.FC = () => {
     () => getSeriesNavigationForBook(books, activeBook),
     [books, activeBook]
   );
+
+  const handleOpenNextSeriesPack = useCallback(() => {
+    if (!activeBook || !seriesNav?.nextEntry) return;
+    const nextEntry = seriesNav.nextEntry;
+    const now = Date.now();
+    // Mark current pack as 100% completed before advancing directly to the next batch (e.g. 1-10 -> 11-20)
+    void updateBook(activeBook.id, {
+      progress: 100,
+      readingStatus: 'completed',
+      finishedAt: now,
+      lastReadAt: now,
+    });
+    const nextBook =
+      (nextEntry.book.progress || 0) >= 98
+        ? { ...nextEntry.book, currentPage: 1 }
+        : nextEntry.book;
+    if ((nextEntry.book.progress || 0) >= 98) {
+      void updateBook(nextEntry.book.id, { currentPage: 1 });
+    }
+    showToast(`Pasando a ${nextEntry.label}`);
+    void openBook(nextBook);
+  }, [activeBook, seriesNav, updateBook, showToast, openBook]);
 
   const bookAnnotations = useMemo(
     () => (activeBook ? annotations.filter((a) => a.bookId === activeBook.id) : []),
@@ -197,20 +284,87 @@ export const ReaderShell: React.FC = () => {
     return allBookmarkDesigns[0] || null;
   }, [effectiveBookmarkDesignId, allBookmarkDesigns]);
 
+  // Detect whether the user is currently positioned at one of their saved bookmarks in this book
+  const matchedBookmarkAtCurrentPos = useMemo(() => {
+    if (!activeBook || bookBookmarks.length === 0) return null;
+    const fmt = activeBook.format;
+    const isPagedMedia = fmt === 'pdf' || fmt === 'cbz' || fmt === 'cbr' || fmt === 'images';
+    if (isPagedMedia && livePos.page) {
+      return bookBookmarks.find((bm) => bm.page === livePos.page) || null;
+    }
+    if (fmt === 'epub') {
+      return (
+        bookBookmarks.find((bm) => {
+          if (bm.cfi && livePos.cfi && bm.cfi === livePos.cfi) return true;
+          if (
+            bm.chapterHref &&
+            livePos.chapterHref &&
+            bm.chapterHref.split('#')[0] === livePos.chapterHref.split('#')[0] &&
+            bm.progress !== undefined &&
+            Math.abs(bm.progress - livePos.pct) <= 3
+          ) {
+            return true;
+          }
+          if (bm.progress !== undefined && Math.abs(bm.progress - livePos.pct) <= 1) return true;
+          return false;
+        }) || null
+      );
+    }
+    return (
+      bookBookmarks.find((bm) => {
+        if (
+          bm.scrollRatio !== undefined &&
+          livePos.scrollRatio !== undefined &&
+          Math.abs(bm.scrollRatio - livePos.scrollRatio) <= 0.025
+        ) {
+          return true;
+        }
+        if (bm.progress !== undefined && Math.abs(bm.progress - livePos.pct) <= 1) return true;
+        return false;
+      }) || null
+    );
+  }, [activeBook, bookBookmarks, livePos.page, livePos.cfi, livePos.chapterHref, livePos.scrollRatio, livePos.pct]);
+
+  // Always display the EXACT bookmark design chosen for the current saved bookmark (or jumped bookmark),
+  // falling back to the book's active separador design! While browsing the gallery, preview activeBookmarkDesign live.
+  const displayedHangingDesign = useMemo(() => {
+    if (drawer === 'marks' && marksTab === 'separadores') {
+      return activeBookmarkDesign;
+    }
+    const preferredId =
+      matchedBookmarkAtCurrentPos?.designId || activeJumpedBookmarkDesignId || undefined;
+    if (preferredId) {
+      const exact = allBookmarkDesigns.find((d) => d.id === preferredId);
+      if (exact) return exact;
+    }
+    if (matchedBookmarkAtCurrentPos) {
+      return activeBookmarkDesign || allBookmarkDesigns[0] || null;
+    }
+    return activeBookmarkDesign;
+  }, [drawer, marksTab, matchedBookmarkAtCurrentPos, activeJumpedBookmarkDesignId, allBookmarkDesigns, activeBookmarkDesign]);
+
+  const shouldRenderHangingBookmark = Boolean(
+    displayedHangingDesign && (showHangingBookmark || matchedBookmarkAtCurrentPos || activeJumpedBookmarkDesignId)
+  );
+
   useEffect(() => {
     if (!activeBook) return;
     setShowHangingBookmark(effectiveBookmarkDesignId !== 'none');
   }, [activeBook?.id, effectiveBookmarkDesignId]);
 
-  // Auto-tuck the hanging bookmark smoothly after entering the book (or closing the separadores drawer)
-  // so it never blocks text while reading, while keeping a tiny non-invasive ribbon peek at the top edge.
+  // Keep the chosen separador clearly revealed when entering the book, when at a bookmarked spot,
+  // or when jumping to a bookmark; gently tuck on non-bookmarked pages so it never blocks text.
   useEffect(() => {
     if (bookmarkHideTimerRef.current !== null) {
       window.clearTimeout(bookmarkHideTimerRef.current);
       bookmarkHideTimerRef.current = null;
     }
-    if (!activeBook || !activeBookmarkDesign) return;
+    if (!activeBook || !displayedHangingDesign) return;
     if (drawer === 'marks' && marksTab === 'separadores') {
+      setBookmarkTucked(false);
+      return;
+    }
+    if (matchedBookmarkAtCurrentPos || activeJumpedBookmarkDesignId) {
       setBookmarkTucked(false);
       return;
     }
@@ -218,14 +372,21 @@ export const ReaderShell: React.FC = () => {
     bookmarkHideTimerRef.current = window.setTimeout(() => {
       setBookmarkTucked(true);
       bookmarkHideTimerRef.current = null;
-    }, 2200);
+    }, 2800);
     return () => {
       if (bookmarkHideTimerRef.current !== null) {
         window.clearTimeout(bookmarkHideTimerRef.current);
         bookmarkHideTimerRef.current = null;
       }
     };
-  }, [activeBook?.id, activeBookmarkDesign?.id, drawer, marksTab]);
+  }, [
+    activeBook?.id,
+    displayedHangingDesign?.id,
+    matchedBookmarkAtCurrentPos?.id,
+    activeJumpedBookmarkDesignId,
+    drawer,
+    marksTab,
+  ]);
 
   const tuckBookmarkNow = useCallback(() => {
     if (drawer === 'marks' && marksTab === 'separadores') return;
@@ -237,6 +398,25 @@ export const ReaderShell: React.FC = () => {
   }, [drawer, marksTab]);
 
   const effectiveJumpTarget = localJumpTarget || (readerJumpTarget?.bookId === activeBook?.id ? readerJumpTarget : null);
+
+  // When jumping to a bookmark from AnnotationsView or Drawer, immediately reveal that exact bookmark's separador design!
+  useEffect(() => {
+    if (!effectiveJumpTarget) return;
+    const designFromJump =
+      effectiveJumpTarget.bookmarkDesignId ||
+      (effectiveJumpTarget.bookmarkId
+        ? bookBookmarks.find((b) => b.id === effectiveJumpTarget.bookmarkId)?.designId
+        : undefined);
+    if (designFromJump || effectiveJumpTarget.bookmarkId) {
+      setActiveJumpedBookmarkDesignId(designFromJump || activeBookmarkDesign?.id || allBookmarkDesigns[0]?.id || null);
+      setShowHangingBookmark(true);
+      setBookmarkTucked(false);
+      if (jumpDesignTimerRef.current) window.clearTimeout(jumpDesignTimerRef.current);
+      jumpDesignTimerRef.current = window.setTimeout(() => {
+        setActiveJumpedBookmarkDesignId(null);
+      }, 4500);
+    }
+  }, [effectiveJumpTarget?.id]);
 
   // Automatically detect & adapt reader chrome whenever viewport/orientation changes (phone / tablet / desktop)
   useEffect(() => {
@@ -344,6 +524,12 @@ export const ReaderShell: React.FC = () => {
       pct: activeBook.progress || 0,
     });
     let active = true;
+    // Fast path: reuse the Blob already loaded by openBook() with ZERO duplicate IndexedDB/SAF read!
+    if (activeBookFile && activeBookFile.bookId === activeBook.id) {
+      setFileData({ blob: activeBookFile.blob, extraImages: activeBookFile.extraImages });
+      return;
+    }
+    setFileData(null);
     (async () => {
       const rec = await dbGetBookFile(activeBook.id);
       if (rec) {
@@ -360,7 +546,7 @@ export const ReaderShell: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [activeBook?.id]);
+  }, [activeBook?.id, activeBookFile]);
 
   if (!activeBook) return null;
 
@@ -474,29 +660,59 @@ export const ReaderShell: React.FC = () => {
   };
 
   const handlePlaceVisualBookmark = async (designId?: string) => {
-    const chosenId = designId || activeBookmarkDesign?.id;
-    const chPart = livePos.chapter ? `${livePos.chapter} · ` : '';
-    const locPart = livePos.page
-      ? `Página ${livePos.page} (${livePos.pct}%)`
-      : `Posición ${livePos.pct}%`;
+    // Capture the absolute freshest scroll/page/CFI right before placing the separador!
+    try {
+      activeReaderFlushRef.current?.();
+    } catch {
+      // ignore
+    }
+    const lp = livePosRef.current;
+    const fallbackDefaultId =
+      readerSettings.defaultBookmarkDesignId && readerSettings.defaultBookmarkDesignId !== 'none'
+        ? readerSettings.defaultBookmarkDesignId
+        : allBookmarkDesigns[0]?.id;
+    const chosenId =
+      (designId && designId !== 'none' ? designId : undefined) ||
+      activeBookmarkDesign?.id ||
+      fallbackDefaultId;
+    const chosenDesign = allBookmarkDesigns.find((d) => d.id === chosenId);
+
+    if (chosenId && activeBook.activeBookmarkDesignId !== chosenId) {
+      await updateBook(activeBook.id, { activeBookmarkDesignId: chosenId });
+    }
+    if (chosenId) {
+      setShowHangingBookmark(true);
+      setBookmarkTucked(false);
+    }
+
+    const chPart = lp.chapter ? `${lp.chapter} · ` : '';
+    const locPart = lp.page
+      ? `Página ${lp.page} (${lp.pct}%)`
+      : `Posición ${lp.pct}%`;
     await addBookmark({
       bookId: activeBook.id,
       label: `${chPart}${locPart}`,
-      chapter: livePos.chapter,
-      chapterHref: livePos.chapterHref,
-      page: livePos.page,
-      progress: livePos.pct,
-      cfi: livePos.cfi,
-      scrollRatio: livePos.scrollRatio,
+      chapter: lp.chapter,
+      chapterHref: lp.chapterHref,
+      page: lp.page,
+      progress: lp.pct,
+      cfi: lp.cfi,
+      scrollRatio: lp.scrollRatio,
       designId: chosenId,
     });
+    if (chosenDesign) {
+      showToast(`Separador "${chosenDesign.name}" colocado en ${locPart}`);
+    }
   };
 
   const handleSelectBookmarkDesign = async (designId: string) => {
     await updateBook(activeBook.id, { activeBookmarkDesignId: designId });
     updateReaderSettings({ defaultBookmarkDesignId: designId });
     setShowHangingBookmark(designId !== 'none');
-    showToast(designId === 'none' ? 'Separador oculto' : 'Separador guardado');
+    if (designId !== 'none') {
+      setBookmarkTucked(false);
+    }
+    showToast(designId === 'none' ? 'Separador oculto' : 'Separador elegido');
   };
 
   const handleUploadCustomBookmark = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -529,6 +745,39 @@ export const ReaderShell: React.FC = () => {
     setAnnFilter('all');
     setDrawer('marks');
   };
+
+  const handleBookmarkClickInReader = useCallback(
+    (bm: BookmarkItem) => {
+      // If clicking a bookmark pip on the progress bar from another page, jump straight to it;
+      // if already on that bookmark, open the marks drawer focused on bookmarks.
+      const samePage = bm.page !== undefined && livePosRef.current.page === bm.page;
+      const sameRatio =
+        bm.scrollRatio !== undefined &&
+        livePosRef.current.scrollRatio !== undefined &&
+        Math.abs(bm.scrollRatio - livePosRef.current.scrollRatio) <= 0.03;
+      const sameCfi = Boolean(bm.cfi && livePosRef.current.cfi && bm.cfi === livePosRef.current.cfi);
+      if (samePage || sameRatio || sameCfi) {
+        setMarksTab('marcadores');
+        setExpandedDrawerIds((prev) => ({ ...prev, [bm.id]: true }));
+        setDrawer('marks');
+      } else {
+        clearReaderJumpTarget();
+        setLocalJumpTarget({
+          id: `lj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          bookId: activeBook.id,
+          cfi: bm.cfi,
+          chapterHref: bm.chapterHref,
+          page: bm.page,
+          scrollRatio: bm.scrollRatio,
+          bookmarkId: bm.id,
+          bookmarkDesignId: bm.designId,
+        });
+      }
+    },
+    [activeBook.id, clearReaderJumpTarget]
+  );
+
+  const hasOpenOverlay = drawer !== 'none' || Boolean(pendingSel) || mobileToolsOpen;
 
   const filteredAnnotations =
     annFilter === 'all'
@@ -603,7 +852,7 @@ export const ReaderShell: React.FC = () => {
           <button
             className="circle-arrow-btn reader-icon-btn"
             style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg }}
-            onClick={closeReader}
+            onClick={handleCloseReader}
             title="Volver a la biblioteca"
           >
             <ArrowLeft size={isPhone ? 16 : 17} />
@@ -638,7 +887,10 @@ export const ReaderShell: React.FC = () => {
                   opacity: seriesNav.prevEntry ? 1 : 0.4,
                 }}
                 onClick={() => {
-                  if (seriesNav.prevEntry) void openBook(seriesNav.prevEntry.book);
+                  if (seriesNav.prevEntry) {
+                    flushCurrentReadingPosition();
+                    void openBook(seriesNav.prevEntry.book);
+                  }
                 }}
                 title={
                   seriesNav.prevEntry
@@ -681,7 +933,10 @@ export const ReaderShell: React.FC = () => {
                   opacity: seriesNav.nextEntry ? 1 : 0.4,
                 }}
                 onClick={() => {
-                  if (seriesNav.nextEntry) void openBook(seriesNav.nextEntry.book);
+                  if (seriesNav.nextEntry) {
+                    flushCurrentReadingPosition();
+                    void openBook(seriesNav.nextEntry.book);
+                  }
                 }}
                 title={
                   seriesNav.nextEntry
@@ -964,7 +1219,10 @@ export const ReaderShell: React.FC = () => {
                   style={{ background: 'rgba(128,128,128,0.14)', color: pal.fg, borderColor: 'transparent' }}
                   onClick={() => {
                     setMobileToolsOpen(false);
-                    if (seriesNav.prevEntry) void openBook(seriesNav.prevEntry.book);
+                    if (seriesNav.prevEntry) {
+                      flushCurrentReadingPosition();
+                      void openBook(seriesNav.prevEntry.book);
+                    }
                   }}
                 >
                   <ChevronLeft size={13} /> {seriesNav.prevEntry.label}
@@ -981,7 +1239,10 @@ export const ReaderShell: React.FC = () => {
                   }}
                   onClick={() => {
                     setMobileToolsOpen(false);
-                    if (seriesNav.nextEntry) void openBook(seriesNav.nextEntry.book);
+                    if (seriesNav.nextEntry) {
+                      flushCurrentReadingPosition();
+                      void openBook(seriesNav.nextEntry.book);
+                    }
                   }}
                 >
                   {seriesNav.nextEntry.label} <ChevronRight size={13} />
@@ -1039,19 +1300,28 @@ export const ReaderShell: React.FC = () => {
         onWheel={tuckBookmarkNow}
       >
         {/* Visual Hanging Physical Bookmark (Separador de Libro) */}
-        {showHangingBookmark && activeBookmarkDesign && (
+        {shouldRenderHangingBookmark && displayedHangingDesign && (
           <button
             type="button"
-            className={`reader-hanging-bookmark ${bookmarkTucked ? 'reading-tucked' : ''}`}
+            className={`reader-hanging-bookmark ${bookmarkTucked ? 'reading-tucked' : ''} ${
+              matchedBookmarkAtCurrentPos || activeJumpedBookmarkDesignId ? 'is-at-bookmark' : ''
+            }`}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={() => {
               setBookmarkTucked(false);
-              setMarksTab('separadores');
+              setMarksTab(matchedBookmarkAtCurrentPos ? 'marcadores' : 'separadores');
               setDrawer('marks');
             }}
-            title={`Separador: ${activeBookmarkDesign.name} — Pulsa para cambiar o marcar página`}
+            title={
+              matchedBookmarkAtCurrentPos
+                ? `Separador guardado aquí: ${displayedHangingDesign.name} — Pulsa para ver o cambiar`
+                : `Separador: ${displayedHangingDesign.name} — Pulsa para cambiar o marcar página`
+            }
           >
-            <img src={activeBookmarkDesign.imageUrl} alt={activeBookmarkDesign.name} />
+            <img src={displayedHangingDesign.imageUrl} alt={displayedHangingDesign.name} />
+            {(matchedBookmarkAtCurrentPos || activeJumpedBookmarkDesignId) && !bookmarkTucked && (
+              <span className="reader-hanging-bookmark-tag">Aquí</span>
+            )}
           </button>
         )}
 
@@ -1064,16 +1334,37 @@ export const ReaderShell: React.FC = () => {
             extraImages={fileData.extraImages}
             settings={readerSettings}
             annotations={bookAnnotations}
+            bookmarks={bookBookmarks}
+            bookmarkDesigns={allBookmarkDesigns}
+            defaultBookmarkDesign={activeBookmarkDesign}
             jumpTarget={effectiveJumpTarget}
             pinMode={pinMode}
+            hasOpenOverlay={hasOpenOverlay}
             viewportMode={viewportMode}
+            nextSeriesLabel={seriesNav?.nextEntry?.label}
+            onOpenNextSeriesPack={seriesNav?.nextEntry ? handleOpenNextSeriesPack : undefined}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
+            onBookmarkClick={handleBookmarkClickInReader}
             onUpdateSettings={updateReaderSettings}
-            onProgress={(page, total) => {
+            onRegisterFlush={registerReaderFlush}
+            onProgress={(page, total, scrollRatio) => {
               const pct = total ? Math.round((page / total) * 100) : 0;
-              setLivePos((prev) => ({ ...prev, page, pct }));
-              updateBook(activeBook.id, { currentPage: page, pageCount: total, progress: pct });
+              const nextLive = {
+                ...livePosRef.current,
+                page,
+                pageCount: total,
+                pct,
+                ...(scrollRatio !== undefined ? { scrollRatio } : {}),
+              };
+              livePosRef.current = nextLive;
+              setLivePos(nextLive);
+              updateBook(activeBook.id, {
+                currentPage: page,
+                pageCount: total,
+                progress: pct,
+                ...(scrollRatio !== undefined ? { scrollRatio } : {}),
+              });
             }}
           />
         ) : isPdf ? (
@@ -1082,16 +1373,37 @@ export const ReaderShell: React.FC = () => {
             blob={fileData.blob}
             settings={readerSettings}
             annotations={bookAnnotations}
+            bookmarks={bookBookmarks}
+            bookmarkDesigns={allBookmarkDesigns}
+            defaultBookmarkDesign={activeBookmarkDesign}
             jumpTarget={effectiveJumpTarget}
             pinMode={pinMode}
+            hasOpenOverlay={hasOpenOverlay}
             viewportMode={viewportMode}
+            nextSeriesLabel={seriesNav?.nextEntry?.label}
+            onOpenNextSeriesPack={seriesNav?.nextEntry ? handleOpenNextSeriesPack : undefined}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
+            onBookmarkClick={handleBookmarkClickInReader}
             onUpdateSettings={updateReaderSettings}
-            onProgress={(page, total) => {
+            onRegisterFlush={registerReaderFlush}
+            onProgress={(page, total, scrollRatio) => {
               const pct = total ? Math.round((page / total) * 100) : 0;
-              setLivePos((prev) => ({ ...prev, page, pct }));
-              updateBook(activeBook.id, { currentPage: page, pageCount: total, progress: pct });
+              const nextLive = {
+                ...livePosRef.current,
+                page,
+                pageCount: total,
+                pct,
+                ...(scrollRatio !== undefined ? { scrollRatio } : {}),
+              };
+              livePosRef.current = nextLive;
+              setLivePos(nextLive);
+              updateBook(activeBook.id, {
+                currentPage: page,
+                pageCount: total,
+                progress: pct,
+                ...(scrollRatio !== undefined ? { scrollRatio } : {}),
+              });
             }}
           />
         ) : isEpub ? (
@@ -1100,14 +1412,20 @@ export const ReaderShell: React.FC = () => {
             blob={fileData.blob}
             settings={readerSettings}
             annotations={bookAnnotations}
+            bookmarks={bookBookmarks}
             onTocLoaded={setToc}
             jumpHref={jumpHref}
             jumpTarget={effectiveJumpTarget}
+            hasOpenOverlay={hasOpenOverlay}
             viewportMode={viewportMode}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
+            onBookmarkClick={handleBookmarkClickInReader}
+            onRegisterFlush={registerReaderFlush}
             onProgress={(pct, cfi, chapter, chapterHref, page) => {
-              setLivePos({ cfi, pct, chapter, chapterHref, page });
+              const nextLive = { cfi, pct, chapter, chapterHref, page };
+              livePosRef.current = nextLive;
+              setLivePos(nextLive);
               updateBook(activeBook.id, {
                 currentCfi: cfi,
                 progress: pct,
@@ -1122,13 +1440,21 @@ export const ReaderShell: React.FC = () => {
             blob={fileData.blob}
             settings={readerSettings}
             annotations={bookAnnotations}
+            bookmarks={bookBookmarks}
+            bookmarkDesigns={allBookmarkDesigns}
+            defaultBookmarkDesign={activeBookmarkDesign}
             onTocLoaded={setToc}
             jumpHref={jumpHref}
             jumpTarget={effectiveJumpTarget}
+            hasOpenOverlay={hasOpenOverlay}
             onTextSelect={handleIncomingSelection}
             onAnnotationClick={handleAnnotationClick}
+            onBookmarkClick={handleBookmarkClickInReader}
+            onRegisterFlush={registerReaderFlush}
             onProgress={(pct, scrollRatio, chapter, chapterHref) => {
-              setLivePos({ scrollRatio, pct, chapter, chapterHref });
+              const nextLive = { scrollRatio, pct, chapter, chapterHref };
+              livePosRef.current = nextLive;
+              setLivePos(nextLive);
               updateBook(activeBook.id, {
                 scrollRatio,
                 progress: pct,
@@ -1566,7 +1892,7 @@ export const ReaderShell: React.FC = () => {
 
           {marksTab === 'separadores' ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, maxWidth: '100%' }}>
-              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
                 <button
                   type="button"
                   className="coral-cta-btn"
@@ -1590,6 +1916,82 @@ export const ReaderShell: React.FC = () => {
                   {showHangingBookmark && activeBookmarkDesign ? 'Ocultar' : 'Mostrar'}
                 </button>
               </div>
+
+              {bookBookmarks.length > 0 && (
+                <div
+                  style={{
+                    background: 'rgba(128,128,128,0.1)',
+                    borderRadius: 11,
+                    padding: 8,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 5,
+                  }}
+                >
+                  <div style={{ fontSize: 10.5, fontWeight: 800, opacity: 0.85 }}>
+                    Tus separadores en este libro ({bookBookmarks.length})
+                  </div>
+                  {bookBookmarks.slice(0, 4).map((bm) => {
+                    const bmDesign =
+                      allBookmarkDesigns.find((d) => d.id === bm.designId) || activeBookmarkDesign;
+                    return (
+                      <div
+                        key={bm.id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 7,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          {bmDesign && (
+                            <img
+                              src={bmDesign.imageUrl}
+                              alt={bmDesign.name}
+                              style={{
+                                width: 13,
+                                height: 24,
+                                objectFit: 'cover',
+                                borderRadius: 3,
+                                flexShrink: 0,
+                              }}
+                            />
+                          )}
+                          <span
+                            style={{
+                              fontSize: 11,
+                              fontWeight: 700,
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            {bm.label}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="pill-btn"
+                          style={{ height: 22, minHeight: 22, fontSize: 10, padding: '0 8px', flexShrink: 0 }}
+                          onClick={() =>
+                            triggerJump({
+                              cfi: bm.cfi,
+                              chapterHref: bm.chapterHref,
+                              page: bm.page,
+                              scrollRatio: bm.scrollRatio,
+                              bookmarkId: bm.id,
+                              bookmarkDesignId: bm.designId,
+                            })
+                          }
+                        >
+                          Ir
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
               <div style={{ fontSize: 11, fontWeight: 800, opacity: 0.8 }}>
                 Elige tu separador
@@ -1885,6 +2287,8 @@ export const ReaderShell: React.FC = () => {
                                   chapterHref: bm.chapterHref,
                                   page: bm.page,
                                   scrollRatio: bm.scrollRatio,
+                                  bookmarkId: bm.id,
+                                  bookmarkDesignId: bm.designId,
                                 })
                               }
                             >
@@ -2195,6 +2599,29 @@ export const ReaderShell: React.FC = () => {
               max={60}
               value={readerSettings.warmth}
               onChange={(e) => updateReaderSettings({ warmth: Number(e.target.value) })}
+            />
+          </label>
+
+          {/* Prevent accidental scroll jumps in continuous scroll mode */}
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+              fontSize: 11.5,
+              fontWeight: 700,
+              padding: '8px 10px',
+              borderRadius: 10,
+              background: 'rgba(128,128,128,0.1)',
+              cursor: 'pointer',
+            }}
+          >
+            <span>Tocar bordes para avanzar en scroll continuo</span>
+            <input
+              type="checkbox"
+              checked={Boolean(readerSettings.tapToScroll)}
+              onChange={(e) => updateReaderSettings({ tapToScroll: e.target.checked })}
             />
           </label>
         </aside>

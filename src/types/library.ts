@@ -31,8 +31,18 @@ export type NavSection =
   | 'favorites'
   | 'wishlist'
   | 'reading'
+  | 'manga'
   | 'audiobooks'
   | 'collections';
+
+export interface LinkedFolderConfig {
+  platform: 'desktop' | 'android' | 'web';
+  pathOrUri: string;
+  name: string;
+  autoScanOnStartup: boolean;
+  lastScannedAt?: number;
+  lastAddedCount?: number;
+}
 
 export type ReadingStatus = 'completed' | 'reading' | 'want_to_read' | 'on_hold' | 'dropped';
 
@@ -77,6 +87,7 @@ export interface BookItem {
   lastChapterFinishedAt?: number;
   lastChapterFinishedTitle?: string;
   seriesName?: string;
+  seriesNameLocked?: boolean; // Set true only when user manually edits/merges a series
   seriesOrder?: number;
   // Manga / Manhwa / Comic chapter-pack & series metadata (unused for standard books)
   chapterStart?: number;
@@ -86,6 +97,7 @@ export interface BookItem {
   genres?: string[];
   totalChaptersExpected?: number;
   originTag?: 'manga' | 'manhwa' | 'manhua' | 'comic';
+  aiEnrichedAt?: number;
   // Sync metadata
   hasLocalFile: boolean;
   nativeFileUri?: string; // Persistent Android SAF content:// URI for zero-duplication folder imports
@@ -179,6 +191,8 @@ export interface ReaderJumpTarget {
   scrollRatio?: number;
   quote?: string;
   annotationId?: string;
+  bookmarkId?: string;
+  bookmarkDesignId?: string;
 }
 
 export interface CustomSwatchItem {
@@ -260,6 +274,7 @@ export interface ReaderSettings {
   brightness: number; // 50 - 120
   warmth: number; // 0 - 60 (blue light filter)
   epubFlow: 'scrolled' | 'paginated';
+  tapToScroll?: boolean; // Optional tap-edge scrolling in continuous scroll modes (default false to prevent accidental jumps)
   defaultBookmarkDesignId?: string; // Preferred visual bookmark ribbon persisted across books & devices
 }
 

@@ -52,6 +52,7 @@ import { generateQrSvgPath } from '../utils/qrCodeSvg';
 import {
   pickExternalBackupNatively,
   pickLibraryFolderNatively,
+  supportsDesktopWatchFolder,
   supportsNativeBackupPicker,
   supportsNativeFolderPicker,
 } from '../utils/nativeBridge';
@@ -65,6 +66,12 @@ export const ImportModal: React.FC = () => {
     books,
     importFiles,
     importNativeFolderBooks,
+    linkedFolder,
+    folderAutoScanBusy,
+    linkDeviceLibraryFolder,
+    scanLinkedLibraryFolder,
+    toggleLinkedFolderAutoScan,
+    unlinkDeviceLibraryFolder,
     duplicateBooksCount,
     removeDuplicateBooks,
     importExternalBackup,
@@ -787,6 +794,96 @@ export const ImportModal: React.FC = () => {
                   {preImportDupInfo.samples.length > 0 ? ` (${preImportDupInfo.samples.join(', ')})` : ''}
                   {skipDuplicates ? ' y se omitirán automáticamente.' : ' (filtro desactivado).'}
                 </div>
+              </div>
+            )}
+
+            {/* Smart Non-Invasive Linked Library Folder (PC Electron & Android APK) */}
+            {(supportsDesktopWatchFolder() || supportsNativeFolderPicker()) && (
+              <div
+                style={{
+                  background: 'var(--banner-bg)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 14,
+                  padding: '11px 13px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <FolderOpen size={14} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />
+                      {linkedFolder ? `Carpeta vinculada: ${linkedFolder.name}` : 'Carpeta automática del dispositivo'}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.35 }}>
+                      {linkedFolder
+                        ? `Detecta libros, audiolibros y nuevos capítulos de manga/manhwa sin revisar a cada minuto.${
+                            linkedFolder.lastScannedAt
+                              ? ` Última revisión: ${new Date(linkedFolder.lastScannedAt).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}`
+                              : ''
+                          }`
+                        : 'Elige una carpeta principal de este dispositivo para detectar libros, audiolibros, mangas y nuevos capítulos automáticamente (solo al abrir la app o cuando pulses Actualizar).'}
+                    </div>
+                  </div>
+                  {!linkedFolder && (
+                    <button
+                      type="button"
+                      className="pill-btn active"
+                      style={{ height: 30, fontSize: 11.5 }}
+                      disabled={folderAutoScanBusy}
+                      onClick={() => void linkDeviceLibraryFolder()}
+                    >
+                      <FolderOpen size={13} />
+                      {folderAutoScanBusy ? 'Vinculando...' : 'Vincular carpeta'}
+                    </button>
+                  )}
+                </div>
+
+                {linkedFolder && (
+                  <>
+                    <div className="toggle-row" style={{ padding: 0 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700 }}>
+                        Revisar nuevos archivos una vez al abrir la app (no invasivo)
+                      </span>
+                      <button
+                        type="button"
+                        className={`switch ${linkedFolder.autoScanOnStartup ? 'on' : ''}`}
+                        onClick={() => toggleLinkedFolderAutoScan(!linkedFolder.autoScanOnStartup)}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="pill-btn active"
+                        style={{ height: 29, fontSize: 11 }}
+                        disabled={folderAutoScanBusy}
+                        onClick={() => void scanLinkedLibraryFolder({ silent: false })}
+                      >
+                        <RefreshCw size={12} className={folderAutoScanBusy ? 'spin' : ''} />
+                        {folderAutoScanBusy ? 'Revisando...' : 'Buscar nuevos ahora'}
+                      </button>
+                      <button
+                        type="button"
+                        className="pill-btn"
+                        style={{ height: 29, fontSize: 11 }}
+                        disabled={folderAutoScanBusy}
+                        onClick={() => void linkDeviceLibraryFolder()}
+                      >
+                        Cambiar carpeta
+                      </button>
+                      <button
+                        type="button"
+                        className="pill-btn"
+                        style={{ height: 29, fontSize: 11, color: '#c84b4e' }}
+                        disabled={folderAutoScanBusy}
+                        onClick={unlinkDeviceLibraryFolder}
+                      >
+                        Desvincular
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 

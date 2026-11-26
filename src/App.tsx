@@ -316,7 +316,7 @@ const AppWorkspace: React.FC = () => {
             <SharedReadingView />
           ) : (
             <>
-              {navSection !== 'audiobooks' && <CategoryStrip />}
+              {navSection !== 'audiobooks' && navSection !== 'manga' && <CategoryStrip />}
               <BookShelf />
             </>
           )}

@@ -13,7 +13,7 @@ import { openBookOptionsMenu } from './BookOptionsSheet';
 const LONG_PRESS_MS = 440;
 const MOVE_CANCEL_PX = 10;
 
-function useBookLongPress(book: BookItem, onOpen: (b: BookItem) => void) {
+function useBookLongPress(book: BookItem, onOpen: (b: BookItem) => void, seriesKey?: string) {
   const timerRef = useRef<number | null>(null);
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
   const longPressFiredAtRef = useRef<number>(0);
@@ -48,10 +48,10 @@ function useBookLongPress(book: BookItem, onOpen: (b: BookItem) => void) {
         } catch {
           // ignore vibration unsupported
         }
-        openBookOptionsMenu(book);
+        openBookOptionsMenu(book, seriesKey);
       }, LONG_PRESS_MS);
     },
-    [book, clearTimer]
+    [book, seriesKey, clearTimer]
   );
 
   const onPointerMove = useCallback(
@@ -73,9 +73,9 @@ function useBookLongPress(book: BookItem, onOpen: (b: BookItem) => void) {
       e.stopPropagation();
       clearTimer();
       longPressFiredAtRef.current = Date.now();
-      openBookOptionsMenu(book);
+      openBookOptionsMenu(book, seriesKey);
     },
-    [book, clearTimer]
+    [book, seriesKey, clearTimer]
   );
 
   const onClick = useCallback(
@@ -138,7 +138,7 @@ const BookCardInner: React.FC<BookCardProps> = ({
   showBookPages3D = true,
   showBookRibbons = true,
 }) => {
-  const { isPressing, handlers } = useBookLongPress(book, onOpen);
+  const { isPressing, handlers } = useBookLongPress(book, onOpen, seriesMeta?.seriesKey);
 
   const hasOriginal = hasDisplayableOriginalCover(book);
   const displayTitle = seriesMeta ? seriesMeta.title : book.title;
@@ -340,7 +340,7 @@ const BookListRowInner: React.FC<BookCardProps> = ({
   onToggleFavorite,
   onEdit,
 }) => {
-  const { isPressing, handlers } = useBookLongPress(book, onOpen);
+  const { isPressing, handlers } = useBookLongPress(book, onOpen, seriesMeta?.seriesKey);
 
   const hasOriginal = hasDisplayableOriginalCover(book);
   const displayTitle = seriesMeta ? seriesMeta.title : book.title;

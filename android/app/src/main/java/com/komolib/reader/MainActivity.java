@@ -2158,6 +2158,25 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void processLibraryFolderUri(Uri treeUri) {
+        processLibraryFolderUri(treeUri, null, null);
+    }
+
+    private static String normalizeFolderFileKey(String raw) {
+        if (raw == null) return "";
+        String base = raw;
+        int slash = Math.max(base.lastIndexOf('/'), base.lastIndexOf('\\'));
+        if (slash >= 0) base = base.substring(slash + 1);
+        int dot = base.lastIndexOf('.');
+        if (dot > 0) base = base.substring(0, dot);
+        String n = java.text.Normalizer.normalize(base, java.text.Normalizer.Form.NFD)
+            .replaceAll("[\\p{InCombiningDiacriticalMarks}]+", "")
+            .toLowerCase(Locale.ROOT)
+            .replaceAll("[^a-z0-9]+", " ")
+            .trim();
+        return n;
+    }
+
+    private void processLibraryFolderUri(Uri treeUri, Set<String> skipUris, Set<String> skipNormalizedNames) {
         new Thread(() -> {
             File scanTmp = new File(new File(getCacheDir(), "backup_import"), "komo_folder_scan.tmp");
             if (scanTmp.getParentFile() != null && !scanTmp.getParentFile().exists()) {
@@ -2189,12 +2208,30 @@ public class MainActivity extends BridgeActivity {
 
                 emitFolderStatus("Escaneando subcarpetas de \"" + (rootFolderName.isEmpty() ? "Carpeta" : rootFolderName) + "\"...", 0, 0, 0);
 
-                List<FolderBookCandidate> candidates = new ArrayList<>();
+                List<FolderBookCandidate> allCandidates = new ArrayList<>();
                 int[] skippedRef = new int[] { 0 };
-                collectFolderBooksRecursive(resolver, treeUri, rootDocId, rootFolderName, candidates, skippedRef, 0);
+                collectFolderBooksRecursive(resolver, treeUri, rootDocId, rootFolderName, allCandidates, skippedRef, 0);
+
+                List<FolderBookCandidate> candidates = new ArrayList<>();
+                if ((skipUris != null && !skipUris.isEmpty()) || (skipNormalizedNames != null && !skipNormalizedNames.isEmpty())) {
+                    for (FolderBookCandidate c : allCandidates) {
+                        String uStr = c.uri.toString();
+                        String fKey = normalizeFolderFileKey(c.fileName);
+                        if ((skipUris != null && skipUris.contains(uStr)) ||
+                            (skipNormalizedNames != null && !fKey.isEmpty() && skipNormalizedNames.contains(fKey))) {
+                            skippedRef[0]++;
+                            continue;
+                        }
+                        candidates.add(c);
+                    }
+                } else {
+                    candidates = allCandidates;
+                }
 
                 int total = candidates.size();
-                emitFolderStatus("Encontrados " + total + " archivos compatibles. Leyendo portadas y metadatos...", 0, total, 0);
+                if (total > 0) {
+                    emitFolderStatus("Encontrados " + total + " archivos nuevos. Leyendo portadas y metadatos...", 0, total, 0);
+                }
 
                 JSONArray batchArr = new JSONArray();
                 int processed = 0;
@@ -2274,10 +2311,11 @@ public class MainActivity extends BridgeActivity {
                 JSONObject done = new JSONObject();
                 try {
                     done.put("ok", true);
-                    done.put("totalFound", total);
+                    done.put("totalFound", allCandidates.size());
                     done.put("totalEmitted", processed);
                     done.put("skippedCount", skippedRef[0]);
                     done.put("rootFolderName", rootFolderName);
+                    done.put("treeUri", treeUri.toString());
                 } catch (Exception ignored) {
                 }
                 emitJsCallback("__komoNativeFolderDone", done);
@@ -2311,6 +2349,37 @@ public class MainActivity extends BridgeActivity {
         public boolean pickLibraryFolder() {
             activity.launchLibraryFolderPicker();
             return true;
+        }
+
+        @JavascriptInterface
+        public boolean rescanLibraryFolder(String treeUriStr, String skipKeysJson) {
+            if (treeUriStr == null || treeUriStr.trim().isEmpty()) return false;
+            try {
+                Uri treeUri = Uri.parse(treeUriStr.trim());
+                Set<String> skipUris = new HashSet<>();
+                Set<String> skipNames = new HashSet<>();
+                if (skipKeysJson != null && !skipKeysJson.trim().isEmpty()) {
+                    JSONObject obj = new JSONObject(skipKeysJson);
+                    JSONArray urisArr = obj.optJSONArray("uris");
+                    if (urisArr != null) {
+                        for (int i = 0; i < urisArr.length(); i++) {
+                            String u = urisArr.optString(i, "");
+                            if (!u.isEmpty()) skipUris.add(u);
+                        }
+                    }
+                    JSONArray namesArr = obj.optJSONArray("fileNames");
+                    if (namesArr != null) {
+                        for (int i = 0; i < namesArr.length(); i++) {
+                            String n = namesArr.optString(i, "");
+                            if (!n.isEmpty()) skipNames.add(n);
+                        }
+                    }
+                }
+                activity.processLibraryFolderUri(treeUri, skipUris, skipNames);
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
         }
 
         @JavascriptInterface

@@ -436,10 +436,13 @@ export const BookDetailModal: React.FC = () => {
         )}
 
         <div>
-          <label style={{ fontSize: 11, fontWeight: 700 }}>Sinopsis / Notas</label>
+          <label style={{ fontSize: 11.5, fontWeight: 700, display: 'block', marginBottom: 4 }}>
+            Sinopsis / Notas
+          </label>
           <textarea
             className="studio-input"
-            rows={2}
+            rows={6}
+            style={{ minHeight: 124, lineHeight: 1.55, resize: 'vertical' }}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
           />

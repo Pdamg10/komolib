@@ -1,8 +1,8 @@
 name: komolib
 display_name: KomoLib
-version: 1.13.0
-package_version: 1.13.0
-android_version_code: 17
+version: 1.14.2
+package_version: 1.14.2
+android_version_code: 22
 aief:
   level: L3
   locale: en
@@ -21,7 +21,7 @@ architecture:
     - name: desktop-app
       path: electron
       stack: [Electron 45, electron-builder 26, Node.js HTTP local origin server, Wayland/GPU acceleration]
-      deploy_target: Linux AppImage (Komolib-<version>.AppImage) + Windows NSIS installer
+      deploy_target: Linux AppImage (Komolib-<version>.AppImage) + Windows NSIS installer (Komolib-Setup-<version>.exe)
     - name: android-app
       path: android
       stack: [Capacitor 7, Android Gradle, Native SAF/MediaStore/OAuth Bridge (KomoAndroid)]
@@ -41,6 +41,7 @@ commands:
   run_desktop: npm run desktop:run
   build_desktop_linux: npm run desktop:build:linux
   build_desktop_win: npm run desktop:build:win
+  build_desktop_all: npm run desktop:build:all
   dev_server: npm run dev:server
   cloudflare_dev: cd cloudflare && npm run dev
   cloudflare_db_init: cd cloudflare && npm run db:init

@@ -10,6 +10,7 @@ import {
   Headphones,
   List,
   Plus,
+  RefreshCw,
   Rows3,
   Sparkles,
   X,
@@ -22,6 +23,7 @@ import {
   formatOriginBadge,
   groupLibraryForDisplay,
   type MangaSeriesGroup,
+  type OriginTag,
   type ShelfDisplayItem,
 } from '../utils/mangaSeriesUtils';
 import { getEffectiveStatus } from '../utils/readingStats';
@@ -119,6 +121,9 @@ const BookShelfInner: React.FC = () => {
     identifyBookWithAI,
     setImportModalOpen,
     setProfileModalOpen,
+    linkedFolder,
+    folderAutoScanBusy,
+    scanLinkedLibraryFolder,
     showToast,
   } = useLibrary();
 
@@ -137,6 +142,7 @@ const BookShelfInner: React.FC = () => {
   const readingFilter: ReadingFilterKey = theme.readingFilter || 'all';
 
   const [visibleCount, setVisibleCount] = useState(renderBatch);
+  const [mangaOriginFilter, setMangaOriginFilter] = useState<OriginTag | 'all'>('all');
   const [aiBatchState, setAiBatchState] = useState<{ done: number; total: number; updated: number } | null>(null);
 
   // Stable callbacks so React.memo on BookCard/BookListRow prevents mass re-renders on low-end devices
@@ -176,7 +182,7 @@ const BookShelfInner: React.FC = () => {
       if (navSection === 'wishlist' && !b.wishlist) return false;
       if (navSection === 'audiobooks' && b.format !== 'audio' && b.kind !== 'audiobook') return false;
 
-      if (activeCategory !== 'all' && navSection !== 'audiobooks') {
+      if (activeCategory !== 'all' && navSection !== 'audiobooks' && navSection !== 'manga') {
         const matchesKind = catObj?.filterKind && b.kind === catObj.filterKind;
         const matchesCat = b.categories.includes(activeCategory);
         if (!matchesKind && !matchesCat) return false;
@@ -192,12 +198,19 @@ const BookShelfInner: React.FC = () => {
 
   // Group Manga/Manhwa/Comic chapter packs into unified series (Books & Audiobooks remain 100% untouched)
   const groupedBaseItems = useMemo(() => {
-    const grouped = groupLibraryForDisplay(baseFiltered);
+    let grouped = groupLibraryForDisplay(baseFiltered);
+    if (navSection === 'manga') {
+      grouped = grouped.filter((it) => {
+        if (it.type !== 'series') return false;
+        if (mangaOriginFilter !== 'all' && it.series.originTag !== mangaOriginFilter) return false;
+        return true;
+      });
+    }
     if (navSection === 'reading') {
       return grouped.filter((it) => getDisplayItemBucket(it) === 'completed');
     }
     return grouped;
-  }, [baseFiltered, navSection]);
+  }, [baseFiltered, navSection, mangaOriginFilter]);
 
   // Reading filter counts
   const filterCounts = useMemo(() => {
@@ -277,12 +290,73 @@ const BookShelfInner: React.FC = () => {
     return list;
   }, [groupedBaseItems, effectiveReadingFilter, sortBy, sortDir]);
 
-  // Count books in current view that are missing title, author, or clean synopsis
-  const incompleteBooks = useMemo(
+  // Count items in current view that are missing metadata and haven't been checked by AI yet
+  const incompleteTargets = useMemo(
     () =>
       sortedItems
-        .map((it) => (it.type === 'series' ? it.series.primaryBook : it.book))
-        .filter((b) => bookNeedsMetadataEnrichment(b)),
+        .map((it) => {
+          if (it.type === 'series') {
+            const s = it.series;
+            const anyEnriched = s.allBooks.some((b) => Boolean(b.aiEnrichedAt));
+            const needs =
+              !anyEnriched &&
+              bookNeedsMetadataEnrichment({
+                title: s.seriesName,
+                author: s.primaryBook.author,
+                description: s.synopsis,
+                kind: s.kind,
+                genres: s.genres,
+                seriesStatus: s.seriesStatus,
+                aiEnrichedAt: anyEnriched ? 1 : undefined,
+              });
+            return needs
+              ? {
+                  id: s.primaryBook.id,
+                  seriesBookIds: s.allBooks.map((b) => b.id),
+                  isVisualSeries: true,
+                  seriesName: s.seriesName,
+                }
+              : null;
+          }
+          return bookNeedsMetadataEnrichment(it.book)
+            ? {
+                id: it.book.id,
+                seriesBookIds: undefined,
+                isVisualSeries: false,
+                seriesName: undefined,
+              }
+            : null;
+        })
+        .filter((x): x is NonNullable<typeof x> => Boolean(x)),
+    [sortedItems]
+  );
+
+  // Targets eligible for AI type classification (Manga/Manhwa/Manhua/Cómic vs Libro) & series name unification
+  // Only inspects PDF/CBZ/CBR/Images so standard EPUB/MOBI/TXT books remain 100% untouched.
+  const visualClassifyTargets = useMemo(
+    () =>
+      sortedItems
+        .map((it) => {
+          if (it.type === 'series') {
+            return {
+              id: it.series.primaryBook.id,
+              seriesBookIds: it.series.allBooks.map((b) => b.id),
+              isVisualSeries: true,
+              seriesName: it.series.seriesName,
+            };
+          }
+          const fmt = it.book.format;
+          if (fmt === 'pdf' || fmt === 'cbz' || fmt === 'cbr' || fmt === 'images') {
+            return {
+              id: it.book.id,
+              seriesBookIds: undefined,
+              isVisualSeries: false,
+              seriesName: undefined,
+            };
+          }
+          return null;
+        })
+        .filter((x): x is NonNullable<typeof x> => Boolean(x)),
     [sortedItems]
   );
 
@@ -407,6 +481,8 @@ const BookShelfInner: React.FC = () => {
       ? 'Por leer'
       : navSection === 'reading'
       ? 'Lecturas terminadas'
+      : navSection === 'manga'
+      ? 'Mangas, Manhwas y Cómics'
       : navSection === 'audiobooks'
       ? 'Audiolibros'
       : navSection === 'collections'
@@ -432,29 +508,65 @@ const BookShelfInner: React.FC = () => {
     await importFiles(list, { kind: 'audiobook', categories: ['audiobooks'] });
   };
 
-  const handleBatchAiEnrich = async () => {
-    if (aiBatchState || incompleteBooks.length === 0) return;
+  const runAiBatchOnTargets = async (
+    list: Array<{
+      id: string;
+      seriesBookIds?: string[];
+      isVisualSeries: boolean;
+      seriesName?: string;
+    }>,
+    modeLabel: string
+  ) => {
+    if (aiBatchState || list.length === 0) return;
     aiCancelRef.current = false;
-    const targets = incompleteBooks.slice(0, 30);
+    const targets = list.slice(0, 40);
     setAiBatchState({ done: 0, total: targets.length, updated: 0 });
     let updated = 0;
+    let consecutiveFailures = 0;
+    let rateLimited = false;
+
     for (let i = 0; i < targets.length; i++) {
       if (aiCancelRef.current) break;
-      const res = await identifyBookWithAI(targets[i].id, { silent: true });
-      if (res) updated++;
+      const t = targets[i];
+      const res = await identifyBookWithAI(t.id, {
+        silent: true,
+        seriesBookIds: t.seriesBookIds,
+        isVisualSeries: t.isVisualSeries,
+        seriesName: t.seriesName,
+      });
+      if (res) {
+        updated++;
+        consecutiveFailures = 0;
+      } else {
+        consecutiveFailures++;
+        if (consecutiveFailures >= 3) {
+          rateLimited = true;
+          break;
+        }
+      }
       setAiBatchState({ done: i + 1, total: targets.length, updated });
-      // Tiny pause between requests to keep Render & low-end phones responsive
-      await new Promise((r) => window.setTimeout(r, 220));
+      await new Promise((r) => window.setTimeout(r, 420));
     }
     setAiBatchState(null);
     showToast(
-      aiCancelRef.current
-        ? `Análisis detenido (${updated} libro${updated === 1 ? '' : 's'} actualizado${updated === 1 ? '' : 's'})`
-        : `IA completada: ${updated} de ${targets.length} libro${targets.length === 1 ? '' : 's'} actualizado${updated === 1 ? '' : 's'}`
+      rateLimited
+        ? `${modeLabel} pausada por límite temporal (${updated} revisado${updated === 1 ? '' : 's'})`
+        : aiCancelRef.current
+        ? `${modeLabel} detenida (${updated} revisado${updated === 1 ? '' : 's'})`
+        : `${modeLabel} completada: ${updated} de ${targets.length} revisado${targets.length === 1 ? '' : 's'}`
     );
   };
 
+  const handleBatchAiEnrich = async () => {
+    await runAiBatchOnTargets(incompleteTargets, 'IA');
+  };
+
+  const handleBatchClassifyAndUnify = async () => {
+    await runAiBatchOnTargets(visualClassifyTargets, 'Clasificación y unión con IA');
+  };
+
   const isAudiobooksView = navSection === 'audiobooks';
+  const isMangaView = navSection === 'manga';
 
   return (
     <section aria-label={sectionLabel} className="shelf-section">
@@ -487,15 +599,27 @@ const BookShelfInner: React.FC = () => {
             </button>
           )}
 
-          {incompleteBooks.length > 0 && !aiBatchState && (
+          {incompleteTargets.length > 0 && !aiBatchState && (
             <button
               type="button"
               className="pill-btn"
               style={{ height: 30, fontSize: 11 }}
               onClick={() => void handleBatchAiEnrich()}
-              title="Analiza la portada y primeras páginas con IA para completar título, autor y sinopsis"
+              title="Analiza la portada y metadatos con IA para completar título, autor, géneros y sinopsis"
             >
-              <Sparkles size={12} /> Completar con IA ({incompleteBooks.length})
+              <Sparkles size={12} /> Completar con IA ({incompleteTargets.length})
+            </button>
+          )}
+
+          {visualClassifyTargets.length > 0 && !aiBatchState && (navSection === 'manga' || navSection === 'home') && (
+            <button
+              type="button"
+              className="pill-btn"
+              style={{ height: 30, fontSize: 11 }}
+              onClick={() => void handleBatchClassifyAndUnify()}
+              title="Usa la IA para distinguir Manga, Manhwa, Manhua, Cómic o Libro en tus PDFs/CBZ/CBR y unir series con nombres distintos"
+            >
+              <Sparkles size={12} /> Clasificar y unir con IA
             </button>
           )}
 
@@ -509,11 +633,25 @@ const BookShelfInner: React.FC = () => {
               }}
               title="Toca para detener el análisis con IA"
             >
-              <Sparkles size={12} /> IA {aiBatchState.done}/{aiBatchState.total} <X size={11} />
+              <Sparkles size={12} /> IA {aiBatchState.done}/{aiBatchState.total} (faltan {incompleteTargets.length}) <X size={11} />
             </button>
           )}
 
-          {activeCategory !== 'all' && !isAudiobooksView && (
+          {linkedFolder && (
+            <button
+              type="button"
+              className="pill-btn"
+              style={{ height: 30, fontSize: 11 }}
+              disabled={folderAutoScanBusy}
+              onClick={() => void scanLinkedLibraryFolder({ silent: false })}
+              title={`Buscar archivos nuevos en tu carpeta vinculada "${linkedFolder.name}" (no revisa en segundo plano)`}
+            >
+              <RefreshCw size={12} className={folderAutoScanBusy ? 'spin' : ''} />
+              {folderAutoScanBusy ? 'Buscando...' : 'Actualizar carpeta'}
+            </button>
+          )}
+
+          {activeCategory !== 'all' && !isAudiobooksView && !isMangaView && (
             <button className="pill-btn" style={{ height: 30, fontSize: 11 }} onClick={() => setActiveCategory('all')}>
               Ver todos
             </button>
@@ -570,6 +708,30 @@ const BookShelfInner: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Dedicated Origin Sub-Filter Pills inside the Manga/Manhwa/Comic section */}
+      {isMangaView && (
+        <div className="shelf-filter-pills" style={{ marginBottom: 8 }} role="group" aria-label="Filtrar por tipo">
+          {(
+            [
+              ['all', 'Todos'],
+              ['manhwa', '#Manhwa 🇰🇷'],
+              ['manga', '#Manga 🇯🇵'],
+              ['manhua', '#Manhua 🇨🇳'],
+              ['comic', '#Cómic'],
+            ] as Array<[OriginTag | 'all', string]>
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              className={`pill-btn shelf-filter-btn ${mangaOriginFilter === key ? 'active' : ''}`}
+              onClick={() => setMangaOriginFilter(key)}
+            >
+              <span>{label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Row 2: Reading Filter Pills + Sort Selector */}
       <div className="shelf-controls-bar">

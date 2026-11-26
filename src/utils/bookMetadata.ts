@@ -672,10 +672,25 @@ export function bookNeedsMetadataEnrichment(book: {
   title?: string;
   author?: string;
   description?: string;
+  kind?: string;
+  genres?: string[];
+  seriesStatus?: string;
+  aiEnrichedAt?: number;
 }): boolean {
+  // Already processed by AI: never trap the batch counter in an infinite retry loop
+  if (book.aiEnrichedAt && book.aiEnrichedAt > 0) return false;
+
+  const isVisual = book.kind === 'manga' || book.kind === 'manhwa' || book.kind === 'comic';
+  const cleanedDesc = cleanSynopsisText(book.description);
+  if (isVisual) {
+    if (!cleanedDesc || cleanedDesc.length < 28) return true;
+    if (!book.genres || book.genres.length === 0) return true;
+    if (!book.seriesStatus) return true;
+    return false;
+  }
+
   if (isGenericTitle(book.title)) return true;
   if (isGenericAuthor(book.author)) return true;
-  const cleanedDesc = cleanSynopsisText(book.description);
   if (!cleanedDesc || cleanedDesc.length < 28) return true;
   // Detect if stored description still has raw noise compared to cleaned version
   if (book.description && book.description.trim() !== cleanedDesc && /[<&#\uFFFD]|^\s*[\d#*_|~]{3,}/.test(book.description)) {

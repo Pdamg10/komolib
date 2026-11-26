@@ -6,6 +6,7 @@ import {
   BookMarked,
   ClipboardList,
   Headphones,
+  Layers,
   LayoutGrid,
   Palette,
   Star,
@@ -53,6 +54,11 @@ export const Sidebar: React.FC = () => {
       id: 'reading',
       label: 'Lecturas terminadas',
       icon: <BookCheck size={19} />,
+    },
+    {
+      id: 'manga',
+      label: 'Mangas, Manhwas y Cómics',
+      icon: <Layers size={19} />,
     },
     {
       id: 'audiobooks',

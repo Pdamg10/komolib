@@ -528,20 +528,32 @@ export async function sendAiChatViaServer(
 export interface AiIdentifyBookResponse {
   ok: boolean;
   model?: string;
+  detectedKind?: 'book' | 'audiobook' | 'manga' | 'manhwa' | 'comic';
   title?: string;
   author?: string;
   description?: string;
+  seriesName?: string;
+  originTag?: 'manga' | 'manhwa' | 'manhua' | 'comic';
+  genres?: string[];
+  seriesStatus?: 'ongoing' | 'completed' | 'hiatus' | 'cancelled';
+  totalChaptersExpected?: number;
 }
 
 export async function identifyBookWithAiApi(
   config: SyncConfig,
   payload: {
     fileName?: string;
+    folderPath?: string;
+    format?: string;
+    currentKind?: string;
     currentTitle?: string;
     currentAuthor?: string;
     currentDescription?: string;
     coverDataUrl?: string;
     textExcerpt?: string;
+    isVisualSeries?: boolean;
+    seriesName?: string;
+    existingSeriesNames?: string[];
   }
 ): Promise<AiIdentifyBookResponse> {
   const base = resolveServerUrl(config.serverUrl || 'http://localhost:4123');

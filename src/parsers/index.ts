@@ -1,6 +1,7 @@
 import type { BookFormat, BookItem, ContentKind } from '../types/library';
 import { cleanSynopsisText, resolveBookTitleAndAuthor } from '../utils/bookMetadata';
 import { isRasterCoverDataUrl } from '../utils/coverHelpers';
+import { isVisualSeriesKind, parseChapterPackInfo } from '../utils/mangaSeriesUtils';
 import { extractAudioMetaAndCover } from './audioCoverParser';
 import { extractCbrCoverAndCount, extractCbzCoverAndCount } from './comicParser';
 import {
@@ -63,14 +64,9 @@ export function guessContentKind(fileName: string, format: BookFormat): ContentK
   }
   if (format === 'pdf') {
     const base = lower.replace(/\.pdf$/i, '').trim();
-    const rangeMatch = base.match(/(?:^|[\s\-–—_:|(\[])(\d{1,4})\s*(?:[-–—~]|al)\s*(\d{1,4})\s*[\])]*$/i);
-    if (rangeMatch) {
-      const a = Number(rangeMatch[1]);
-      const b = Number(rangeMatch[2]);
-      const looksLikeYears = a >= 1950 && a <= 2099 && b >= 1950 && b <= 2099;
-      if (!looksLikeYears && b >= a && b - a <= 500) {
-        return 'manhwa';
-      }
+    const parsedPack = parseChapterPackInfo('', fileName, '', 'manhwa');
+    if (parsedPack.isExplicitPattern) {
+      return parsedPack.originTag === 'comic' ? 'comic' : parsedPack.originTag === 'manga' ? 'manga' : 'manhwa';
     }
     if (/scans?|fansub|olympus|meian|ikigai|tmo/i.test(base)) {
       return 'manhwa';
@@ -185,13 +181,24 @@ export async function importSingleFile(
   } catch (err) {
     console.warn('Cover/metadata extraction fallback:', err);
   }
-  const resolvedMeta = resolveBookTitleAndAuthor({
-    fileName: file.name,
-    metaTitle: extracted.title,
-    metaAuthor: extracted.author,
-  });
-  if (!overrides?.title) title = resolvedMeta.title;
-  if (!overrides?.author) author = resolvedMeta.author;
+  if (isVisualSeriesKind(kind)) {
+    // Keep clean filename-derived title for visual series so chapter ranges ("Nombre - Cap 1-30")
+    // are never split into fake author names or overwritten by garbage PDF info.Title!
+    if (!overrides?.title) {
+      title = cleanFileTitle(file.name) || title;
+    }
+    if (!overrides?.author && extracted.author && extracted.author.length >= 2) {
+      author = extracted.author;
+    }
+  } else {
+    const resolvedMeta = resolveBookTitleAndAuthor({
+      fileName: file.name,
+      metaTitle: extracted.title,
+      metaAuthor: extracted.author,
+    });
+    if (!overrides?.title) title = resolvedMeta.title;
+    if (!overrides?.author) author = resolvedMeta.author;
+  }
   if (extracted.description) description = cleanSynopsisText(extracted.description) || '';
   if (extracted.coverDataUrl) coverDataUrl = extracted.coverDataUrl;
   if (extracted.pageCount !== undefined) pageCount = extracted.pageCount;

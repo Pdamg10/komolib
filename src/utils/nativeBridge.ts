@@ -7,6 +7,7 @@ interface KomoAndroidBridge {
   readBackupChunk?: (chunkIndex: number) => string;
   clearBackupTemp?: () => void;
   pickLibraryFolder?: () => boolean;
+  rescanLibraryFolder?: (treeUri: string, skipKeysJson: string) => boolean;
   getNativeUriSize?: (uri: string) => number;
   readNativeUriChunk?: (uri: string, chunkIndex: number) => string;
   openExternalUrl?: (url: string) => boolean;
@@ -32,6 +33,16 @@ export interface NativeFolderScanResult {
   totalEmitted: number;
   skippedCount: number;
   rootFolderName?: string;
+  treeUri?: string;
+}
+
+export interface DesktopScannedFileItem {
+  fullPath: string;
+  fileName: string;
+  folderPath: string;
+  fileSize: number;
+  mimeType: string;
+  mtimeMs: number;
 }
 
 export interface NativePickedBackup {
@@ -50,6 +61,17 @@ interface KomoDesktopBridge {
   isDesktop?: boolean;
   platform?: string;
   openExternal?: (url: string) => Promise<boolean> | boolean;
+  pickWatchFolder?: () => Promise<{ path: string; name: string } | null>;
+  scanWatchFolder?: (
+    folderPath: string,
+    knownKeys?: string[]
+  ) => Promise<{
+    ok: boolean;
+    error?: string;
+    totalFound: number;
+    newFiles: DesktopScannedFileItem[];
+  }>;
+  readWatchFile?: (fullPath: string, rootHint?: string) => Promise<Uint8Array | null>;
 }
 
 function getBridge(): KomoAndroidBridge | undefined {
@@ -111,6 +133,62 @@ export function supportsNativeBackupPicker(): boolean {
 export function supportsNativeFolderPicker(): boolean {
   const b = getBridge();
   return Boolean(b?.pickLibraryFolder && b?.readNativeUriChunk);
+}
+
+export function supportsDesktopWatchFolder(): boolean {
+  const d = getDesktopBridge();
+  return Boolean(d?.pickWatchFolder && d?.scanWatchFolder && d?.readWatchFile);
+}
+
+export function supportsSmartLinkedFolder(): boolean {
+  return (
+    supportsDesktopWatchFolder() ||
+    Boolean(getBridge()?.pickLibraryFolder && getBridge()?.rescanLibraryFolder) ||
+    (typeof window !== 'undefined' && 'showDirectoryPicker' in window)
+  );
+}
+
+export async function pickDesktopWatchFolder(): Promise<{ path: string; name: string } | null> {
+  const d = getDesktopBridge();
+  if (!d?.pickWatchFolder) return null;
+  return d.pickWatchFolder();
+}
+
+export async function scanDesktopWatchFolder(
+  folderPath: string,
+  knownKeys: string[] = []
+): Promise<{
+  ok: boolean;
+  error?: string;
+  totalFound: number;
+  newFiles: DesktopScannedFileItem[];
+}> {
+  const d = getDesktopBridge();
+  if (!d?.scanWatchFolder) {
+    return { ok: false, error: 'Solo disponible en la app de escritorio', totalFound: 0, newFiles: [] };
+  }
+  return d.scanWatchFolder(folderPath, knownKeys);
+}
+
+export async function readDesktopWatchFileAsFile(
+  item: DesktopScannedFileItem,
+  rootHint: string
+): Promise<File | null> {
+  const d = getDesktopBridge();
+  if (!d?.readWatchFile) return null;
+  const raw = await d.readWatchFile(item.fullPath, rootHint);
+  if (!raw || raw.byteLength === 0) return null;
+  const bytes = new Uint8Array(raw.byteLength);
+  bytes.set(raw);
+  const f = new File([bytes], item.fileName, {
+    type: item.mimeType || 'application/octet-stream',
+    lastModified: item.mtimeMs || Date.now(),
+  });
+  Object.defineProperty(f, '_komoRelativePath', {
+    value: item.folderPath ? `${item.folderPath}/${item.fileName}` : item.fileName,
+    configurable: true,
+  });
+  return f;
 }
 
 /**
@@ -176,6 +254,7 @@ export function pickLibraryFolderNatively(
         totalEmitted?: number;
         skippedCount?: number;
         rootFolderName?: string;
+        treeUri?: string;
       }) => void;
     };
 
@@ -217,6 +296,7 @@ export function pickLibraryFolderNatively(
           totalEmitted: res.totalEmitted || 0,
           skippedCount: res.skippedCount || 0,
           rootFolderName: res.rootFolderName,
+          treeUri: res.treeUri,
         });
       });
     };
@@ -229,6 +309,102 @@ export function pickLibraryFolderNatively(
         err instanceof Error
           ? err
           : new Error('No se pudo abrir el selector nativo de carpetas de Android.')
+      );
+    }
+  });
+}
+
+/**
+ * Re-scans an already-linked persistent Android SAF folder URI without opening the OS picker,
+ * skipping already-imported URIs/filenames on the native thread so checks take milliseconds.
+ */
+export function rescanLibraryFolderNatively(
+  treeUri: string,
+  skipKeys: { uris: string[]; fileNames: string[] },
+  onBatch: (items: NativeScannedFolderBook[], progress: { processed: number; total: number }) => Promise<void> | void,
+  onStatus?: (info: { message?: string; processed?: number; total?: number; coversFound?: number }) => void
+): Promise<NativeFolderScanResult | null> {
+  const bridge = getBridge();
+  if (!treeUri || !bridge?.rescanLibraryFolder) {
+    return Promise.resolve(null);
+  }
+
+  return new Promise((resolve, reject) => {
+    const win = window as unknown as {
+      __komoNativeFolderStatus?: (info: {
+        message?: string;
+        processed?: number;
+        total?: number;
+        coversFound?: number;
+      }) => void;
+      __komoNativeFolderBatch?: (payload: {
+        items?: NativeScannedFolderBook[];
+        processed?: number;
+        total?: number;
+      }) => void;
+      __komoNativeFolderDone?: (res: {
+        ok?: boolean;
+        cancelled?: boolean;
+        error?: string;
+        totalFound?: number;
+        totalEmitted?: number;
+        skippedCount?: number;
+        rootFolderName?: string;
+        treeUri?: string;
+      }) => void;
+    };
+
+    let batchChain: Promise<void> = Promise.resolve();
+
+    const cleanup = () => {
+      delete win.__komoNativeFolderStatus;
+      delete win.__komoNativeFolderBatch;
+      delete win.__komoNativeFolderDone;
+    };
+
+    win.__komoNativeFolderStatus = (info) => {
+      onStatus?.(info || {});
+    };
+
+    win.__komoNativeFolderBatch = (payload) => {
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const processed = payload?.processed || 0;
+      const total = payload?.total || processed;
+      if (!items.length) return;
+      batchChain = batchChain
+        .then(() => onBatch(items, { processed, total }))
+        .catch(() => undefined);
+    };
+
+    win.__komoNativeFolderDone = (res) => {
+      batchChain.finally(() => {
+        cleanup();
+        if (!res || res.cancelled) {
+          resolve(null);
+          return;
+        }
+        if (!res.ok) {
+          reject(new Error(res.error || 'No se pudo re-escanear la carpeta vinculada en Android.'));
+          return;
+        }
+        resolve({
+          totalFound: res.totalFound || 0,
+          totalEmitted: res.totalEmitted || 0,
+          skippedCount: res.skippedCount || 0,
+          rootFolderName: res.rootFolderName,
+          treeUri: res.treeUri || treeUri,
+        });
+      });
+    };
+
+    try {
+      bridge.rescanLibraryFolder!(treeUri, JSON.stringify(skipKeys));
+    } catch (err) {
+      cleanup();
+      reject(
+        err instanceof Error
+          ? err
+          : new Error('No se pudo re-escanear la carpeta vinculada en Android.')
       );
     }
   });

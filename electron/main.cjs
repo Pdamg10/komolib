@@ -1,15 +1,105 @@
-const { app, BrowserWindow, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron');
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-// GPU & Wayland tuning optimized for smooth scrolling across both modern & low-end PCs
+const SUPPORTED_WATCH_EXTS = new Set([
+  '.epub', '.pdf', '.cbz', '.cbr', '.zip', '.rar',
+  '.txt', '.md', '.markdown', '.html', '.htm', '.fb2',
+  '.mobi', '.azw', '.azw3', '.prc', '.docx',
+  '.mp3', '.m4b', '.m4a', '.aac', '.ogg', '.oga', '.opus',
+  '.wav', '.flac', '.webm', '.wma', '.amr', '.3gp', '.aif', '.aiff', '.caf', '.alac', '.ac3', '.mp2', '.mka',
+]);
+
+const WATCH_MIME_BY_EXT = {
+  '.epub': 'application/epub+zip',
+  '.pdf': 'application/pdf',
+  '.cbz': 'application/vnd.comicbook+zip',
+  '.zip': 'application/zip',
+  '.cbr': 'application/vnd.comicbook-rar',
+  '.rar': 'application/vnd.rar',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.markdown': 'text/markdown',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.fb2': 'application/x-fictionbook+xml',
+  '.mobi': 'application/x-mobipocket-ebook',
+  '.azw': 'application/vnd.amazon.ebook',
+  '.azw3': 'application/vnd.amazon.ebook',
+  '.prc': 'application/x-mobipocket-ebook',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.mp3': 'audio/mpeg',
+  '.m4b': 'audio/mp4',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/opus',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.webm': 'audio/webm',
+  '.wma': 'audio/x-ms-wma',
+};
+
+let allowedWatchRoot = '';
+
+function normalizeWatchKey(raw) {
+  return String(raw || '')
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.[^.]+$/, '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+async function scanDirectoryRecursive(rootDir, currentDir, depth, knownKeySet, results, stats) {
+  if (depth > 8 || results.length >= 2500) return;
+  let entries;
+  try {
+    entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '__MACOSX') continue;
+    const fullPath = path.join(currentDir, entry.name);
+    if (entry.isDirectory()) {
+      await scanDirectoryRecursive(rootDir, fullPath, depth + 1, knownKeySet, results, stats);
+    } else if (entry.isFile()) {
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!SUPPORTED_WATCH_EXTS.has(ext)) continue;
+      stats.totalFound += 1;
+      const key = normalizeWatchKey(entry.name);
+      if (key && knownKeySet.has(key)) continue;
+      try {
+        const st = await fs.promises.stat(fullPath);
+        if (!st.isFile() || st.size <= 0) continue;
+        const relDir = path.relative(rootDir, currentDir).replace(/\\/g, '/');
+        const rootBase = path.basename(rootDir);
+        const folderPath = relDir ? `${rootBase}/${relDir}` : rootBase;
+        results.push({
+          fullPath,
+          fileName: entry.name,
+          folderPath,
+          fileSize: st.size,
+          mimeType: WATCH_MIME_BY_EXT[ext] || 'application/octet-stream',
+          mtimeMs: st.mtimeMs,
+        });
+      } catch {
+        // skip unreadable file
+      }
+    }
+  }
+}
+
+// Balanced Wayland/X11 & memory tuning for smooth scrolling with low RAM/CPU footprint
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
-app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch(
-  'enable-features',
-  'WaylandWindowDecorations,CanvasOopRasterization'
-);
+app.commandLine.appendSwitch('enable-features', 'WaylandWindowDecorations');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=1024');
 
 // Pin userData to a single stable lowercase directory across Linux (case-sensitive!) and Windows
 // so app name / packaging changes NEVER split IndexedDB/localStorage into a fresh empty profile.
@@ -235,7 +325,7 @@ async function createWindow(port) {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
-      backgroundThrottling: false,
+      backgroundThrottling: true,
     },
   });
 
@@ -282,6 +372,54 @@ if (!gotLock) {
       return true;
     }
     return false;
+  });
+
+  ipcMain.handle('komo:pickWatchFolder', async () => {
+    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Seleccionar carpeta de biblioteca KomoLib',
+      properties: ['openDirectory'],
+    });
+    if (res.canceled || !res.filePaths || res.filePaths.length === 0) return null;
+    const selected = path.resolve(res.filePaths[0]);
+    allowedWatchRoot = selected;
+    return { path: selected, name: path.basename(selected) || selected };
+  });
+
+  ipcMain.handle('komo:scanWatchFolder', async (_event, folderPath, knownKeys = []) => {
+    if (typeof folderPath !== 'string' || !folderPath.trim()) {
+      return { ok: false, error: 'Carpeta inválida', totalFound: 0, newFiles: [] };
+    }
+    const resolved = path.resolve(folderPath);
+    try {
+      const st = await fs.promises.stat(resolved);
+      if (!st.isDirectory()) {
+        return { ok: false, error: 'La carpeta ya no existe', totalFound: 0, newFiles: [] };
+      }
+    } catch {
+      return { ok: false, error: 'No se pudo acceder a la carpeta', totalFound: 0, newFiles: [] };
+    }
+    allowedWatchRoot = resolved;
+    const knownKeySet = new Set(Array.isArray(knownKeys) ? knownKeys.map((k) => String(k || '')) : []);
+    const newFiles = [];
+    const stats = { totalFound: 0 };
+    await scanDirectoryRecursive(resolved, resolved, 0, knownKeySet, newFiles, stats);
+    return { ok: true, totalFound: stats.totalFound, newFiles };
+  });
+
+  ipcMain.handle('komo:readWatchFile', async (_event, fullPath, rootHint = '') => {
+    if (typeof fullPath !== 'string' || !fullPath.trim()) return null;
+    const resolvedFile = path.resolve(fullPath);
+    const root = allowedWatchRoot || (typeof rootHint === 'string' && rootHint ? path.resolve(rootHint) : '');
+    if (!root || (!resolvedFile.startsWith(root + path.sep) && resolvedFile !== root)) {
+      return null;
+    }
+    try {
+      const buf = await fs.promises.readFile(resolvedFile);
+      return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    } catch {
+      return null;
+    }
   });
 
   app.whenReady().then(async () => {

@@ -1,4 +1,5 @@
 import * as pdfjsLib from 'pdfjs-dist';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 const resolvedWorkerSrc = (() => {
@@ -16,13 +17,14 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = resolvedWorkerSrc;
 
 export { pdfjsLib };
 
-export async function openPdfDocumentReliably(data: Uint8Array) {
+export async function openPdfDocumentReliably(data: Uint8Array): Promise<PDFDocumentProxy> {
   try {
-    return await pdfjsLib.getDocument({ data: data.slice(), isEvalSupported: false }).promise;
+    // Pass data directly (avoid duplicating 150-300 MB buffers via data.slice())
+    return await pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
   } catch {
     // Android WebView fallback when ES module Web Worker cannot be instantiated
     return await pdfjsLib.getDocument({
-      data: data.slice(),
+      data,
       isEvalSupported: false,
       useWorkerFetch: false,
       disableFontFace: true,
@@ -32,11 +34,48 @@ export async function openPdfDocumentReliably(data: Uint8Array) {
   }
 }
 
+/**
+ * Fast, zero-copy PDF loader using an Object URL so PDF.js streams only the XRef table
+ * and requested pages instead of copying 100-400 MB Manhwa PDFs into RAM upfront!
+ */
+export async function openPdfFromBlobReliably(
+  blob: Blob
+): Promise<{ doc: PDFDocumentProxy; cleanup: () => void }> {
+  const objectUrl = URL.createObjectURL(blob);
+  const cleanup = () => {
+    try {
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      // ignore
+    }
+  };
+
+  try {
+    const doc = await pdfjsLib.getDocument({
+      url: objectUrl,
+      isEvalSupported: false,
+      disableAutoFetch: true,
+      disableStream: false,
+    }).promise;
+    return { doc, cleanup };
+  } catch {
+    // Fallback for WebViews that block worker Blob URL fetches
+    try {
+      const data = new Uint8Array(await blob.arrayBuffer());
+      const doc = await openPdfDocumentReliably(data);
+      cleanup();
+      return { doc, cleanup: () => undefined };
+    } catch (err) {
+      cleanup();
+      throw err;
+    }
+  }
+}
+
 export async function extractPdfMetaAndCover(
   blob: Blob
 ): Promise<{ title?: string; author?: string; coverDataUrl?: string; pageCount: number }> {
-  const data = new Uint8Array(await blob.arrayBuffer());
-  const pdf = await openPdfDocumentReliably(data);
+  const { doc: pdf, cleanup } = await openPdfFromBlobReliably(blob);
 
   let title: string | undefined;
   let author: string | undefined;
@@ -57,19 +96,21 @@ export async function extractPdfMetaAndCover(
   try {
     const page = await pdf.getPage(1);
     const baseViewport = page.getViewport({ scale: 1 });
-    const targetWidth = 480;
-    const scale = Math.min(1.6, Math.max(0.45, targetWidth / Math.max(1, baseViewport.width)));
+    // Always capture the TOP first image of Page 1 at full crisp 420px cover width (2:3 max crop)
+    // so ultra-tall webtoon/manhwa strips never shrink into skinny unreadable slivers!
+    const targetWidth = 420;
+    const scale = Math.min(1.6, Math.max(0.4, targetWidth / Math.max(1, baseViewport.width)));
     const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(viewport.width));
-    canvas.height = Math.max(1, Math.round(viewport.height));
-    const ctx = canvas.getContext('2d');
+    const maxCoverHeight = Math.round(canvas.width * 1.55);
+    canvas.height = Math.max(1, Math.min(Math.round(viewport.height), maxCoverHeight));
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (ctx) {
-      // Fill white page background so transparent PDFs never export black in JPEG
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: ctx, viewport }).promise;
-      coverDataUrl = canvas.toDataURL('image/jpeg', 0.88);
+      coverDataUrl = canvas.toDataURL('image/jpeg', 0.86);
     }
   } catch {
     // fallback cover
@@ -77,5 +118,6 @@ export async function extractPdfMetaAndCover(
 
   const pageCount = pdf.numPages;
   await pdf.destroy();
+  cleanup();
   return { title, author, coverDataUrl, pageCount };
 }
